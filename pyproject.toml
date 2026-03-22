@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pilidar-rtk"
+version = "0.1.0"
+description = "RTK-enabled LiDAR scanning rover"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+rover = "rover.main:main"
+
+[project.optional-dependencies]
+pi = [
+    "rpi-lgpio",
+    "picamera2",
+    "smbus2",
+    "pyserial",
+]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

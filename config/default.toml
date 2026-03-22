@@ -1,0 +1,79 @@
+# RTK LiDAR Rover Configuration
+# Version: 1.0
+
+[general]
+device_name = "rover-01"          # Device identifier
+log_level = "INFO"                # DEBUG, INFO, WARNING, ERROR
+
+[lidar]
+enabled = true
+port = "/dev/ttyUSB0"             # Serial port (USB-serial adapter)
+baud = 230400                     # LD19 default baud rate
+scan_rate_hz = 10                 # Target scan rate (1–20)
+
+[stepper]
+enabled = true
+steps_per_rev = 3200              # With 1/16 microstepping (D-017)
+rpm = 1.0                         # Rotation speed
+step_interval_deg = 1.5           # Degrees per step
+direction_pin = 17                # BCM GPIO
+step_pin = 27                     # BCM GPIO
+enable_pin = 22                   # BCM GPIO (active low)
+
+[imu]
+enabled = true
+bus = 1                           # I2C bus number
+address = 0x68                    # MPU-9250 address (or 0x69)
+sample_rate_hz = 200              # IMU polling rate
+fusion_output_hz = 100            # Madgwick output rate
+use_magnetometer = true           # Enable mag (disable during motor — D-013)
+fusion_beta = 0.1                 # Madgwick filter gain
+
+[gnss]
+enabled = true
+port = "/dev/ttyACM0"             # ZED-F9P USB port
+baud = 115200                     # Default F9P baud
+rtcm_profile = "robust"           # "robust" or "low_bandwidth"
+survey_in_duration_sec = 300      # Base station survey-in time
+survey_in_accuracy_m = 0.02       # Target accuracy (2 cm)
+
+[lora]
+enabled = true
+port = "/dev/ttyUSB1"             # ESP32 serial port
+baud = 115200
+spreading_factor = 9              # 7–12
+bandwidth_khz = 125               # 125, 250, or 500
+coding_rate = "4/5"               # "4/5", "4/6", "4/7", "4/8"
+telemetry_interval_sec = 1.0      # Status packet transmit rate
+
+[camera]
+enabled = true
+resolution = [1920, 1080]         # Width × Height
+capture_cadence = 1               # Capture every N steps (1 = every step)
+jpeg_quality = 85                 # JPEG compression (1–100)
+output_folder = "images"          # Relative to session folder
+
+[logging]
+output_dir = "/home/pi/rover/data"
+session_prefix = "scan"           # Session folder prefix
+format = "jsonl"                  # "jsonl" or "csv"
+flush_interval_sec = 5.0          # Force flush interval
+rotate_size_mb = 100              # Rotate log at this size (0 = no rotate)
+save_images = true                # Save camera images
+
+[watchdog]
+enabled = true
+timeout_sec = 30                  # Restart if no heartbeat
+heartbeat_interval_sec = 5        # Internal heartbeat rate
+
+[power]
+monitor_battery = true
+battery_adc_channel = 0           # ADC channel for voltage divider
+low_battery_mv = 10500            # Warning threshold (mV)
+critical_battery_mv = 10000       # Shutdown threshold (mV)
+
+[calibration]
+# Extrinsic calibration — TBD, measured during v1.1 calibration procedure
+# lidar_to_imu_translation = [0.0, 0.0, 0.05]    # [x, y, z] meters
+# lidar_to_imu_rotation = [1.0, 0.0, 0.0, 0.0]   # [w, x, y, z] quaternion
+# imu_to_gnss_translation = [0.0, 0.0, 0.30]      # [x, y, z] meters

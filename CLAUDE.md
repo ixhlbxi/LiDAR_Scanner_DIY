@@ -103,11 +103,13 @@ pilidar-rtk/
 │       └── watchdog.py         # Health monitoring, restart
 ├── tests/
 │   ├── test_config.py          # Unit tests (runs anywhere, no hardware)
-│   ├── test_lidar.py           # Hardware test (requires LD19)
-│   ├── test_imu.py             # Hardware test (requires MPU-9250)
-│   ├── test_stepper.py         # Hardware test (requires A4988 + motor)
-│   ├── test_camera.py          # Hardware test (requires Pi HQ Camera)
-│   └── conftest.py
+│   ├── test_logger.py          # Unit tests (runs anywhere, no hardware)
+│   ├── conftest.py
+│   └── hardware/               # Diagnostic scripts (run on Pi with hardware)
+│       ├── test_lidar.py       # LD19 LiDAR diagnostic
+│       ├── test_imu.py         # MPU-9250 IMU diagnostic
+│       ├── test_stepper.py     # A4988 + NEMA 17 diagnostic
+│       └── test_camera.py      # Pi HQ Camera diagnostic
 ├── scripts/
 │   └── georef.py               # Post-processing: JSONL → georeferenced PLY (Phase 5)
 ├── data/                       # .gitignored; session output goes here
@@ -182,29 +184,29 @@ JSONL record types: see **Appendix B**.
 ### Task 4 — Sensor Test Scripts (Hardware Required — Run on Pi)
 
 Diagnostic scripts to validate each sensor in isolation before integration.
-These are field tools, not pytest unit tests.
+These are field tools, not pytest unit tests. Located in `tests/hardware/`.
 
-**`test_lidar.py` — LD19 LiDAR**
+**`tests/hardware/test_lidar.py` — LD19 LiDAR**
 - Open `/dev/ttyUSB0` at 230400 baud
 - Parse LD19 packet stream
 - LD19 packet format: `[0x54][ver_len:1][speed:2LE][start_angle:2LE][12×(dist:2LE + intensity:1)][end_angle:2LE][timestamp:2LE][CRC:1]` = 47 bytes total
 - Print: scan rate (Hz), points per scan, min/max distance, packet CRC error rate
 - Run for N seconds (CLI arg), then exit with summary
 
-**`test_imu.py` — MPU-9250**
+**`tests/hardware/test_imu.py` — MPU-9250**
 - Open I2C bus 1, address 0x68 (or 0x69 if AD0 high)
 - Read WHO_AM_I register (expect `0x71` for MPU-9250, `0x73` for MPU-9255)
 - Stream accel [m/s²] + gyro [rad/s] at configured rate
 - Magnetometer via AK8963 I2C bypass (address `0x0C`) — print µT values
 - Print sample rate achieved vs. target
 
-**`test_stepper.py` — A4988 + NEMA 17**
+**`tests/hardware/test_stepper.py` — A4988 + NEMA 17**
 - Use `rpi-lgpio` for GPIO (D-029) — BCM pins: DIR=17, STEP=27, ENABLE=22 (active low)
 - Rotate N degrees at configured speed, then reverse
 - Print: step count, timing accuracy (step jitter), current draw estimate
 - Cleanly disable motor (ENABLE → high) on exit or Ctrl-C
 
-**`test_camera.py` — Pi HQ Camera**
+**`tests/hardware/test_camera.py` — Pi HQ Camera**
 - Use `picamera2`
 - Capture single JPEG frame, save to `/tmp/test_capture.jpg`
 - Print: resolution, file size, capture latency
