@@ -1,9 +1,17 @@
 # RTK LiDAR Rover Configuration
-# Version: 1.0
+# Version: 0.10  (Base-Station integration overhaul)
+# See docs/BASE_STATION_INTEGRATION.md for the cross-repo contract.
 
 [general]
 device_name = "rover-01"          # Device identifier
 log_level = "INFO"                # DEBUG, INFO, WARNING, ERROR
+
+[session]                         # D-030 — dual-mode operation
+profile = "personal"              # "personal" | "arm_group"
+project_code = ""                 # required when profile = "arm_group"
+mission_tag = ""                  # optional; uppercased; tags artifacts in metadata.json
+target_crs_epsg = 0               # 0 = WGS84 / local ENU; e.g. 6346 = NAD83(2011) PA-N ft-US
+units = "m"                       # "m" | "ft" — controls georef.py default output units
 
 [lidar]
 enabled = true
@@ -37,14 +45,37 @@ rtcm_profile = "robust"           # "robust" or "low_bandwidth"
 survey_in_duration_sec = 300      # Base station survey-in time
 survey_in_accuracy_m = 0.02       # Target accuracy (2 cm)
 
-[lora]
+[ntrip]                           # D-031, D-032 — primary RTK transport
+enabled = false                   # default off; enable per-session for arm_group
+client_location = "pi"            # "pi" | "esp32"
+caster_host = "rtk-base.local"
+caster_port = 2101
+mountpoint = "ARM_BASE"
+username = "rover"
+password_env = "ROVER_NTRIP_PASSWORD"
+gga_send_interval_sec = 10.0      # 0 = never; needed for VRS-style casters
+
+[lora]                            # D-031 — RTCM fallback + telemetry transport
 enabled = true
-port = "/dev/ttyUSB1"             # ESP32 serial port
+port = "/dev/ttyUSB1"             # rover ESP32 USB
 baud = 115200
-spreading_factor = 9              # 7–12
+spreading_factor = 7              # SF7 matches Base-Station Heltec defaults
 bandwidth_khz = 125               # 125, 250, or 500
 coding_rate = "4/5"               # "4/5", "4/6", "4/7", "4/8"
-telemetry_interval_sec = 1.0      # Status packet transmit rate
+sync_word = 0x12                  # private; matches Heltec/T-Deck firmware
+telemetry_interval_sec = 1.0      # STATUS/LINK Tx cadence
+role = "rtcm_rx+status_tx"        # "rtcm_rx+status_tx" | "status_tx_only" | "disabled"
+
+[base_station_integration]        # D-033 channel A
+enabled = false                   # true in arm_group profile
+status_json_path = "/run/rover/status.json"
+status_schema_version = 1
+publish_interval_sec = 1.0
+
+[telemetry]                       # D-033 channel B
+http_enabled = false              # stdlib http.server on loopback
+http_bind = "127.0.0.1"
+http_port = 8090
 
 [camera]
 enabled = true

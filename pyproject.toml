@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pilidar-rtk"
-version = "0.1.0"
-description = "RTK-enabled LiDAR scanning rover"
+version = "0.10.0"
+description = "RTK-enabled LiDAR scanning rover, integrates with arm-drone-lidar-workflow Base-Station"
 requires-python = ">=3.11"
 dependencies = []
 
@@ -18,10 +18,17 @@ pi = [
     "picamera2",
     "smbus2",
     "pyserial",
+    "pyubx2",
 ]
 dev = [
     "pytest",
     "ruff",
+]
+# Post-processing / CRS-aware export (D-034, Phase E)
+post = [
+    "laspy",
+    "pyproj",
+    "numpy",
 ]
 
 [tool.setuptools.packages.find]

@@ -43,6 +43,50 @@ class GeneralConfig:
 
 
 @dataclass(frozen=True)
+class SessionConfig:
+    """Per-session mode + project metadata (D-030)."""
+
+    profile: str
+    project_code: str
+    mission_tag: str
+    target_crs_epsg: int
+    units: str
+
+
+@dataclass(frozen=True)
+class NtripConfig:
+    """NTRIP-over-IP RTK transport (D-031, D-032)."""
+
+    enabled: bool
+    client_location: str
+    caster_host: str
+    caster_port: int
+    mountpoint: str
+    username: str
+    password_env: str
+    gga_send_interval_sec: float
+
+
+@dataclass(frozen=True)
+class BaseStationIntegrationConfig:
+    """status.json publisher targeting Base-Station-compatible consumers (D-033)."""
+
+    enabled: bool
+    status_json_path: str
+    status_schema_version: int
+    publish_interval_sec: float
+
+
+@dataclass(frozen=True)
+class TelemetryConfig:
+    """Loopback HTTP status endpoint (D-033 channel B)."""
+
+    http_enabled: bool
+    http_bind: str
+    http_port: int
+
+
+@dataclass(frozen=True)
 class LidarConfig:
     enabled: bool
     port: str
@@ -91,6 +135,8 @@ class LoraConfig:
     bandwidth_khz: int
     coding_rate: str
     telemetry_interval_sec: float
+    sync_word: int = 0x12
+    role: str = "rtcm_rx+status_tx"
 
 
 @dataclass(frozen=True)
@@ -137,11 +183,15 @@ class CalibrationConfig:
 @dataclass(frozen=True)
 class RoverConfig:
     general: GeneralConfig
+    session: SessionConfig
     lidar: LidarConfig
     stepper: StepperConfig
     imu: ImuConfig
     gnss: GnssConfig
+    ntrip: NtripConfig
     lora: LoraConfig
+    base_station_integration: BaseStationIntegrationConfig
+    telemetry: TelemetryConfig
     camera: CameraConfig
     logging: LoggingConfig
     watchdog: WatchdogConfig
@@ -164,6 +214,13 @@ _DEFAULTS: dict = {
     "general": {
         "device_name": "rover-01",
         "log_level": "INFO",
+    },
+    "session": {
+        "profile": "personal",
+        "project_code": "",
+        "mission_tag": "",
+        "target_crs_epsg": 0,
+        "units": "m",
     },
     "lidar": {
         "enabled": True,
@@ -197,14 +254,37 @@ _DEFAULTS: dict = {
         "survey_in_duration_sec": 300,
         "survey_in_accuracy_m": 0.02,
     },
+    "ntrip": {
+        "enabled": False,
+        "client_location": "pi",
+        "caster_host": "rtk-base.local",
+        "caster_port": 2101,
+        "mountpoint": "ARM_BASE",
+        "username": "rover",
+        "password_env": "ROVER_NTRIP_PASSWORD",
+        "gga_send_interval_sec": 10.0,
+    },
     "lora": {
         "enabled": True,
         "port": "/dev/ttyUSB1",
         "baud": 115200,
-        "spreading_factor": 9,
+        "spreading_factor": 7,
         "bandwidth_khz": 125,
         "coding_rate": "4/5",
         "telemetry_interval_sec": 1.0,
+        "sync_word": 0x12,
+        "role": "rtcm_rx+status_tx",
+    },
+    "base_station_integration": {
+        "enabled": False,
+        "status_json_path": "/run/rover/status.json",
+        "status_schema_version": 1,
+        "publish_interval_sec": 1.0,
+    },
+    "telemetry": {
+        "http_enabled": False,
+        "http_bind": "127.0.0.1",
+        "http_port": 8090,
     },
     "camera": {
         "enabled": True,
@@ -241,11 +321,15 @@ _DEFAULTS: dict = {
 
 _SECTION_DATACLASS: dict[str, type] = {
     "general": GeneralConfig,
+    "session": SessionConfig,
     "lidar": LidarConfig,
     "stepper": StepperConfig,
     "imu": ImuConfig,
     "gnss": GnssConfig,
+    "ntrip": NtripConfig,
     "lora": LoraConfig,
+    "base_station_integration": BaseStationIntegrationConfig,
+    "telemetry": TelemetryConfig,
     "camera": CameraConfig,
     "logging": LoggingConfig,
     "watchdog": WatchdogConfig,
@@ -343,6 +427,22 @@ def _validate(raw: dict) -> None:
     # Normalize to uppercase
     g["log_level"] = g["log_level"].upper()
 
+    # -- session (D-030) --
+    se = raw["session"]
+    _require_type("session", "profile", se["profile"], str)
+    _require_in("session", "profile", se["profile"], {"personal", "arm_group"})
+    _require_type("session", "project_code", se["project_code"], str)
+    _require_type("session", "mission_tag", se["mission_tag"], str)
+    se["mission_tag"] = se["mission_tag"].upper()
+    _require_type("session", "target_crs_epsg", se["target_crs_epsg"], int)
+    if se["target_crs_epsg"] < 0:
+        raise ValueError(
+            f"[session] target_crs_epsg: must be >= 0 (0 = WGS84/no conversion), "
+            f"got {se['target_crs_epsg']}"
+        )
+    _require_type("session", "units", se["units"], str)
+    _require_in("session", "units", se["units"], {"m", "ft"})
+
     # -- lidar --
     li = raw["lidar"]
     _require_type("lidar", "enabled", li["enabled"], bool)
@@ -404,6 +504,25 @@ def _validate(raw: dict) -> None:
     _require_positive("gnss", "survey_in_accuracy_m", gn["survey_in_accuracy_m"])
     gn["survey_in_accuracy_m"] = float(gn["survey_in_accuracy_m"])
 
+    # -- ntrip (D-031, D-032) --
+    nt = raw["ntrip"]
+    _require_type("ntrip", "enabled", nt["enabled"], bool)
+    _require_type("ntrip", "client_location", nt["client_location"], str)
+    _require_in("ntrip", "client_location", nt["client_location"], {"pi", "esp32"})
+    _require_type("ntrip", "caster_host", nt["caster_host"], str)
+    _require_type("ntrip", "caster_port", nt["caster_port"], int)
+    _require_range("ntrip", "caster_port", nt["caster_port"], 1, 65535)
+    _require_type("ntrip", "mountpoint", nt["mountpoint"], str)
+    _require_type("ntrip", "username", nt["username"], str)
+    _require_type("ntrip", "password_env", nt["password_env"], str)
+    _require_type("ntrip", "gga_send_interval_sec", nt["gga_send_interval_sec"], (int, float))
+    if nt["gga_send_interval_sec"] < 0:
+        raise ValueError(
+            f"[ntrip] gga_send_interval_sec: must be >= 0 (0 = never), "
+            f"got {nt['gga_send_interval_sec']}"
+        )
+    nt["gga_send_interval_sec"] = float(nt["gga_send_interval_sec"])
+
     # -- lora --
     lo = raw["lora"]
     _require_type("lora", "enabled", lo["enabled"], bool)
@@ -419,6 +538,27 @@ def _validate(raw: dict) -> None:
     _require_type("lora", "telemetry_interval_sec", lo["telemetry_interval_sec"], (int, float))
     _require_positive("lora", "telemetry_interval_sec", lo["telemetry_interval_sec"])
     lo["telemetry_interval_sec"] = float(lo["telemetry_interval_sec"])
+    _require_type("lora", "sync_word", lo["sync_word"], int)
+    _require_range("lora", "sync_word", lo["sync_word"], 0, 0xFF)
+    _require_type("lora", "role", lo["role"], str)
+    _require_in("lora", "role", lo["role"], {"rtcm_rx+status_tx", "status_tx_only", "disabled"})
+
+    # -- base_station_integration (D-033 channel A) --
+    bsi = raw["base_station_integration"]
+    _require_type("base_station_integration", "enabled", bsi["enabled"], bool)
+    _require_type("base_station_integration", "status_json_path", bsi["status_json_path"], str)
+    _require_type("base_station_integration", "status_schema_version", bsi["status_schema_version"], int)
+    _require_positive("base_station_integration", "status_schema_version", bsi["status_schema_version"])
+    _require_type("base_station_integration", "publish_interval_sec", bsi["publish_interval_sec"], (int, float))
+    _require_positive("base_station_integration", "publish_interval_sec", bsi["publish_interval_sec"])
+    bsi["publish_interval_sec"] = float(bsi["publish_interval_sec"])
+
+    # -- telemetry (D-033 channel B) --
+    tm = raw["telemetry"]
+    _require_type("telemetry", "http_enabled", tm["http_enabled"], bool)
+    _require_type("telemetry", "http_bind", tm["http_bind"], str)
+    _require_type("telemetry", "http_port", tm["http_port"], int)
+    _require_range("telemetry", "http_port", tm["http_port"], 1, 65535)
 
     # -- camera --
     ca = raw["camera"]
@@ -480,6 +620,26 @@ def _validate(raw: dict) -> None:
             f"must be less than low_battery_mv ({pw['low_battery_mv']})"
         )
 
+    # -- cross-section: arm_group profile constraints (D-030) --
+    if se["profile"] == "arm_group":
+        if not se["project_code"]:
+            raise ValueError(
+                "[session] profile = 'arm_group' requires a non-empty project_code"
+            )
+        if se["target_crs_epsg"] == 0:
+            raise ValueError(
+                "[session] profile = 'arm_group' requires target_crs_epsg > 0 "
+                "(e.g. 6346 = NAD83(2011) PA-N ft-US)"
+            )
+        if not bsi["enabled"]:
+            raise ValueError(
+                "[session] profile = 'arm_group' requires [base_station_integration].enabled = true"
+            )
+        if not nt["enabled"]:
+            raise ValueError(
+                "[session] profile = 'arm_group' requires [ntrip].enabled = true"
+            )
+
     # -- calibration (all optional) --
     cal = raw.get("calibration", {})
     for key in ("lidar_to_imu_translation", "imu_to_gnss_translation"):
@@ -515,11 +675,15 @@ def _build_config(raw: dict) -> RoverConfig:
     cal_raw = raw.get("calibration", {})
     return RoverConfig(
         general=GeneralConfig(**raw["general"]),
+        session=SessionConfig(**raw["session"]),
         lidar=LidarConfig(**raw["lidar"]),
         stepper=StepperConfig(**raw["stepper"]),
         imu=ImuConfig(**raw["imu"]),
         gnss=GnssConfig(**raw["gnss"]),
+        ntrip=NtripConfig(**raw["ntrip"]),
         lora=LoraConfig(**raw["lora"]),
+        base_station_integration=BaseStationIntegrationConfig(**raw["base_station_integration"]),
+        telemetry=TelemetryConfig(**raw["telemetry"]),
         camera=CameraConfig(
             enabled=raw["camera"]["enabled"],
             resolution=tuple(raw["camera"]["resolution"]),

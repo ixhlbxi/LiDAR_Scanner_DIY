@@ -291,12 +291,18 @@ class SessionLogger:
     # ------------------------------------------------------------------
 
     def _write_metadata(self, extra: dict[str, Any] | None = None) -> None:
-        """Write metadata.json to the session directory."""
+        """Write metadata.json to the session directory.
+
+        Includes a `session` block carrying profile / project_code / mission_tag /
+        target_crs_epsg / units (D-030, D-034) so that `scripts/georef.py` can
+        re-export the session in the recorded CRS without parsing config.toml.
+        """
         assert self._session_dir is not None
 
         end_time = datetime.now(timezone.utc)
         config_hash = self._compute_config_hash()
 
+        sess = self._config.session
         meta: dict[str, Any] = {
             "session_id": self._session_dir.name,
             "start_time": (
@@ -304,8 +310,15 @@ class SessionLogger:
             ),
             "end_time": end_time.isoformat(),
             "device_name": self._config.general.device_name,
-            "firmware_version": "0.1.0",
+            "firmware_version": "0.10.0",
             "config_hash": config_hash,
+            "session": {
+                "profile": sess.profile,
+                "project_code": sess.project_code,
+                "mission_tag": sess.mission_tag,
+                "target_crs_epsg": sess.target_crs_epsg,
+                "units": sess.units,
+            },
         }
 
         if extra:

@@ -362,11 +362,16 @@ class TestMetadata:
         assert meta_path.exists()
         meta = json.loads(meta_path.read_text())
         assert meta["device_name"] == "rover-01"
-        assert meta["firmware_version"] == "0.1.0"
+        assert meta["firmware_version"] == "0.10.0"
         assert "session_id" in meta
         assert "start_time" in meta
         assert "end_time" in meta
         assert "config_hash" in meta
+        # v0.10 — session block added (D-030, D-034)
+        assert "session" in meta
+        assert meta["session"]["profile"] == "personal"
+        assert meta["session"]["target_crs_epsg"] == 0
+        assert meta["session"]["units"] == "m"
 
     def test_metadata_includes_extra_fields(self, cfg):
         config, config_path = cfg

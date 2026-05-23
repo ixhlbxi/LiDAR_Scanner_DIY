@@ -1,7 +1,13 @@
 # Technical Specifications
 
-**Document Status:** Frozen (v0.9.2)  
-**Last Updated:** 2026-02-22
+**Document Status:** v0.10 — partial revision (Base-Station integration)
+**Last Updated:** 2026-05-23
+
+> **v0.10 overhaul note:** The LoRa Packet Format section below describes the original
+> v0.9.2 frame (Sync `0xAA 0x55`, Version `0x01`). The authoritative LoRa frame v2
+> spec — shared with `arm-drone-lidar-workflow`'s Heltec/T-Deck firmware — lives in
+> `docs/BASE_STATION_INTEGRATION.md` §4 and `CLAUDE.md` Appendix C. Both supersede
+> §1 below. The §1 text is retained as historical reference until the next pass.
 
 ---
 

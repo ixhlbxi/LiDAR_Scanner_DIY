@@ -1,0 +1,25 @@
+// Rover ESP32 — local configuration. Copy to `config.h` (which is .gitignored)
+// and fill in credentials before flashing.
+//
+//   cp include/config.h.example include/config.h
+
+#pragma once
+
+// ---- WiFi (used only in ntrip_client mode) ----
+#define WIFI_SSID       "YourFieldNetwork"
+#define WIFI_PASSWORD   ""
+
+// ---- NTRIP client (used only in ntrip_client mode) ----
+#define NTRIP_HOST          "rtk-base.local"
+#define NTRIP_PORT          2101
+#define NTRIP_MOUNTPOINT    "ARM_BASE"
+#define NTRIP_USERNAME      "rover"
+#define NTRIP_PASSWORD      ""
+
+// ---- Rover device identity ----
+// Sent in STATUS payload as part of telemetry. Keep <= 16 chars.
+#define ROVER_DEVICE_NAME   "rover-01"
+
+// ---- Optional GGA upload for VRS-style casters ----
+// 0 disables. Otherwise: interval in seconds between GGA uploads to the caster.
+#define NTRIP_GGA_INTERVAL_SEC  10

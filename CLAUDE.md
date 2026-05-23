@@ -1,8 +1,12 @@
 # PiLiDAR-RTK Rover — Claude Code Project Prompt
 
-> **Architecture frozen at v0.9.2.** All planning, specs, and decisions are finalized.
-> We are entering the coding phase. Do not re-litigate architecture choices unless
-> a specific implementation issue requires it — flag the conflict instead.
+> **v0.10 — Base-Station integration overhaul (2026-05-23).** The v0.9.2 architecture
+> freeze has been lifted to integrate this rover with the production Base-Station built
+> in `ixhlbxi/arm-drone-lidar-workflow`. The integration contract is
+> `docs/BASE_STATION_INTEGRATION.md`; the revised decisions are D-030 through D-034
+> in `docs/DECISIONS.md` (D-005, D-006, D-010 are superseded). Refer to those documents
+> as authoritative; this CLAUDE.md is being updated in-place — flag any conflict you
+> spot rather than papering over it.
 
 ---
 
@@ -22,7 +26,7 @@
 12. [Appendix A — Full TOML Config Schema](#appendix-a--full-toml-config-schema)
 13. [Appendix B — JSONL Data Schema](#appendix-b--jsonl-data-schema)
 14. [Appendix C — LoRa Packet Format (Full Spec)](#appendix-c--lora-packet-format-full-spec)
-15. [Appendix D — All Engineering Decisions (D-001–D-029)](#appendix-d--all-engineering-decisions-d-001d-029)
+15. [Appendix D — All Engineering Decisions (D-001–D-034)](#appendix-d--all-engineering-decisions-d-001d-034)
 16. [Appendix E — Performance Budgets](#appendix-e--performance-budgets)
 17. [Appendix F — Failure Modes & Recovery](#appendix-f--failure-modes--recovery)
 18. [Appendix G — System Architecture Summary](#appendix-g--system-architecture-summary)
@@ -37,12 +41,24 @@ A custom RTK-enabled LiDAR rover combining:
 - **LD19 LiDAR** on a rotating mast (NEMA17 + A4988 stepper) — stacked 2D slices → 3D point cloud
 - **Raspberry Pi HQ Camera** with fisheye lens — visual context imagery per scan step
 - **MPU-9250 IMU** — Madgwick fusion for roll/pitch/yaw orientation
-- **ZED-F9P RTK GNSS** — centimeter-level positioning via LoRa-delivered RTCM corrections
-- **ESP32 LoRa** — RTCM correction relay (base→rover) and telemetry (rover→monitor)
-- **LILYGO T-Deck** — handheld field monitoring console (receive-only in v1.0)
+- **ZED-F9P RTK GNSS** — centimeter-level positioning; RTCM via NTRIP (primary) or LoRa (fallback)
+- **ESP32 LoRa + WiFi** — RTK fallback transport (LoRa RTCM relay OR NTRIP-over-WiFi client) plus rover STATUS/LINK telemetry
+- **External Base-Station** — `ixhlbxi/arm-drone-lidar-workflow` provides the NTRIP caster, RTK reference, and field-display ecosystem; the rover is a client, not a parallel base
+
+Runs in two profiles, selected per session:
+
+- **`personal`** — DIY use, off-grid friendly. NTRIP optional. WGS84 / local ENU output.
+- **`arm_group`** — Companion to ARM Group drone/LiDAR survey workflow. NTRIP required.
+  Outputs land in `01_Raw/LiDAR/Rover/<session>/` in the project folder; export to
+  NAD83(2011) State Plane in US Survey Foot (e.g., EPSG `6346` for PA-N) is driven
+  by `scripts/georef.py`.
 
 **Target accuracy:** ±5–10 cm absolute point cloud (v1.0); ±2–3 cm with calibration (v1.1)
+
 **Inspiration:** [PiLiDAR/PiLiDAR](https://github.com/PiLiDAR/PiLiDAR) (upstream, validated approach)
+
+**Integration contract:** `docs/BASE_STATION_INTEGRATION.md` is the single source of
+truth for how this rover talks to the Base-Station — endpoints, schemas, frame format.
 
 ---
 
@@ -50,13 +66,14 @@ A custom RTK-enabled LiDAR rover combining:
 
 | What | Status |
 |------|--------|
-| Planning & specs | ✅ Complete — 6 docs, 29 engineering decisions (D-001–D-029) |
-| Hardware in hand | LD19 LiDAR, MPU-9250 IMU, A4988 stepper driver, NEMA 17 motor, Pi HQ Camera, Raspberry Pi 4B, ESP32 LoRa boards, T-Deck |
+| Planning & specs | ✅ 34 engineering decisions (D-001–D-034); D-030–D-034 cover the v0.10 Base-Station integration overhaul |
+| Hardware in hand | LD19 LiDAR, MPU-9250 IMU, A4988 stepper driver, NEMA 17 motor, Pi HQ Camera, Raspberry Pi 4B, ESP32 LoRa boards |
 | Hardware NOT yet in hand | 2× ZED-F9P modules, 2× dual-band GNSS antennas, 3.3V switching regulator, batteries |
+| Moved out of rover BOM | LILYGO T-Deck (now owned by `arm-drone-lidar-workflow` Base-Station per D-033) |
 | 3D printer | ✅ Operational (Ender 3 Pro, Sprite direct drive, CR Touch) |
-| Git repo | ❌ Not yet created |
-| Codebase | ❌ Nothing written yet |
-| Current phase | **Phase 3 entry — Rover Software Core** |
+| Git repo | ✅ Initialized (this repo) |
+| Codebase | ✅ Phase 3 work landed (config, logger, lidar/imu/stepper/camera modules + tests); ⚠️ v0.10 overhaul in progress (telemetry, ntrip, gnss, firmware) |
+| Current phase | **v0.10 overhaul — Phase A (doc revisions) → Phase F (verification)** — see `docs/ROADMAP.md` |
 
 ---
 
@@ -79,10 +96,13 @@ A custom RTK-enabled LiDAR rover combining:
 
 ---
 
-## 4. Repository Structure (To Be Created)
+## 4. Repository Structure
+
+Current state (Phase 3 landed; v0.10 overhaul adds the `ntrip.py`, expands
+`telemetry.py`, scaffolds `firmware/esp32-rover/`):
 
 ```
-pilidar-rtk/
+LiDAR_Scanner_DIY/
 ├── README.md
 ├── LICENSE
 ├── pyproject.toml              # Project metadata, dependencies, entry points
@@ -91,30 +111,35 @@ pilidar-rtk/
 ├── src/
 │   └── rover/
 │       ├── __init__.py
-│       ├── main.py             # Orchestration, state machine
+│       ├── main.py             # Orchestration, state machine (stub today)
 │       ├── config.py           # TOML parsing + validation
 │       ├── lidar.py            # LD19 acquisition + packet parsing
 │       ├── imu.py              # MPU-9250 polling + Madgwick fusion
-│       ├── gnss.py             # ZED-F9P parsing (NMEA/UBX)
+│       ├── gnss.py             # ZED-F9P NMEA/UBX parsing (Phase C — currently stub)
+│       ├── ntrip.py            # Pi-side NTRIP client (Phase C — new)
 │       ├── stepper.py          # Motor control, step timing (rpi-lgpio)
 │       ├── camera.py           # HQ Camera capture (picamera2)
-│       ├── telemetry.py        # Status packet generation → ESP32
+│       ├── telemetry.py        # TelemetryRouter — 3 channels (Phase B — currently stub)
 │       ├── logger.py           # JSONL file writing
-│       └── watchdog.py         # Health monitoring, restart
+│       └── watchdog.py         # Health monitoring, restart (stub today)
+├── firmware/                   # Phase C — new
+│   └── esp32-rover/            # PlatformIO project; modes: lora_rtcm_relay | ntrip_client
 ├── tests/
 │   ├── test_config.py          # Unit tests (runs anywhere, no hardware)
 │   ├── test_logger.py          # Unit tests (runs anywhere, no hardware)
 │   ├── conftest.py
 │   └── hardware/               # Diagnostic scripts (run on Pi with hardware)
-│       ├── test_lidar.py       # LD19 LiDAR diagnostic
-│       ├── test_imu.py         # MPU-9250 IMU diagnostic
-│       ├── test_stepper.py     # A4988 + NEMA 17 diagnostic
-│       └── test_camera.py      # Pi HQ Camera diagnostic
+│       ├── test_lidar.py
+│       ├── test_imu.py
+│       ├── test_stepper.py
+│       ├── test_camera.py
+│       └── test_ntrip.py       # Phase C — new
 ├── scripts/
-│   └── georef.py               # Post-processing: JSONL → georeferenced PLY (Phase 5)
+│   └── georef.py               # JSONL → georeferenced LAS/PLY, CRS-aware (Phase E)
 ├── data/                       # .gitignored; session output goes here
 └── docs/
     ├── ARCHITECTURE.md
+    ├── BASE_STATION_INTEGRATION.md   # v0.10 — integration contract
     ├── DECISIONS.md
     ├── HARDWARE.md
     ├── SPECIFICATIONS.md
@@ -124,6 +149,12 @@ pilidar-rtk/
 ---
 
 ## 5. Immediate Coding Tasks (Priority Order)
+
+> **v0.10 overhaul status:** Tasks 1, 3, and most of Task 5 below have landed. The
+> active backlog is the v0.10 phase plan (Appendix H, second table). Tasks 1–5 are
+> retained here as historical reference for *what* each module is, not *what to do
+> next*. For the current backlog, see the **v0.10 Base-Station Integration Overhaul**
+> table in Appendix H.
 
 ### Task 1 — `config.py`: TOML Parsing + Validation
 **Zero hardware dependency. Foundation — everything else imports this.**
@@ -266,8 +297,9 @@ Settled — don't revisit unless a concrete implementation problem forces it.
 | ID | Decision | Summary |
 |----|----------|---------|
 | D-003 | Pi as main controller | Linux ecosystem, Python libs, CSI camera, sufficient compute |
-| D-005 | RTK via LoRa | No cellular dependency, works remote, ~1–2 sec latency |
-| D-006 | RTCM routing — direct | ESP32 UART → F9P directly; Pi NOT in correction path |
+| D-005 | ~~RTK via LoRa~~ | **Superseded by D-031** — NTRIP primary, LoRa fallback |
+| D-006 | ~~RTCM routing direct~~ | **Superseded by D-032** — NTRIP client lives on Pi or ESP32 per config |
+| D-010 | ~~T-Deck Receive-Only~~ | **Superseded by D-033** — T-Deck owned by Base-Station; rover publishes triple-channel telemetry |
 | D-012 | Madgwick filter | Lighter than EKF, adequate for scan-rate orientation |
 | D-013 | Mag disabled during motor | Stepper EMI corrupts magnetometer — disable during rotation |
 | D-014 | Timestamp sync via slerp | Ring buffer + bracket lookup + quaternion slerp |
@@ -279,8 +311,13 @@ Settled — don't revisit unless a concrete implementation problem forces it.
 | D-023 | SLAM deferred to v1.1+ | Out of scope for v1.0; indoor = relative mapping only |
 | D-028 | TOML config | No external read deps, typed, comment-supporting |
 | D-029 | `rpi-lgpio` over `RPi.GPIO` | `RPi.GPIO` broken on Bookworm; `rpi-lgpio` is drop-in |
+| D-030 | Dual-mode (personal / arm_group) | Session-config selector; ARM Group profile pulls Base-Station integration defaults |
+| D-031 | NTRIP-primary RTK + LoRa fallback | Rover consumes `arm-drone-lidar-workflow` Base-Station's NTRIP caster (`ARM_BASE` on `:2101`); LoRa kept for off-grid case |
+| D-032 | NTRIP client location | Pi or ESP32, per `[ntrip].client_location` — chooses simplicity vs Pi-crash robustness |
+| D-033 | Triple-channel telemetry | `status.json` (Base-Station-compatible) + loopback HTTP + LoRa STATUS/LINK; each enable-able |
+| D-034 | Log SI/WGS84, convert at export | `scripts/georef.py` handles CRS conversion to session-recorded `target_crs_epsg` |
 
-Full decision log with rationale and alternatives: see **Appendix D**.
+Full decision log with rationale and alternatives: see **Appendix D** and `docs/DECISIONS.md`.
 
 ---
 
@@ -364,15 +401,16 @@ Global WGS84
 
 | Out of Scope | Reason | Target |
 |---|---|---|
-| ESP32 firmware (RTCM relay + telemetry) | Blocked on F9P hardware | Phase 3 later |
-| RTCM / LoRa integration | Blocked on ZED-F9P | Phase 2 |
-| Point cloud processing / 3D reconstruction | Phase 5 | Later |
-| Monitoring console (T-Deck) firmware | Phase 4 | Later |
+| Base-Station-side LoRa RTCM Tx | Belongs in `arm-drone-lidar-workflow` (Phase D of the v0.10 overhaul plan) | Sibling PR |
+| Monitoring console (T-Deck) firmware | Owned by Base-Station (`arm-drone-lidar-workflow/base-station/t-deck/`); rover does not flash this | n/a |
+| Point cloud processing / 3D reconstruction | Phase 5 of v0.10 overhaul (`scripts/georef.py`) | Phase E |
 | Enclosure CAD | Separate track | Phase 1–2 |
 | Real-time SLAM | D-023 deferred | v1.1+ |
 | Real-time georeferencing | D-022 deferred | v1.1+ |
 | Camera texture mapping | D-026 deferred | v1.2+ |
 | Extrinsic calibration procedure | D-024 accepted limitation | v1.1 |
+| Rover→Base-Station bidirectional commands | Rover publishes STATUS only; no commands accepted | v1.1+ |
+| T-Deck-side recognition of rover STATUS/LINK frames | Requires base-side firmware extension | v1.1+ |
 
 ---
 
@@ -405,6 +443,13 @@ File location: `/home/pi/rover/config.toml`
 device_name = "rover-01"          # Device identifier
 log_level = "INFO"                # DEBUG, INFO, WARNING, ERROR
 
+[session]                         # D-030
+profile = "personal"              # "personal" | "arm_group"
+project_code = ""                 # required when profile = "arm_group"
+mission_tag = ""                  # optional; uppercased; tags artifacts
+target_crs_epsg = 0               # 0 = WGS84 / local ENU; e.g. 6346 = NAD83(2011) PA-N ft-US
+units = "m"                       # "m" | "ft" — controls georef.py default output
+
 [lidar]
 enabled = true
 port = "/dev/ttyUSB0"             # Serial port (USB-serial adapter)
@@ -433,18 +478,41 @@ fusion_beta = 0.1                 # Madgwick filter gain
 enabled = true
 port = "/dev/ttyACM0"             # ZED-F9P USB port
 baud = 115200                     # Default F9P baud
-rtcm_profile = "robust"           # "robust" or "low_bandwidth"
-survey_in_duration_sec = 300      # Base station survey-in time
-survey_in_accuracy_m = 0.02       # Target accuracy (2 cm)
+rtcm_profile = "robust"           # legacy — rover is a client (D-031); kept for backward compat
+survey_in_duration_sec = 300      # legacy — base-side concern (D-031); kept for backward compat
+survey_in_accuracy_m = 0.02       # legacy — base-side concern (D-031); kept for backward compat
 
-[lora]
+[ntrip]                           # D-031, D-032 — primary RTK transport
 enabled = true
-port = "/dev/ttyUSB1"             # ESP32 serial port
+client_location = "pi"            # "pi" | "esp32"
+caster_host = "rtk-base.local"
+caster_port = 2101
+mountpoint = "ARM_BASE"
+username = "rover"
+password_env = "ROVER_NTRIP_PASSWORD"
+gga_send_interval_sec = 10.0      # 0 = never
+
+[lora]                            # D-031 — fallback RTK + telemetry transport
+enabled = true
+port = "/dev/ttyUSB1"             # rover ESP32 USB
 baud = 115200
-spreading_factor = 9              # 7–12
-bandwidth_khz = 125               # 125, 250, or 500
-coding_rate = "4/5"               # "4/5", "4/6", "4/7", "4/8"
-telemetry_interval_sec = 1.0      # Status packet transmit rate
+spreading_factor = 7              # SF7 matches Base-Station Heltec defaults
+bandwidth_khz = 125
+coding_rate = "4/5"
+sync_word = 0x12                  # Private; matches Base-Station handhelds
+telemetry_interval_sec = 1.0      # STATUS / LINK Tx cadence
+role = "rtcm_rx+status_tx"        # "rtcm_rx+status_tx" | "status_tx_only" | "disabled"
+
+[base_station_integration]        # D-033 channel A
+enabled = false                   # true in arm_group profile
+status_json_path = "/run/rover/status.json"
+status_schema_version = 1
+publish_interval_sec = 1.0
+
+[telemetry]                       # D-033 channel B
+http_enabled = false              # stdlib http.server on loopback
+http_bind = "127.0.0.1"
+http_port = 8090
 
 [camera]
 enabled = true
@@ -612,54 +680,72 @@ Each line in `scan.jsonl` is a valid JSON object. The `type` field discriminates
   "start_time": "2026-02-22T14:30:52Z",
   "end_time": "2026-02-22T14:45:30Z",
   "device_name": "rover-01",
-  "firmware_version": "0.1.0",
+  "firmware_version": "0.10.0",
   "config_hash": "a1b2c3d4...",
+  "session": {
+    "profile": "arm_group",
+    "project_code": "2026-WENTZ-LIDR",
+    "mission_tag": "WENTZ",
+    "target_crs_epsg": 6346,
+    "units": "ft"
+  },
   "total_steps": 180,
   "total_scans": 180,
   "total_images": 180,
   "gnss_fix_type_max": 5,
+  "ntrip_connected_pct": 0.97,
+  "lora_rtcm_used": false,
   "notes": ""
 }
 ```
 
+The `session` block is required (D-030). `target_crs_epsg = 0` in personal profile
+means "no conversion at export — keep WGS84". `ntrip_connected_pct` is the fraction
+of the session during which the NTRIP client held an active connection; useful for
+post-session quality assessment.
+
 ---
 
-## Appendix C — LoRa Packet Format (Full Spec)
+## Appendix C — LoRa Packet Format (Frame v2, shared with Base-Station)
 
-All LoRa communication uses a common framing structure.
+LoRa frame v2 is the shared envelope used by both this repo and
+`arm-drone-lidar-workflow`. It is a strict superset of the original v0.9.2 Appendix C
+(no Sync bytes anymore — the LoRa PHY's preamble + sync-word handles synchronization
+at the radio layer; see `[lora].sync_word` in the config) and a superset of the
+Base-Station's v1 DISPLAY frame.
 
-### Common Packet Frame
+> **Authoritative:** `docs/BASE_STATION_INTEGRATION.md` §4. This appendix mirrors that
+> doc; update both together or update the integration doc and leave a pointer here.
+
+### Common Frame
 
 ```
-┌──────────┬─────────┬─────────┬──────────┬──────────┬─────────────┬─────────┐
-│  Sync    │ Version │  Type   │  Length  │ Sequence │   Payload   │  CRC16  │
-│ (2 bytes)│ (1 byte)│ (1 byte)│ (2 bytes)│ (2 bytes)│  (N bytes)  │(2 bytes)│
-└──────────┴─────────┴─────────┴──────────┴──────────┴─────────────┴─────────┘
+┌─────────┬─────────┬──────────┬──────────┬─────────────┬─────────┐
+│ Version │  Type   │ Sequence │  Length  │   Payload   │  CRC16  │
+│ (1 byte)│ (1 byte)│ (2 bytes)│ (2 bytes)│  (N bytes)  │(2 bytes)│
+└─────────┴─────────┴──────────┴──────────┴─────────────┴─────────┘
 ```
 
 | Field | Value / Encoding | Notes |
 |-------|-----------------|-------|
-| Sync | `0xAA 0x55` | Magic bytes |
-| Version | `0x01` | Protocol v1.0 |
-| Type | See table below | Packet type |
+| Version | `0x02` | LoRa frame v2 (was `0x01` in v0.9.2 self-contained spec) |
+| Type | See table below | Packet type — receivers MUST drop unknown types |
+| Sequence | uint16 LE | Wrapping per-source sequence number |
 | Length | uint16 LE | Payload length in bytes |
-| Sequence | uint16 LE | Wrapping sequence number |
 | Payload | N bytes | Type-specific |
-| CRC16 | uint16 LE | CRC16-CCITT over Version→end of Payload |
+| CRC16 | uint16 LE | CRC16-CCITT, polynomial `0x1021`, init `0xFFFF`, no final XOR; scope: Version through last Payload byte |
 
-**Total overhead:** 10 bytes/packet.
-
-**CRC algorithm:** CRC16-CCITT — polynomial `0x1021`, init `0xFFFF`, no final XOR.
-Scope: Version byte through last byte of Payload (excludes Sync).
+**Total overhead:** 8 bytes per frame.
 
 ### Packet Types
 
 | Type ID | Name | Direction | Description |
 |---------|------|-----------|-------------|
-| `0x01` | STATUS | Rover → Monitor | Rover health + GNSS summary |
-| `0x02` | LINK | Rover → Monitor | Link quality metrics |
-| `0x10` | RTCM_CHUNK | Base → Rover | RTCM3 correction data |
-| `0x7F` | DEBUG_TEXT | Any | Human-readable debug string |
+| `0x01` | STATUS | Rover → handhelds / base | Rover health + GNSS summary (D-033 channel C) |
+| `0x02` | LINK | Rover → handhelds / base | LoRa link quality metrics |
+| `0x10` | RTCM_CHUNK | Base → Rover | RTCM3 fallback correction data (D-031) |
+| `0x20` | DISPLAY | Base → handhelds | Compact /display body (Base-Station owns this type; rover ignores) |
+| `0x7F` | DEBUG_TEXT | Any → any | ASCII string, no null terminator |
 
 ### STATUS Payload (Type `0x01`) — 10 bytes
 
@@ -722,17 +808,21 @@ Raw ASCII text string. Length from packet Length field. No null terminator.
 
 ### LoRa Radio Parameters
 
+Match the Base-Station Heltec firmware defaults (see
+`arm-drone-lidar-workflow/base-station/heltec-display/src/main.cpp`):
+
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
 | Frequency | 915 MHz | ISM band (US) |
-| Spreading Factor | 9–10 | 1–3 km range, adequate throughput |
+| Spreading Factor | 7 (default) | Matches base-station handhelds; ~5 kbps throughput; raise to 9 for marginal range |
 | Bandwidth | 125 kHz | Standard, good noise immunity |
 | Coding Rate | 4/5 | Light FEC overhead |
-| Max usable throughput | ~1500 B/s | Leaves margin above ~850 B/s RTCM load |
+| Sync Word | `0x12` | Private; matches Heltec/T-Deck |
+| Max usable throughput | ~5 kbps @ SF7 | Comfortable for ~800 B/s "robust" RTCM profile + sparse STATUS/LINK |
 
 ---
 
-## Appendix D — All Engineering Decisions (D-001–D-029)
+## Appendix D — All Engineering Decisions (D-001–D-034)
 
 ### System Decisions
 
@@ -880,6 +970,36 @@ Upstream PiLiDAR has validated this migration. `gpiozero` is also acceptable.
 Install: `pip install rpi-lgpio` or `sudo apt install python3-rpi-lgpio`.
 Set `LG_WD=/tmp` to suppress lgpio temp file creation in working directory.
 
+### Base-Station Integration Decisions (v0.10 overhaul)
+
+**D-030 — Dual-Mode Operation (`personal` vs `arm_group`)**
+Single binary, session-config `[session].profile` switch. `arm_group` profile requires
+project code, mission tag, target CRS, and Base-Station integration enabled. Avoids
+a parallel `arm-group-fork` of the codebase. Full rationale: `docs/DECISIONS.md` §12.
+
+**D-031 — NTRIP-Primary RTK with LoRa Fallback (supersedes D-005)**
+Rover is a client of the `arm-drone-lidar-workflow` Base-Station's NTRIP caster
+(`ARM_BASE` on `:2101`). LoRa retained for the off-network case. The Base-Station's
+LoRa-RTCM-Tx ships in that repo's Phase D PR; until then the fallback path is
+rover-side-ready only.
+
+**D-032 — NTRIP Client Location: Pi or ESP32, Per-Session (supersedes D-006's blanket rule)**
+`[ntrip].client_location = "pi" | "esp32"`. Pi-hosted is the simple default;
+ESP32-hosted preserves the original D-006 "Pi crash doesn't kill RTK" property for
+critical missions. One binary supports both via config.
+
+**D-033 — Triple-Channel Telemetry (supersedes D-010)**
+The rover publishes status on three independent channels: (A) Base-Station-compatible
+`status.json` (mirrors `rtk_io.atomic_write_json`); (B) loopback HTTP `/status` +
+`/health`; (C) LoRa STATUS (`0x01`) / LINK (`0x02`) frame v2. Each independently
+enable-able; failures isolated. T-Deck no longer a rover-attached unit.
+
+**D-034 — Log SI/WGS84, Convert at Export**
+Acquisition stays in SI / WGS84 (current design). CRS conversion to session's
+`target_crs_epsg` (e.g., EPSG `6346` for NAD83(2011) PA-N ft-US) happens in
+`scripts/georef.py` using `pyproj`. JSONL records remain unchanged; `metadata.json`
+gains `session.target_crs_epsg` + `session.units`.
+
 ---
 
 ## Appendix E — Performance Budgets
@@ -965,23 +1085,38 @@ Runtime targets: 50 Wh for 2 hours minimum; 100 Wh for 4-hour goal.
 
 ## Appendix G — System Architecture Summary
 
-### Three Physical Units
+### Two Rover-Side Units, One External Base-Station
 
-1. **Rover Unit** — Mobile scanning platform (Pi 4, LD19, HQ Camera, IMU, F9P, ESP32 LoRa, stepper)
-2. **RTK Base Station** — Fixed GNSS reference (F9P base mode + ESP32 LoRa Tx)
-3. **Monitoring Terminal** — LILYGO T-Deck handheld console (LoRa Rx only in v1.0)
+1. **Rover Unit** (this repo) — Mobile scanning platform: Pi 4, LD19, HQ Camera, IMU,
+   F9P, ESP32 LoRa+WiFi, stepper.
+2. **External Base-Station** (`arm-drone-lidar-workflow`) — RTK Pi + F9P running
+   the production `rtk-base-manager` services. Owns the NTRIP caster, status.json
+   contract, and Heltec/T-Deck field displays.
 
-### RTCM Correction Flow (Critical Path)
+The dedicated handheld "Monitoring Terminal" from v0.9 is removed (D-033).
+
+### RTCM Correction Flow
+
+**Primary — NTRIP over IP (D-031):**
 
 ```
-Base ZED-F9P (survey-in mode)
-    │ RTCM3 generation
+Base-Station NTRIP caster (ARM_BASE on rtk-base.local:2101)
+    │ RTCM3 over TCP, auth via ROVER_NTRIP_PASSWORD env var
     ▼
-Base ESP32 LoRa Tx
-    │ LoRa 915 MHz
+Rover NTRIP client  (src/rover/ntrip.py on Pi  OR  firmware/esp32-rover ntrip_client mode)
+    │ USB write (Pi) or UART2 write (ESP32)
     ▼
-Rover ESP32 LoRa Rx
-    │ UART direct (NOT through Pi — D-006)
+Rover ZED-F9P → RTK FIX
+```
+
+**Fallback — LoRa-Relayed RTCM:**
+
+```
+Base-Station Heltec V3 (LoRa frame v2 type=0x10 RTCM_CHUNK; Phase D in other repo)
+    │ 915 MHz LoRa
+    ▼
+Rover ESP32 (firmware/esp32-rover lora_rtcm_relay mode)
+    │ UART2 direct, no Pi
     ▼
 Rover ZED-F9P → RTK FIX
 ```
@@ -1001,24 +1136,28 @@ Timestamp & Correlate:
 → JSONL log (scan, imu, camera, gnss, event records)
 ```
 
-### Telemetry Flow
+### Telemetry Flow (D-033 — three channels)
 
 ```
-Rover: F9P → Pi (parse) → ESP32 (pack STATUS/LINK) → LoRa Tx
-Monitor: LoRa Rx → T-Deck display
+Pi sensor stack → TelemetryRouter (src/rover/telemetry.py)
+    │
+    ├── Channel A: atomic write /run/rover/status.json (Base-Station-shaped)
+    ├── Channel B: stdlib http.server :8090/status, :8090/health
+    └── Channel C: USB → rover ESP32 → LoRa frame v2 STATUS / LINK
 ```
 
 ### Wired Interface Summary
 
 | Interface | Connection | Protocol |
 |-----------|------------|----------|
-| USB | Pi ↔ ZED-F9P | UBX/NMEA |
+| USB | Pi ↔ ZED-F9P | UBX/NMEA (Pi-NTRIP mode also writes RTCM here) |
 | USB-Serial | Pi ↔ LD19 | LD19 proprietary |
-| USB | Pi ↔ ESP32 | Serial (telemetry) |
+| USB | Pi ↔ rover ESP32 | Serial — telemetry frames + (future) commands |
 | CSI | Pi ↔ HQ Camera | MIPI |
 | I2C | Pi ↔ MPU-9250 | I2C |
 | GPIO | Pi ↔ A4988 | Step/Dir/Enable |
-| UART | ESP32 ↔ ZED-F9P | RTCM3 (direct, no Pi) |
+| UART | rover ESP32 ↔ ZED-F9P UART2 | RTCM3 (active only in LoRa-fallback or ESP32-NTRIP modes) |
+| Network | rover Pi ↔ Base-Station Pi | TCP — NTRIP/RTCM3 (primary RTK path) |
 
 ---
 
@@ -1035,17 +1174,28 @@ Monitor: LoRa Rx → T-Deck display
 | LoRa range | ≥1 km LOS | Field test |
 | Data integrity | No corrupted logs | File validation |
 
-### Phase Summary
+### Phase Summary — original v0.9.2 plan
 
 | Phase | Objective | Key Deliverables |
 |-------|-----------|-----------------|
 | 1 | Hardware integration | Sensors communicating individually; wiring diagram |
-| 2 | Base station | RTCM flowing base→rover via LoRa; RTK fix confirmed |
-| **3 (Current)** | **Rover software core** | **All Python modules; integrated acquisition test** |
-| 4 | Monitoring console | T-Deck firmware; telemetry display working |
-| 5 | Post-processing | `georef.py`; PLY output; accuracy validation |
-| 6 | Field testing | Runtime/range/repeatability/accuracy tests |
+| 2 | ~~Base station~~ | Replaced by Base-Station integration (D-031); see `docs/BASE_STATION_INTEGRATION.md` |
+| 3 ✅ | Rover software core | Config, logger, lidar/imu/stepper/camera modules + tests landed |
+| ~~4~~ | ~~Monitoring console~~ | Removed (D-033 — T-Deck owned by Base-Station) |
+| 5 | Post-processing | `scripts/georef.py` (now CRS-aware; Phase E of overhaul) |
+| 6 | Field testing | Runtime / range / repeatability / accuracy tests |
 | 7 | v1.0 release | Code cleanup, docs, release tag |
+
+### v0.10 Base-Station Integration Overhaul — current focus
+
+| Phase | Objective | Key Deliverables |
+|-------|-----------|-----------------|
+| **A (current)** | Doc revisions | CLAUDE.md, DECISIONS.md (D-030–D-034), ARCHITECTURE.md, HARDWARE.md, README.md, BASE_STATION_INTEGRATION.md |
+| B | Config + telemetry plumbing | `[session]`/`[ntrip]`/`[base_station_integration]` config; `TelemetryRouter` + 3 publishers; logger metadata |
+| C | RTK paths | `src/rover/ntrip.py`; finish `gnss.py`; `firmware/esp32-rover/` PlatformIO project (two modes) |
+| D | Base-Station LoRa RTCM Tx | Lives in `arm-drone-lidar-workflow` — sibling PR (Heltec firmware extension + `rtk_base_rtcm_serial.py` daemon) |
+| E | CRS-aware export | `scripts/georef.py` with `--crs EPSG` + `--units ft/m`; `pyproj` + `laspy` optional deps |
+| F | Verification | Unit + bench + hardware tests; field shakedown |
 
 ### Python Module Build Order (Phase 3)
 

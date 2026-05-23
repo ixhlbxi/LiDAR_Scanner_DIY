@@ -1,7 +1,13 @@
 # Hardware Inventory
 
-**Document Status:** Frozen (v0.9.1)  
-**Last Updated:** 2025-12-26
+**Document Status:** v0.10 — in overhaul (Base-Station integration)
+**Last Updated:** 2026-05-23
+
+> **v0.10 overhaul note:** Rover hardware is largely unchanged. The T-Deck has moved
+> out of the rover BOM (now owned by the Base-Station in `arm-drone-lidar-workflow`,
+> per D-033). The ESP32 LoRa role expands to support NTRIP-over-WiFi as an alternative
+> to LoRa RTCM relay (D-032). See `docs/BASE_STATION_INTEGRATION.md` for the
+> rover↔Base-Station contract.
 
 ---
 
@@ -17,11 +23,12 @@
 | Camera | ✅ | — | HQ Camera + fisheye ready |
 | IMU | ✅ | — | MPU-6050 and MPU-9250 available |
 | GNSS (interim) | ✅ | — | Beitian BK122 for testing |
-| GNSS (RTK) | — | 🔲 | ZED-F9P × 2 needed |
+| GNSS (RTK) | — | 🔲 | ZED-F9P × 2 needed (one for the Base-Station Pi, one for this rover) |
 | Antennas | — | 🔲 | Dual-band L1/L2 × 2 needed |
-| LoRa | ✅ | — | ESP32 LoRa V3 ready |
-| Monitor | ✅ | — | T-Deck ready |
+| LoRa + WiFi (rover) | ✅ | — | ESP32 LoRa V3 ready — dual-purpose (LoRa RTCM Rx OR NTRIP-over-WiFi client) |
+| Handheld monitor | — | — | Owned by Base-Station; **removed from rover BOM** (D-033) |
 | Power | — | 🔲 | Batteries + regulators needed |
+| Network | — | — | Rover Pi shares WiFi/cellular path with Base-Station Pi |
 
 ---
 
@@ -265,42 +272,80 @@
 
 ## 7. Communications Subsystem
 
-### 7.1 Muzi ESP32 LoRa V3 (SX1262)
+### 7.1 Muzi ESP32 LoRa V3 (SX1262) — Rover
 
 | Attribute | Value |
 |-----------|-------|
-| **Role** | RTCM relay, telemetry transceiver |
-| **MCU** | ESP32-S3 |
+| **Role** | RTK fallback receiver + telemetry transmitter |
+| **MCU** | ESP32-S3 (WiFi-capable — required for NTRIP-over-WiFi mode) |
 | **Radio** | Semtech SX1262 |
 | **Frequency** | 915 MHz (US ISM) |
 | **Power** | Up to +22 dBm |
-| **Interface** | USB (to Pi), UART (to F9P) |
-| **Status** | ✅ Owned (need 2+ for base/rover) |
-
-**Firmware Scope (v1.0):**
-- Transparent RTCM passthrough (base → rover)
-- Basic telemetry generation (RSSI, SNR, packet counts)
-- Status LED indication
-- No OTA updates in v1.0
-
-### 7.2 LILYGO T-Deck
-
-| Attribute | Value |
-|-----------|-------|
-| **Role** | Handheld monitoring terminal |
-| **MCU** | ESP32-S3 |
-| **Display** | 2.8" TFT (320×240) |
-| **Input** | Keyboard, trackball |
-| **Radio** | LoRa (SX1262) |
+| **Interface** | USB (to Pi for telemetry frames), UART (to F9P UART2 for RTCM) |
 | **Status** | ✅ Owned |
 
-**Firmware Scope (v1.0):**
-- Custom status dashboard UI
-- LoRa receive only
-- Display: RTK status, sat count, HDOP, battery, link quality, scan state
-- No command transmission in v1.0
+**Firmware Scope (v0.10 overhaul, Phase C):**
 
-### 7.3 CircuitMess Chatter (Optional)
+Two firmware modes selected via config (lives in `firmware/esp32-rover/`):
+
+- **Mode A — `lora_rtcm_relay`** (default): Receives RTCM_CHUNK LoRa frame v2 packets
+  from the Base-Station Heltec, writes the RTCM3 payload to F9P UART2 (preserves
+  D-006-style "Pi out of correction path" robustness). Also transmits rover STATUS
+  (0x01) and LINK (0x02) frames to handhelds.
+- **Mode B — `ntrip_client`** (new): Connects to the Base-Station NTRIP caster
+  over WiFi, writes RTCM3 to F9P UART2 directly. Same status/link Tx as Mode A.
+  Wins when LoRa range is marginal but network is available, and the Pi-NTRIP
+  approach is too tightly coupled to the Pi being up.
+
+WiFi credentials and NTRIP password live in a non-committed `include/config.h`
+(`include/config.h.example` is the template). No OTA updates in v1.0.
+
+> **Compatibility check:** confirm rover ESP32 model has both LoRa **and** WiFi
+> (the Muzi/Heltec V3 does — bare SX1262 breakouts do not). Mode B requires WiFi.
+
+### 7.2 LILYGO T-Deck — **Removed from rover BOM (D-033)**
+
+The T-Deck is now owned by the `arm-drone-lidar-workflow` Base-Station, where its
+firmware lives at `base-station/t-deck/`. It is **not flashed with rover-specific
+firmware** in this project.
+
+When the rover is operated in `arm_group` profile, the operator's existing
+Base-Station T-Deck can surface rover STATUS via either:
+
+- **Channel A** — the `/run/rover/status.json` file (if the rover and Base-Station Pis
+  share a filesystem mount or replicate it), or
+- **Channel C** — receiving LoRa STATUS/LINK (LoRa frame v2 types `0x01`/`0x02`) directly.
+  Requires a one-time T-Deck firmware extension to recognize rover frame types alongside
+  the existing DISPLAY (`0x20`) handling.
+
+The second-T-Deck-dedicated-to-rover idea from v0.9 is deferred. The rover's own HTTP
+`/status` endpoint covers development and bench observability.
+
+### 7.3 Network / Base-Station Connectivity
+
+**Rover Pi must have IP reach to the Base-Station Pi (`rtk-base.local`)** in
+`arm_group` profile, and ideally also in `personal` profile (for NTRIP-primary RTK).
+Three supported field topologies, no new hardware required if any is workable:
+
+1. **Shared WiFi** — Both Pis associate with the same AP (truck-mounted router, office
+   network). Simplest; works on bench.
+2. **Base-Station as AP** — Base-Station Pi runs `hostapd`/`dnsmasq` to act as its own
+   WiFi access point; rover Pi joins it. Documented in
+   `arm-drone-lidar-workflow/base-station/FIELD_DEPLOY_CHECKLIST.md`.
+3. **Phone hotspot** — Phone bridges both Pis. Matches the ARM Group field-cellular
+   pattern.
+
+**Credentials handling:** the rover's NTRIP password is supplied via environment
+variable (default name `ROVER_NTRIP_PASSWORD`), set via systemd `EnvironmentFile=`
+or shell export. Mirrors the Base-Station's `RTK_NTRIP_PASSWORD` convention. Never
+committed to config files.
+
+**LoRa fallback range:** when no network topology is reachable, the LoRa-RTCM path
+(Phase D in the overhaul plan) carries corrections at SF7/BW125/CR4/5 — ~1–3 km LOS
+in practice. Outside that range and outside network reach, the rover degrades to
+non-RTK 3D fix (~2–3 m accuracy).
+
+### 7.4 CircuitMess Chatter (Optional)
 
 | Attribute | Value |
 |-----------|-------|

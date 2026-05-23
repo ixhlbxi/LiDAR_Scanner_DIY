@@ -1,7 +1,12 @@
 # Roadmap & Next Steps
 
-**Document Status:** Frozen (v0.9.2)  
-**Last Updated:** 2026-02-22
+**Document Status:** v0.10 — in overhaul (Base-Station integration)
+**Last Updated:** 2026-05-23
+
+> **v0.10 overhaul note:** The v0.9.2 feature list below is largely intact, but the
+> "LoRa RTCM delivery" + "T-Deck monitoring console" rows have been reframed by
+> D-031 and D-033. The active backlog is the v0.10 phase plan summarized in
+> CLAUDE.md Appendix H and detailed in `docs/BASE_STATION_INTEGRATION.md`.
 
 ---
 
@@ -16,9 +21,11 @@ v1.0 is complete when the following capabilities are demonstrated:
 | **RTK-tagged LiDAR scans** | Point cloud with cm-level GNSS position per scan |
 | **Local data logging** | JSONL files with all sensor data + images |
 | **IMU orientation** | Madgwick fusion providing stable orientation |
-| **LoRa RTCM delivery** | Corrections flowing base → rover reliably |
-| **LoRa telemetry** | Status visible on T-Deck monitoring console |
-| **Post-processed point cloud** | PLY output, georeferenced via scripts |
+| **NTRIP RTCM delivery (D-031)** | Corrections flowing from arm-drone-lidar-workflow Base-Station's `ARM_BASE` caster to rover F9P |
+| **LoRa RTCM fallback (D-031)** | Off-network operation supported via Base-Station Heltec → rover ESP32 → F9P UART2 |
+| **Triple-channel telemetry (D-033)** | Status visible via `status.json` (Base-Station-compatible), HTTP, and LoRa STATUS/LINK |
+| **Post-processed point cloud** | PLY output (always) + LAS in session CRS for ARM Group profile (D-034) |
+| **ARM Group profile output** | LAS in NAD83(2011) State Plane / US Survey Foot, drops into project `01_Raw/LiDAR/Rover/` |
 | **4-hour runtime** | Full scan session without battery swap |
 | **Outdoor accuracy** | ±5-10 cm point cloud (validated) |
 | **Indoor relative mapping** | Orientation-stabilized local point clouds |

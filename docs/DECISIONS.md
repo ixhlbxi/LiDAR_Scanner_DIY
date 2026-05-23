@@ -1,9 +1,15 @@
 # Design Decisions Log
 
-**Document Status:** Frozen (v0.9.2)  
-**Last Updated:** 2026-02-22
+**Document Status:** v0.10 — in overhaul (Base-Station integration)
+**Last Updated:** 2026-05-23
 
 This document records all significant architectural and engineering decisions, including rationale, alternatives considered, and implications.
+
+> **v0.10 overhaul:** The v0.9.2 architecture froze before the `arm-drone-lidar-workflow`
+> Base-Station was built. This document is being revised to reflect that the rover now
+> integrates with that production Base-Station. Decisions D-005, D-006, and D-010 are
+> superseded — see D-030 through D-034 at the bottom of this file. The accompanying
+> integration contract lives in `docs/BASE_STATION_INTEGRATION.md`.
 
 ---
 
@@ -125,13 +131,13 @@ Each decision follows this structure:
 
 ---
 
-### D-005: RTK via LoRa (Not Cellular)
+### D-005: RTK via LoRa (Not Cellular) — **SUPERSEDED by D-031**
 
 **Decision:** Deliver RTCM corrections via LoRa radio link, not cellular/internet.
 
 **Context:** Corrections must flow from base to rover with low latency.
 
-**Rationale:**
+**Rationale (original):**
 - No subscriptions or cellular coverage dependency
 - Works in remote areas without infrastructure
 - Predictable latency (~1-2 seconds)
@@ -147,17 +153,19 @@ Each decision follows this structure:
 - Bandwidth constrained (~600-800 bytes/sec usable)
 - Range limited to ~2-5 km LOS
 
-**Status:** Decided
+**Status:** Superseded 2026-05-23 by D-031. The `arm-drone-lidar-workflow` Base-Station
+exposes its corrections via an NTRIP caster (mountpoint `ARM_BASE` on port 2101); LoRa
+is retained only as the off-network fallback. See D-031.
 
 ---
 
-### D-006: RTCM Routing — ESP32 Direct to F9P
+### D-006: RTCM Routing — ESP32 Direct to F9P — **SUPERSEDED by D-032**
 
 **Decision:** Route RTCM corrections directly from ESP32 (LoRa) to ZED-F9P via UART, bypassing the Raspberry Pi.
 
 **Context:** Original plan had Pi in the RTCM path for logging/observability. This adds latency and creates Linux dependency.
 
-**Rationale:**
+**Rationale (original):**
 - Lower latency for corrections
 - RTK remains functional if Linux crashes
 - Simpler code (ESP32 is "dumb pipe" for RTCM)
@@ -172,7 +180,9 @@ Each decision follows this structure:
 - Pi not in critical path for positioning
 - Less real-time RTCM visibility on Pi (acceptable)
 
-**Status:** Decided (revision from v0.9)
+**Status:** Superseded 2026-05-23 by D-032. The blanket "Pi never in the correction path"
+rule no longer holds — the Pi runs the NTRIP client in the default configuration. ESP32-as-
+direct-pipe is retained as a per-session opt-in. See D-032.
 
 ---
 
@@ -254,13 +264,13 @@ Each decision follows this structure:
 
 ---
 
-### D-010: T-Deck Receive-Only (v1.0)
+### D-010: T-Deck Receive-Only (v1.0) — **SUPERSEDED by D-033**
 
 **Decision:** Monitoring terminal is receive-only in v1.0; no remote commands.
 
 **Context:** Bidirectional command/control adds complexity and security considerations.
 
-**Rationale:**
+**Rationale (original):**
 - Receive-only is simpler to implement
 - Sufficient for monitoring use case
 - Reduces risk of accidental commands
@@ -275,7 +285,11 @@ Each decision follows this structure:
 - Cannot change settings remotely
 - Revisit in v1.1 for remote control
 
-**Status:** Decided
+**Status:** Superseded 2026-05-23 by D-033. The T-Deck is now owned by the
+`arm-drone-lidar-workflow` Base-Station (handheld for base monitoring), not a
+rover-attached field monitor. Rover field visibility comes from the triple-channel
+telemetry described in D-033 — Base-Station-compatible `status.json`, an own HTTP
+endpoint, and LoRa STATUS/LINK packets. See D-033.
 
 ---
 
@@ -785,6 +799,195 @@ Each decision follows this structure:
 
 ---
 
+## 12. Base-Station Integration Decisions (v0.10 overhaul)
+
+These decisions reframe the rover around `ixhlbxi/arm-drone-lidar-workflow`'s production
+Base-Station rather than the original self-contained design. The integration contract is
+documented in `docs/BASE_STATION_INTEGRATION.md`.
+
+### D-030: Dual-Mode Operation — Personal DIY vs. ARM Group Companion
+
+**Decision:** Add a session-level `profile` selector: `"personal"` (DIY use, off-grid)
+or `"arm_group"` (companion to the ARM Group drone/LiDAR survey workflow). All major
+runtime behaviors that diverge between the two modes are gated by this single switch.
+
+**Context:** The rover was originally designed in isolation. The user wants it usable
+both for personal DIY work (any environment, no project conventions) and as a complement
+to the ARM Group survey workflow (NAD83 / NAVD88 / State Plane / US Survey Foot,
+project-code-tagged sessions, output destined for TBC + Civil 3D). One binary that
+hard-codes either choice is a lock-in; one that branches on a config flag isn't.
+
+**Rationale:**
+- Single binary, single config path — operator picks the profile per session.
+- ARM Group profile defaults pull from `docs/BASE_STATION_INTEGRATION.md` (NTRIP enabled,
+  status.json publish enabled, target CRS required).
+- Personal profile keeps the original simple defaults (NTRIP optional, WGS84/local ENU,
+  no project tagging).
+- Avoids a parallel "arm-group-fork" of the codebase.
+
+**Alternatives Considered:**
+- Always ARM Group conventions (cuts off personal DIY use).
+- Always personal conventions (rover can't drop output into ARM Group's `01_Raw/LiDAR`).
+- Build-time variant (two binaries; operationally fragile).
+
+**Implications:**
+- `[session]` config section is now required; defaults to `personal`.
+- ARM Group profile cross-validates: `project_code` non-empty, `target_crs_epsg > 0`,
+  `[base_station_integration].enabled = true`.
+- Logger writes `session.profile` + tags into `metadata.json`.
+- `scripts/georef.py` honors the session-recorded profile when picking export defaults.
+
+**Status:** Decided
+
+---
+
+### D-031: NTRIP-Primary RTK with LoRa Fallback (supersedes D-005)
+
+**Decision:** The rover's primary RTK transport is NTRIP-over-IP, consumed from the
+`arm-drone-lidar-workflow` Base-Station's caster (mountpoint `ARM_BASE` on
+`rtk-base.local:2101` by default). LoRa-relayed RTCM is retained as the off-network
+fallback for deployments where no IP path to the Base-Station exists.
+
+**Context:** The Base-Station already ships an NTRIP caster as its canonical RTK transport
+(used by the WISPR SkyScout 2+ drone). Building a parallel LoRa-only path on the rover
+would duplicate the correction infrastructure and lock the rover out of the proven, in-use
+Base-Station path.
+
+**Rationale:**
+- Reuses an existing, tested correction transport.
+- Network is the cheap, reliable case; LoRa is the rare-but-essential off-grid case.
+- Both Base-Station and rover Pi typically share the truck/field-AP WiFi already.
+- LoRa fallback survives the "no LAN, no hotspot" case (deep-rural).
+
+**Alternatives Considered:**
+- NTRIP-only (D-005 reversed but no fallback — fragile in genuinely remote work).
+- LoRa-only (original D-005; ignores existing NTRIP infrastructure).
+- Both always active, with the F9P picking the better stream (over-engineered for v1.0).
+
+**Implications:**
+- `[ntrip]` section in config; `[lora].role` configures whether LoRa carries RTCM-Rx
+  in addition to STATUS/LINK-Tx.
+- Base-Station gains a LoRa-RTCM-Tx path (Phase D in the overhaul plan, separate PR).
+- Operator switches between paths via config; runtime hot-switching is v1.1+.
+- Rover ESP32 firmware grows two modes (LoRa-RTCM-relay, NTRIP-over-WiFi-client) — see D-032.
+
+**Status:** Decided
+
+---
+
+### D-032: NTRIP Client Location — Pi or ESP32, Per-Session (supersedes D-006's blanket rule)
+
+**Decision:** The NTRIP client can run on either the Pi or the ESP32, selected per session
+via `[ntrip].client_location = "pi" | "esp32"`. Both paths terminate at the same F9P
+(via USB or UART2 respectively).
+
+**Context:** D-006 mandated that the Pi never sit in the correction path — that was a
+sound rule for the LoRa-relay architecture, but the NTRIP-primary model means the
+correction source is now usually a network endpoint, not an on-board LoRa packet stream.
+Either the Pi or the ESP32 can be the network client.
+
+**Rationale:**
+- Pi-hosted NTRIP is simpler — credentials live in the Pi's environment, single config
+  surface, easier to debug.
+- ESP32-hosted NTRIP preserves the D-006 property (RTK survives a Pi crash) for missions
+  where that matters.
+- One binary supports both via config; no firmware-side either/or lock-in.
+- Field experience will determine which one is the practical default for ARM Group sessions.
+
+**Alternatives Considered:**
+- Pi-only (loses the "Pi-out-of-path" robustness for critical missions).
+- ESP32-only (forces every rover deployment to flash credentials and manage WiFi from
+  the ESP32; awkward for development).
+
+**Implications:**
+- `src/rover/ntrip.py` implements the Pi-side client (Phase C).
+- `firmware/esp32-rover/` PlatformIO project gains an `ntrip_client` mode alongside the
+  existing `lora_rtcm_relay` mode (Phase C).
+- Mode selection is a config field, not a build-time switch.
+- When `client_location = "esp32"`, `src/rover/ntrip.py` does not start; `gnss.py` still
+  reads NMEA/UBX from F9P USB for status.
+
+**Status:** Decided
+
+---
+
+### D-033: Triple-Channel Telemetry (supersedes D-010)
+
+**Decision:** The rover publishes telemetry on three independent, individually enable-able
+channels:
+
+1. **Base-Station-compatible `status.json`** — atomic JSON writes to a configurable path
+   (default `/run/rover/status.json`), shaped to be readable by anything that consumes
+   the Base-Station's `rtk_io.atomic_write_json` convention.
+2. **Own loopback HTTP endpoint** — stdlib `http.server` exposing `GET /status` and
+   `GET /health`. Off by default; the personal DIY profile's primary observability path.
+3. **LoRa STATUS / LINK packets** — the original Appendix C STATUS (`0x01`) and
+   LINK (`0x02`) packets, updated to the LoRa frame v2 envelope shared with the
+   Base-Station.
+
+**Context:** The original D-010 assumed a custom rover-attached T-Deck consuming a
+self-contained LoRa STATUS/LINK protocol. With the T-Deck now owned by the Base-Station,
+that single channel isn't enough — different deployment modes want different observability
+paths.
+
+**Rationale:**
+- `status.json` lets the Base-Station's existing handhelds (BLE-bonded T-Deck, HTTP-polled
+  Heltec) display rover status alongside base status without a new transport.
+- HTTP endpoint serves personal DIY use (curl from a laptop on the same network).
+- LoRa packets are the only channel that survives the no-network case.
+- Each channel can be turned off in config — no forced fan-out cost.
+
+**Alternatives Considered:**
+- Single canonical channel (no single channel works for all three deployment modes).
+- Reuse Base-Station's BLE GATT service (binds rover to base BLE schema; rover becomes a
+  satellite of the base process).
+
+**Implications:**
+- `src/rover/telemetry.py` becomes a `TelemetryRouter` with pluggable publishers
+  (`StatusJsonPublisher`, `LocalHttpPublisher`, `LoRaPublisher`).
+- Each publisher start/stop is independent; failures in one don't take down the others.
+- Status schema is rover-side (versioned independently from the Base-Station's v7).
+- Atomic-write pattern is borrowed byte-for-byte from
+  `arm-drone-lidar-workflow/base-station/rtk_io.py:atomic_write_json` for compatibility.
+
+**Status:** Decided
+
+---
+
+### D-034: Rover Coordinate Handling — Log SI/WGS84, Convert at Export
+
+**Decision:** Sensor acquisition and JSONL logging stay in SI units + WGS84 (the current
+design). Coordinate-system conversion to the session's `target_crs_epsg` (e.g.,
+NAD83(2011) / PA-N, US Survey Foot for ARM Group profile) happens at export time in
+`scripts/georef.py`, not in the hot logging path.
+
+**Context:** The ARM Group survey workflow standardizes on NAD83 / NAVD88 / GEOID18 /
+State Plane / US Survey Foot (DEC-001 in the other repo). The rover's original
+design implicitly assumed meters / WGS84 / local ENU; nothing in JSONL records the
+target CRS.
+
+**Rationale:**
+- Logging hot path is simpler and faster in native units.
+- Choice of CRS is recorded in `metadata.json` at session start; export reads it back.
+- Allows re-export to a different CRS without re-acquiring data — useful for
+  cross-project comparisons.
+- Matches PCMaster Pro / TBC workflow shape (raw → post-process → georeferenced).
+
+**Alternatives Considered:**
+- Convert at acquisition (CRS errors at config time become permanent data loss).
+- Two-format logging (doubles log size; no real benefit).
+- Drop WGS84 entirely and acquire in target CRS (fragile, conflates concerns).
+
+**Implications:**
+- JSONL records remain unchanged (decimal degrees, meters, milliseconds).
+- `metadata.json` gains `session.target_crs_epsg` + `session.units` fields.
+- `scripts/georef.py` becomes the canonical CRS-conversion boundary (Phase E).
+- Adds `pyproj` as an optional dependency (`[project.optional-dependencies].post`).
+
+**Status:** Decided
+
+---
+
 ## Decision Index
 
 | ID | Topic | Section |
@@ -793,12 +996,12 @@ Each decision follows this structure:
 | D-002 | PiLiDAR Foundation | System |
 | D-003 | Pi vs MCU | System |
 | D-004 | ZED-F9P Selection | GNSS |
-| D-005 | RTK via LoRa | GNSS |
-| D-006 | RTCM Routing Direct | GNSS |
+| D-005 | RTK via LoRa | GNSS — **superseded by D-031** |
+| D-006 | RTCM Routing Direct | GNSS — **superseded by D-032** |
 | D-007 | RTCM Profiles | GNSS |
 | D-008 | LoRa Parameters | Comms |
 | D-009 | Packet Loss Handling | Comms |
-| D-010 | T-Deck Receive-Only | Comms |
+| D-010 | T-Deck Receive-Only | Comms — **superseded by D-033** |
 | D-011 | MPU-9250 Primary | Sensor |
 | D-012 | Madgwick Filter | Sensor |
 | D-013 | Mag Disabled w/ Motor | Sensor |
@@ -818,3 +1021,8 @@ Each decision follows this structure:
 | D-027 | Triggered Capture | Camera |
 | D-028 | TOML Config | Config |
 | D-029 | GPIO Library (rpi-lgpio) | Upstream Compat |
+| D-030 | Dual-Mode (personal / arm_group) | Base-Station Integration |
+| D-031 | NTRIP-Primary + LoRa Fallback | Base-Station Integration |
+| D-032 | NTRIP Client Location (Pi or ESP32) | Base-Station Integration |
+| D-033 | Triple-Channel Telemetry | Base-Station Integration |
+| D-034 | Coords: log SI/WGS84, convert at export | Base-Station Integration |
