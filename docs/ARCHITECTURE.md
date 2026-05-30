@@ -7,7 +7,7 @@
 > Base-Station built in `ixhlbxi/arm-drone-lidar-workflow`. RTK corrections now come
 > from that Base-Station's NTRIP caster (primary) with LoRa as fallback. The handheld
 > monitor is owned by the Base-Station ecosystem. Integration contract:
-> `docs/BASE_STATION_INTEGRATION.md`. See D-030 through D-034 in `docs/DECISIONS.md`.
+> `docs/BASE_STATION_INTEGRATION.md`. See DEC-030 through DEC-034 in `docs/DECISIONS.md`.
 
 ---
 
@@ -24,7 +24,7 @@ in `arm-drone-lidar-workflow` is the third party, owned by that repo:
    replicate it.
 
 The legacy "Monitoring Terminal" as a third rover-side unit (a dedicated T-Deck) is
-removed by D-033 — rover field visibility now comes from triple-channel telemetry
+removed by DEC-033 — rover field visibility now comes from triple-channel telemetry
 (see §5.3).
 
 ---
@@ -48,8 +48,8 @@ removed by D-033 — rover field visibility now comes from triple-channel teleme
 │  │                                                                   │  │
 │  │   • Acquisition + timestamping  • IMU fusion (Madgwick)          │  │
 │  │   • Stepper control             • JSONL logging                  │  │
-│  │   • NTRIP client (default; D-032)                                │  │
-│  │   • TelemetryRouter — status.json + HTTP + LoRa pub (D-033)      │  │
+│  │   • NTRIP client (default; DEC-032)                                │  │
+│  │   • TelemetryRouter — status.json + HTTP + LoRa pub (DEC-033)      │  │
 │  └──┬────────────┬────────────────┬──────────────────┬──────────────┘  │
 │     │ GPIO       │ USB (RTCM out  │ USB (telemetry,  │ USB (UBX/NMEA   │
 │     │            │   if Pi-NTRIP) │   LoRa frames)   │   F9P status)   │
@@ -87,13 +87,13 @@ UART2 (when the ESP32 is the NTRIP/LoRa-RTCM source). Only one is active per ses
 | **Imaging** | HQ Camera + Fisheye | Visual context capture per scan step |
 | **Orientation** | MPU-9250 | Roll/pitch/yaw estimation via Madgwick filter |
 | **Positioning** | ZED-F9P | RTK GNSS with cm-level accuracy |
-| **RTK ingress (primary)** | Pi NTRIP client OR ESP32 NTRIP-over-WiFi | NTRIP/RTCM from `ARM_BASE` caster (D-031, D-032) |
+| **RTK ingress (primary)** | Pi NTRIP client OR ESP32 NTRIP-over-WiFi | NTRIP/RTCM from `ARM_BASE` caster (DEC-031, DEC-032) |
 | **RTK ingress (fallback)** | Rover ESP32 LoRa Rx | Decode RTCM_CHUNK (LoRa frame v2 type 0x10) → F9P UART2 |
-| **Telemetry Tx** | Rover ESP32 LoRa Tx + Pi `status.json` + Pi HTTP | Three-channel publisher (D-033) |
+| **Telemetry Tx** | Rover ESP32 LoRa Tx + Pi `status.json` + Pi HTTP | Three-channel publisher (DEC-033) |
 
 ### 2.3 RTCM Correction Flow
 
-Two paths, NTRIP primary (D-031) and LoRa fallback. Selected by config; not both
+Two paths, NTRIP primary (DEC-031) and LoRa fallback. Selected by config; not both
 simultaneously feeding the same F9P input.
 
 **Primary — NTRIP over IP:**
@@ -105,7 +105,7 @@ arm-drone-lidar-workflow Base-Station Pi
        │ RTCM3 over TCP (auth via password env var)
        ▼
 Rover NTRIP Client
-  (Pi-hosted by default; ESP32-hosted optionally — D-032)
+  (Pi-hosted by default; ESP32-hosted optionally — DEC-032)
        │
        │ USB (Pi client) or UART2 (ESP32 client)
        ▼
@@ -127,9 +127,9 @@ Rover ESP32
 Rover ZED-F9P → RTK FIX
 ```
 
-The LoRa-direct path preserves the original D-006 robustness property (RTK survives a
+The LoRa-direct path preserves the original DEC-006 robustness property (RTK survives a
 Pi crash) for the no-network case. The NTRIP path involves the Pi by default, which
-D-032 explicitly accepts in exchange for the operational simplicity of a single
+DEC-032 explicitly accepts in exchange for the operational simplicity of a single
 config surface.
 
 **Mode selection:** `[ntrip].enabled` and `[ntrip].client_location` choose the NTRIP
@@ -146,9 +146,9 @@ This rover does not own a Base-Station design. The production Base-Station lives
 
 | Service | Owner | This rover's role |
 |---|---|---|
-| NTRIP caster (`ARM_BASE` on `:2101`) | `rtk_base_manager.py` (their repo) | Client (D-031) |
-| `/run/rtk-base/status.json` schema + atomic-write convention | `rtk_io.py` (their repo) | Same shape mirrored for `/run/rover/status.json` (D-033) |
-| Heltec V3 LoRa Tx (DISPLAY frames today; RTCM_CHUNK after their Phase D) | `heltec-display/` (their repo) | Receiver of fallback RTCM (D-031, D-032) |
+| NTRIP caster (`ARM_BASE` on `:2101`) | `rtk_base_manager.py` (their repo) | Client (DEC-031) |
+| `/run/rtk-base/status.json` schema + atomic-write convention | `rtk_io.py` (their repo) | Same shape mirrored for `/run/rover/status.json` (DEC-033) |
+| Heltec V3 LoRa Tx (DISPLAY frames today; RTCM_CHUNK after their Phase D) | `heltec-display/` (their repo) | Receiver of fallback RTCM (DEC-031, DEC-032) |
 | T-Deck BLE/LoRa field display | `t-deck/` (their repo) | Not consumed directly by rover; may be extended in v1.1+ to surface rover STATUS |
 
 **Base-Station operating modes** that affect the rover:
@@ -173,7 +173,7 @@ other repo. The "robust" profile (GPS+GLONASS+Galileo+BeiDou: messages 1005, 107
 
 ## 4. Field Visibility (Telemetry Channels)
 
-Per D-033, the rover publishes status on three independent channels. Each is
+Per DEC-033, the rover publishes status on three independent channels. Each is
 individually enable-able and failure-isolated from the others. See
 `docs/BASE_STATION_INTEGRATION.md` §3 for the schema and routes.
 
@@ -183,7 +183,7 @@ individually enable-able and failure-isolated from the others. See
 | B — Local HTTP `/status` & `/health` | Stdlib `http.server` on loopback (default :8090) | Off | Personal DIY: `curl rover.local:8090/status` from a laptop |
 | C — LoRa STATUS / LINK | LoRa frame v2 types `0x01` / `0x02` | On | Off-network case — only channel that survives no IP and no filesystem |
 
-The dedicated rover-attached T-Deck from v0.9 is removed (D-033). When operated in
+The dedicated rover-attached T-Deck from v0.9 is removed (DEC-033). When operated in
 `arm_group` profile, rover status surfaces through whatever Base-Station handheld the
 operator is already carrying.
 
@@ -292,7 +292,7 @@ the others.
 
 | Link | Frequency | Modulation | Purpose |
 |------|-----------|------------|---------|
-| Base → Rover (NTRIP primary) | 2.4/5 GHz WiFi (or cellular) | TCP/IP | RTCM3 corrections via NTRIP (D-031) |
+| Base → Rover (NTRIP primary) | 2.4/5 GHz WiFi (or cellular) | TCP/IP | RTCM3 corrections via NTRIP (DEC-031) |
 | Base → Rover (LoRa fallback) | 915 MHz | LoRa SF7/BW125/CR4/5 | RTCM_CHUNK (LoRa frame v2 type 0x10) |
 | Rover → Handhelds | 915 MHz | LoRa SF7/BW125/CR4/5 | STATUS / LINK (LoRa frame v2 types 0x01 / 0x02) |
 
@@ -473,7 +473,7 @@ Global WGS84
 
 **Note:** Extrinsic calibration directly impacts point cloud accuracy. Without calibration, v1.0 accuracy is ±5-10 cm (not ±2-3 cm).
 
-### 10.4 Acquisition vs Export Coordinates (D-034)
+### 10.4 Acquisition vs Export Coordinates (DEC-034)
 
 The acquisition stack always logs in **SI units / WGS84** — meters, decimal degrees,
 quaternions. The session-config field `[session].target_crs_epsg` records the desired

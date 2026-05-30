@@ -1,12 +1,7 @@
 # Roadmap & Next Steps
 
-**Document Status:** v0.10 — in overhaul (Base-Station integration)
-**Last Updated:** 2026-05-23
-
-> **v0.10 overhaul note:** The v0.9.2 feature list below is largely intact, but the
-> "LoRa RTCM delivery" + "T-Deck monitoring console" rows have been reframed by
-> D-031 and D-033. The active backlog is the v0.10 phase plan summarized in
-> CLAUDE.md Appendix H and detailed in `docs/BASE_STATION_INTEGRATION.md`.
+**Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
+**Last Updated:** 2026-05-30
 
 ---
 
@@ -21,10 +16,10 @@ v1.0 is complete when the following capabilities are demonstrated:
 | **RTK-tagged LiDAR scans** | Point cloud with cm-level GNSS position per scan |
 | **Local data logging** | JSONL files with all sensor data + images |
 | **IMU orientation** | Madgwick fusion providing stable orientation |
-| **NTRIP RTCM delivery (D-031)** | Corrections flowing from arm-drone-lidar-workflow Base-Station's `ARM_BASE` caster to rover F9P |
-| **LoRa RTCM fallback (D-031)** | Off-network operation supported via Base-Station Heltec → rover ESP32 → F9P UART2 |
-| **Triple-channel telemetry (D-033)** | Status visible via `status.json` (Base-Station-compatible), HTTP, and LoRa STATUS/LINK |
-| **Post-processed point cloud** | PLY output (always) + LAS in session CRS for ARM Group profile (D-034) |
+| **NTRIP RTCM delivery (DEC-031)** | Corrections flowing from arm-drone-lidar-workflow Base-Station's `ARM_BASE` caster to rover F9P |
+| **LoRa RTCM fallback (DEC-031)** | Off-network operation supported via Base-Station Heltec → rover ESP32 → F9P UART2 |
+| **Triple-channel telemetry (DEC-033)** | Status visible via `status.json` (Base-Station-compatible), HTTP, and LoRa STATUS/LINK |
+| **Post-processed point cloud** | PLY output (always) + LAS in session CRS for ARM Group profile (DEC-034) |
 | **ARM Group profile output** | LAS in NAD83(2011) State Plane / US Survey Foot, drops into project `01_Raw/LiDAR/Rover/` |
 | **4-hour runtime** | Full scan session without battery swap |
 | **Outdoor accuracy** | ±5-10 cm point cloud (validated) |
@@ -57,138 +52,62 @@ v1.0 is complete when the following capabilities are demonstrated:
 
 ---
 
-## 2. Development Phases
+## 2. Phases
 
-### Phase 1: Hardware Integration (Current → +2-4 weeks)
+The v0.9.2 Phase 1–7 plan (sequential "hardware → base → rover → ..." waterfall)
+has been replaced. The Base-Station now exists as a separate, production-grade
+project (`arm-drone-lidar-workflow`); this rover plugs into it. Current phases
+reflect that integration model.
 
-**Objective:** All hardware connected and communicating.
+### v0.10 Deep-Alignment Overhaul (in progress, 2026-05-30)
 
-**Tasks:**
-- [ ] Order ZED-F9P modules (×2) and antennas (×2)
-- [ ] Order/source 3.3V regulator, power banks, 12V battery
-- [ ] Create wiring harness (UART, I2C, GPIO, power)
-- [ ] Verify each sensor individually:
-  - [ ] LD19 LiDAR scan acquisition
-  - [ ] MPU-9250 IMU data over I2C
-  - [ ] ZED-F9P NMEA output
-  - [ ] ESP32 LoRa packet transmission
-  - [ ] HQ Camera capture
-  - [ ] Stepper motor rotation
-- [ ] Integrate onto temporary test bench (not final enclosure)
+Single coordinated pass to make this rover feel like a sibling of
+`arm-drone-lidar-workflow` rather than a tangential project, and to finish the
+unimplemented orchestrator + watchdog that were stubs after the original
+2026-05-23 v0.10 commit. Five stages, each independently committable:
 
-**Deliverables:**
-- [ ] `WIRING_AND_PINS.md` — Complete pinout and wiring diagram
-- [ ] Bench test photos/video
-- [ ] Individual sensor test scripts
+| Stage | Scope | Status |
+|---|---|---|
+| **A** | Operational completion — `main.py` orchestrator + `watchdog.py` heartbeat, with `tests/test_main.py` and `tests/test_watchdog.py` | ✅ shipped (`8bede00`) |
+| **B** | Convention mirroring — `STATUS_SCHEMA_VERSION` constant, `ZONE_EPSG` dict, GGA cross-ref, `_io.atomic_write_json` extraction | ✅ shipped (`5a575f4`) |
+| **C** | Deployment infrastructure — `deploy/systemd/`, `deploy/udev/`, `deploy/install.sh`, sd_notify, `/etc/rover/secret` convention | ✅ shipped (`f2792da`) |
+| **D** | Doc refresh — DECISIONS.md rename + restructure, README/CLAUDE.md positioning, stale-doc cleanup, CROSS_REPO_BACKLOG.md | 🔄 in flight |
+| **E** | LoRa frame v2 callout in BASE_STATION_INTEGRATION.md flagging the sibling Heltec firmware is still v1 | ⏳ pending |
 
-### Phase 2: Base Station Setup (+2-4 weeks)
+See [DEC-035](DECISIONS.md#dec-035-deep-alignment-with-arm-drone-lidar-workflow-v010-overhaul)
+for the decision record.
 
-**Objective:** RTK base station operational and broadcasting corrections.
+### v1.0 Field Validation (next)
 
-**Tasks:**
-- [ ] Configure ZED-F9P as base station (survey-in mode)
-- [ ] Verify RTCM3 message generation
-- [ ] Flash ESP32 with RTCM transmitter firmware
-- [ ] Test LoRa transmission range and reliability
-- [ ] Mount on tripod/mast for field deployment
+**Objective:** Demonstrate every row in §1.1 above on real hardware in a real
+scan session, against the live Base-Station `ARM_BASE` caster.
 
-**Deliverables:**
-- [ ] Base station assembly documentation
-- [ ] RTCM transmission verification log
-- [ ] Range test results
+| Block | Tasks |
+|---|---|
+| Hardware acquisition | Order 2× ZED-F9P + antennas + 3.3V regulator + batteries (see [HARDWARE.md §1.1](HARDWARE.md#11-acquisition-status)) |
+| Wiring + bench rig | Assemble per HARDWARE.md pinout; verify each sensor with `tests/hardware/test_*` diagnostic scripts |
+| Integrated bench scan | `python -m rover.main` end-to-end with all sensors + NTRIP + Base-Station status.json reachable |
+| Field shakedown | Outdoor RTK FIX achieved within ~60 s; runtime ≥4 h; LoRa fallback verified |
+| Accuracy validation | Repeatability (<5 cm) and control-point comparison if accessible |
+| Release | Tag `v1.0`; close out v1.1 backlog |
 
-### Phase 3: Rover Software Core (+4-6 weeks)
+Cross-repo dependency: full LoRa-fallback validation needs sibling-side Heltec
+v2 firmware + base LoRa-RTCM transmitter (tracked in
+[CROSS_REPO_BACKLOG.md](CROSS_REPO_BACKLOG.md)). Until that lands, NTRIP-only
+field validation proceeds independently.
 
-**Objective:** Core acquisition and logging software operational.
+### v1.1 Calibration (after v1.0)
 
-**Tasks:**
-- [ ] Implement Python modules:
-  - [ ] `config.py` — TOML parsing
-  - [ ] `lidar.py` — LD19 acquisition
-  - [ ] `imu.py` — MPU-9250 + Madgwick
-  - [ ] `gnss.py` — ZED-F9P parsing
-  - [ ] `stepper.py` — Motor control (use `rpi-lgpio` per D-029)
-  - [ ] `camera.py` — Image capture
-  - [ ] `logger.py` — JSONL output
-  - [ ] `main.py` — Orchestration
-- [ ] Flash ESP32 with RTCM receiver + telemetry firmware
-- [ ] Verify RTCM flow: Base → LoRa → ESP32 → F9P
-- [ ] Verify RTK fix achieved on rover
-- [ ] Run integrated acquisition test
+**Objective:** Lift accuracy from ±5–10 cm to ±2–3 cm by adding extrinsic
+calibration of the LiDAR → IMU → GNSS transform chain.
 
-**Deliverables:**
-- [ ] Working rover software (v0.1)
-- [ ] Sample scan dataset
-- [ ] RTK fix verification log
+- Define calibration procedure (T_lidar_imu, T_body_gnss).
+- Closed-loop motor control via encoder or limit switch.
+- ICP-based scan-to-scan registration in post-processing for indoor scans.
+- Configuration validation improvements based on v1.0 field experience.
 
-### Phase 4: Monitoring Console (+1-2 weeks)
-
-**Objective:** T-Deck displaying rover status.
-
-**Tasks:**
-- [ ] Implement T-Deck firmware:
-  - [ ] LoRa packet reception
-  - [ ] STATUS packet parsing
-  - [ ] LINK packet parsing
-  - [ ] Display rendering
-- [ ] Verify telemetry flow: Rover → LoRa → T-Deck
-- [ ] Field test monitoring range
-
-**Deliverables:**
-- [ ] T-Deck firmware (v0.1)
-- [ ] Monitoring UI documentation
-
-### Phase 5: Post-Processing Pipeline (+2-3 weeks)
-
-**Objective:** Convert raw logs to georeferenced point cloud.
-
-**Tasks:**
-- [ ] Implement georeferencing script:
-  - [ ] Parse JSONL logs
-  - [ ] Apply IMU orientation to points
-  - [ ] Transform to GNSS position
-  - [ ] Output PLY format
-- [ ] Test with PDAL for LAS/LAZ conversion
-- [ ] Visualize in CloudCompare
-- [ ] Validate accuracy against known features
-
-**Deliverables:**
-- [ ] `georef.py` — Georeferencing script
-- [ ] Sample georeferenced point cloud
-- [ ] Accuracy validation report
-
-### Phase 6: Field Testing & Validation (+2-4 weeks)
-
-**Objective:** Validate system in real-world conditions.
-
-**Tasks:**
-- [ ] Outdoor RTK scanning tests
-- [ ] Indoor relative mapping tests
-- [ ] Runtime/battery tests
-- [ ] Range/reliability tests
-- [ ] Repeatability tests
-- [ ] Accuracy validation (control points if available)
-- [ ] Document issues and iterate
-
-**Deliverables:**
-- [ ] Field test report
-- [ ] Issue log with resolutions
-- [ ] v1.0 release candidate
-
-### Phase 7: v1.0 Release
-
-**Objective:** Freeze v1.0 with documentation.
-
-**Tasks:**
-- [ ] Final code cleanup
-- [ ] Update all documentation
-- [ ] Create release package
-- [ ] Archive known issues for v1.1
-
-**Deliverables:**
-- [ ] v1.0 release tag
-- [ ] Complete documentation set
-- [ ] v1.1 backlog
+See [DEC-024](DECISIONS.md#dec-024-v10-point-cloud-accuracy-target) for the
+v1.0 / v1.1 accuracy split.
 
 ---
 
@@ -360,6 +279,6 @@ Documents to create during implementation:
 
 | Version | Date | Changes |
 |---------|------|---------|
-| v0.9.2 | 2026-02-22 | Audit update: fix upstream repo URL, add D-029 (GPIO library), note upstream changes |
+| v0.9.2 | 2026-02-22 | Audit update: fix upstream repo URL, add DEC-029 (GPIO library), note upstream changes |
 | v0.9.1 | 2025-12-26 | Architecture freeze; complete gap analysis |
 | v0.9.0 | 2025-12-26 | Initial project documentation |

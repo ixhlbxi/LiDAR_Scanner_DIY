@@ -44,7 +44,7 @@ class GeneralConfig:
 
 @dataclass(frozen=True)
 class SessionConfig:
-    """Per-session mode + project metadata (D-030)."""
+    """Per-session mode + project metadata (DEC-030)."""
 
     profile: str
     project_code: str
@@ -55,7 +55,7 @@ class SessionConfig:
 
 @dataclass(frozen=True)
 class NtripConfig:
-    """NTRIP-over-IP RTK transport (D-031, D-032)."""
+    """NTRIP-over-IP RTK transport (DEC-031, DEC-032)."""
 
     enabled: bool
     client_location: str
@@ -69,7 +69,7 @@ class NtripConfig:
 
 @dataclass(frozen=True)
 class BaseStationIntegrationConfig:
-    """status.json publisher targeting Base-Station-compatible consumers (D-033)."""
+    """status.json publisher targeting Base-Station-compatible consumers (DEC-033)."""
 
     enabled: bool
     status_json_path: str
@@ -79,7 +79,7 @@ class BaseStationIntegrationConfig:
 
 @dataclass(frozen=True)
 class TelemetryConfig:
-    """Loopback HTTP status endpoint (D-033 channel B)."""
+    """Loopback HTTP status endpoint (DEC-033 channel B)."""
 
     http_enabled: bool
     http_bind: str
@@ -433,7 +433,7 @@ def _validate(raw: dict) -> None:
     # Normalize to uppercase
     g["log_level"] = g["log_level"].upper()
 
-    # -- session (D-030) --
+    # -- session (DEC-030) --
     se = raw["session"]
     _require_type("session", "profile", se["profile"], str)
     _require_in("session", "profile", se["profile"], {"personal", "arm_group"})
@@ -510,7 +510,7 @@ def _validate(raw: dict) -> None:
     _require_positive("gnss", "survey_in_accuracy_m", gn["survey_in_accuracy_m"])
     gn["survey_in_accuracy_m"] = float(gn["survey_in_accuracy_m"])
 
-    # -- ntrip (D-031, D-032) --
+    # -- ntrip (DEC-031, DEC-032) --
     nt = raw["ntrip"]
     _require_type("ntrip", "enabled", nt["enabled"], bool)
     _require_type("ntrip", "client_location", nt["client_location"], str)
@@ -549,7 +549,7 @@ def _validate(raw: dict) -> None:
     _require_type("lora", "role", lo["role"], str)
     _require_in("lora", "role", lo["role"], {"rtcm_rx+status_tx", "status_tx_only", "disabled"})
 
-    # -- base_station_integration (D-033 channel A) --
+    # -- base_station_integration (DEC-033 channel A) --
     bsi = raw["base_station_integration"]
     _require_type("base_station_integration", "enabled", bsi["enabled"], bool)
     _require_type("base_station_integration", "status_json_path", bsi["status_json_path"], str)
@@ -559,7 +559,7 @@ def _validate(raw: dict) -> None:
     _require_positive("base_station_integration", "publish_interval_sec", bsi["publish_interval_sec"])
     bsi["publish_interval_sec"] = float(bsi["publish_interval_sec"])
 
-    # -- telemetry (D-033 channel B) --
+    # -- telemetry (DEC-033 channel B) --
     tm = raw["telemetry"]
     _require_type("telemetry", "http_enabled", tm["http_enabled"], bool)
     _require_type("telemetry", "http_bind", tm["http_bind"], str)
@@ -626,7 +626,7 @@ def _validate(raw: dict) -> None:
             f"must be less than low_battery_mv ({pw['low_battery_mv']})"
         )
 
-    # -- cross-section: arm_group profile constraints (D-030) --
+    # -- cross-section: arm_group profile constraints (DEC-030) --
     if se["profile"] == "arm_group":
         if not se["project_code"]:
             raise ValueError(

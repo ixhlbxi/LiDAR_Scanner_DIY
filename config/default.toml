@@ -6,7 +6,7 @@
 device_name = "rover-01"          # Device identifier
 log_level = "INFO"                # DEBUG, INFO, WARNING, ERROR
 
-[session]                         # D-030 — dual-mode operation
+[session]                         # DEC-030 — dual-mode operation
 profile = "personal"              # "personal" | "arm_group"
 project_code = ""                 # required when profile = "arm_group"
 mission_tag = ""                  # optional; uppercased; tags artifacts in metadata.json
@@ -23,7 +23,7 @@ scan_rate_hz = 10                 # Target scan rate (1–20)
 
 [stepper]
 enabled = true
-steps_per_rev = 3200              # With 1/16 microstepping (D-017)
+steps_per_rev = 3200              # With 1/16 microstepping (DEC-017)
 rpm = 1.0                         # Rotation speed
 step_interval_deg = 1.5           # Degrees per step
 direction_pin = 17                # BCM GPIO
@@ -36,7 +36,7 @@ bus = 1                           # I2C bus number
 address = 0x68                    # MPU-9250 address (or 0x69)
 sample_rate_hz = 200              # IMU polling rate
 fusion_output_hz = 100            # Madgwick output rate
-use_magnetometer = true           # Enable mag (disable during motor — D-013)
+use_magnetometer = true           # Enable mag (disable during motor — DEC-013)
 fusion_beta = 0.1                 # Madgwick filter gain
 
 [gnss]
@@ -49,7 +49,7 @@ rtcm_profile = "robust"           # "robust" or "low_bandwidth"
 survey_in_duration_sec = 300      # Base station survey-in time
 survey_in_accuracy_m = 0.02       # Target accuracy (2 cm)
 
-[ntrip]                           # D-031, D-032 — primary RTK transport
+[ntrip]                           # DEC-031, DEC-032 — primary RTK transport
 enabled = false                   # default off; enable per-session for arm_group
 client_location = "pi"            # "pi" | "esp32"
 caster_host = "rtk-base.local"
@@ -62,7 +62,7 @@ password_env = "ROVER_NTRIP_PASSWORD"
 # in deploy/systemd/rover.service. Mirrors sibling's /etc/rtk-base/secret.
 gga_send_interval_sec = 10.0      # 0 = never; needed for VRS-style casters
 
-[lora]                            # D-031 — RTCM fallback + telemetry transport
+[lora]                            # DEC-031 — RTCM fallback + telemetry transport
 enabled = true
 # Stable symlink created by deploy/udev/99-rover-esp32.rules. Pre-install
 # fallback: "/dev/ttyUSB1" (whichever CP2102 enumerates second).
@@ -75,13 +75,13 @@ sync_word = 0x12                  # private; matches Heltec/T-Deck firmware
 telemetry_interval_sec = 1.0      # STATUS/LINK Tx cadence
 role = "rtcm_rx+status_tx"        # "rtcm_rx+status_tx" | "status_tx_only" | "disabled"
 
-[base_station_integration]        # D-033 channel A
+[base_station_integration]        # DEC-033 channel A
 enabled = false                   # true in arm_group profile
 status_json_path = "/run/rover/status.json"
 status_schema_version = 1
 publish_interval_sec = 1.0
 
-[telemetry]                       # D-033 channel B
+[telemetry]                       # DEC-033 channel B
 http_enabled = false              # stdlib http.server on loopback
 http_bind = "127.0.0.1"
 http_port = 8090

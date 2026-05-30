@@ -20,8 +20,8 @@ This is not a pytest unit test. It exits 0 on success (RTK FIX achieved), 1
 otherwise. Designed for field commissioning + bench bring-up.
 
 Decision references:
-    D-031 NTRIP-primary RTK
-    D-032 NTRIP client location (this script exercises the Pi-side path)
+    DEC-031 NTRIP-primary RTK
+    DEC-032 NTRIP client location (this script exercises the Pi-side path)
 """
 
 from __future__ import annotations

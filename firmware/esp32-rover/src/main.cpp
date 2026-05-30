@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
-// Rover ESP32 firmware — two modes (D-031, D-032)
+// Rover ESP32 firmware — two modes (DEC-031, DEC-032)
 //
-//   Mode A: lora_rtcm_relay   (default; preserves D-006 robustness)
+//   Mode A: lora_rtcm_relay   (default; preserves DEC-006 robustness)
 //     - LoRa Rx: receives RTCM_CHUNK (LoRa frame v2 type=0x10) from the
 //       arm-drone-lidar-workflow Base-Station Heltec, writes RTCM3 to F9P UART2.
 //     - USB Rx: STATUS/LINK fields pushed from the Pi as raw LoRa-frame-v2

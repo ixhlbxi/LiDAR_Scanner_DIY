@@ -11,7 +11,7 @@ Handles the LD19 binary serial protocol:
 Serial interface: /dev/ttyUSB0 at 230400 baud (configurable).
 
 Decision references:
-    D-014  Timestamp sync via ring buffer + slerp
+    DEC-014  Timestamp sync via ring buffer + slerp
 
 Dependencies:
     pyserial

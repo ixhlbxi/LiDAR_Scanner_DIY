@@ -4,11 +4,11 @@ PlatformIO project for the rover-side ESP32. Two build environments:
 
 | Env | Role | Replaces in rover |
 |---|---|---|
-| `lora_rtcm_relay` (default) | Receives RTCM_CHUNK (LoRa frame v2 type=`0x10`) from the Base-Station Heltec, writes to F9P UART2. Also relays STATUS/LINK (`0x01`/`0x02`) that the Pi pushes over USB. | RTK fallback for off-network operation (D-031). |
-| `ntrip_client` | Connects to NTRIP caster over WiFi (default `rtk-base.local:2101/ARM_BASE`), streams RTCM into F9P UART2 directly. Same STATUS/LINK passthrough. | Alternate RTK path that keeps the Pi out of the correction stream (D-032). |
+| `lora_rtcm_relay` (default) | Receives RTCM_CHUNK (LoRa frame v2 type=`0x10`) from the Base-Station Heltec, writes to F9P UART2. Also relays STATUS/LINK (`0x01`/`0x02`) that the Pi pushes over USB. | RTK fallback for off-network operation (DEC-031). |
+| `ntrip_client` | Connects to NTRIP caster over WiFi (default `rtk-base.local:2101/ARM_BASE`), streams RTCM into F9P UART2 directly. Same STATUS/LINK passthrough. | Alternate RTK path that keeps the Pi out of the correction stream (DEC-032). |
 
 See `../../docs/BASE_STATION_INTEGRATION.md` for the protocol contract and
-`../../docs/DECISIONS.md` D-031/D-032 for the design rationale.
+`../../docs/DECISIONS.md` DEC-031/DEC-032 for the design rationale.
 
 ## Hardware target
 

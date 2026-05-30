@@ -1,4 +1,4 @@
-"""Triple-channel telemetry router (D-033).
+"""Triple-channel telemetry router (DEC-033).
 
 Routes rover status to three independent, individually enable-able publishers:
 
@@ -27,7 +27,7 @@ Public API:
     StatusJsonPublisher / LocalHttpPublisher / LoRaPublisher — individual channels
     atomic_write_json — re-exported from rover._io (mirror of base-station helper)
 
-Decision references: D-033 (this whole module exists for D-033).
+Decision references: DEC-033 (this whole module exists for DEC-033).
 
 Dependencies: stdlib only (pyserial is imported lazily inside LoRaPublisher.start()
 so off-Pi tests don't require it).
@@ -144,7 +144,7 @@ class _Publisher:
 
 
 class StatusJsonPublisher(_Publisher):
-    """Channel A — Base-Station-compatible atomic status.json (D-033)."""
+    """Channel A — Base-Station-compatible atomic status.json (DEC-033)."""
 
     name = "status_json"
 
@@ -193,7 +193,7 @@ class StatusJsonPublisher(_Publisher):
 
 
 class LocalHttpPublisher(_Publisher):
-    """Channel B — stdlib http.server on loopback (D-033).
+    """Channel B — stdlib http.server on loopback (DEC-033).
 
     GET /status — latest RoverStatus snapshot, same shape as StatusJsonPublisher.
     GET /health — `{"ok": true, "uptime_s": N}`.
@@ -283,7 +283,7 @@ def _make_http_handler(owner: LocalHttpPublisher) -> type:
 
 
 class LoRaPublisher(_Publisher):
-    """Channel C — LoRa STATUS + LINK frames to rover ESP32 via USB serial (D-033)."""
+    """Channel C — LoRa STATUS + LINK frames to rover ESP32 via USB serial (DEC-033)."""
 
     name = "lora"
 

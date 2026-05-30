@@ -1,33 +1,51 @@
 # Design Decisions Log
 
-**Document Status:** v0.10 — in overhaul (Base-Station integration)
-**Last Updated:** 2026-05-23
+**Document Status:** v0.10 — deep alignment with arm-drone-lidar-workflow
+**Last Updated:** 2026-05-30
 
-This document records all significant architectural and engineering decisions, including rationale, alternatives considered, and implications.
+This document records all significant architectural and engineering decisions,
+including rationale, alternatives considered, and implications.
 
-> **v0.10 overhaul:** The v0.9.2 architecture froze before the `arm-drone-lidar-workflow`
-> Base-Station was built. This document is being revised to reflect that the rover now
-> integrates with that production Base-Station. Decisions D-005, D-006, and D-010 are
-> superseded — see D-030 through D-034 at the bottom of this file. The accompanying
-> integration contract lives in `docs/BASE_STATION_INTEGRATION.md`.
+> **v0.10 deep-alignment overhaul (Stage D.1):** Decision IDs renamed from
+> `D-NNN` to `DEC-NNN` to match the sibling `arm-drone-lidar-workflow` repo's
+> `docs/decisions/decision-log.md` format. Each entry now carries a
+> Status / Date / Decided-by / Rationale metadata block before the existing
+> Context / Rationale / Alternatives / Implications body. Dates are backfilled
+> from git: `2026-03-22` for DEC-001–DEC-029 (planning-era block) and
+> `2026-05-23` for DEC-030–DEC-034 (v0.10 integration block). Superseded
+> entries (DEC-005 / DEC-006 / DEC-010) point at their replacements.
 
 ---
 
 ## Decision Format
 
-Each decision follows this structure:
+Each decision starts with a metadata block:
+
+```
+**Status:** Accepted | Superseded by DEC-NNN | Provisional
+**Date:** YYYY-MM-DD
+**Decided by:** Brian
+**Rationale:** one-line summary (the body that follows expands on this)
+```
+
+Followed by these sections:
 - **Decision:** What was decided
 - **Context:** Why a decision was needed
 - **Rationale:** Why this option was chosen
 - **Alternatives Considered:** What else was evaluated
 - **Implications:** What this decision affects downstream
-- **Status:** Decided / Provisional / Revisit
 
 ---
 
 ## 1. System-Level Decisions
 
-### D-001: DIY Over Commercial Solution
+### DEC-001: DIY Over Commercial Solution
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Custom build is ~10× cheaper than commercial RTK LiDAR; the
+~5–10 cm accuracy tradeoff is acceptable for the intended use.
 
 **Decision:** Build custom RTK scanning platform rather than purchase commercial equipment.
 
@@ -48,11 +66,15 @@ Each decision follows this structure:
 - More development time required
 - Full customization possible
 
-**Status:** Decided
-
 ---
 
-### D-002: PiLiDAR as Foundation
+### DEC-002: PiLiDAR as Foundation
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** PiLiDAR validates the Pi + LD19 + stepper-rotation concept;
+extending it lets us focus effort on RTK/IMU rather than basic scanning.
 
 **Decision:** Extend the open-source PiLiDAR project rather than design from scratch.
 
@@ -71,11 +93,15 @@ Each decision follows this structure:
 - Inherit some PiLiDAR limitations (rotation mechanism, LD19 range)
 - Can leverage existing code and documentation
 
-**Status:** Decided
-
 ---
 
-### D-003: Raspberry Pi Over MCU-Only
+### DEC-003: Raspberry Pi Over MCU-Only
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Sensor fusion + camera + logging exceeds an MCU's comfort
+zone; Pi's Linux + Python ecosystem accelerates everything else.
 
 **Decision:** Use Raspberry Pi 4 as main controller, not bare microcontrollers.
 
@@ -98,13 +124,17 @@ Each decision follows this structure:
 - Linux boot time (~20-30 sec)
 - SD card reliability considerations
 
-**Status:** Decided
-
 ---
 
 ## 2. GNSS / RTK Decisions
 
-### D-004: ZED-F9P for RTK
+### DEC-004: ZED-F9P for RTK
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** De-facto DIY-RTK standard with the documentation, dual-band
+support, and vendor breadth a hobbyist project actually needs.
 
 **Decision:** Use u-blox ZED-F9P for both base and rover GNSS receivers.
 
@@ -127,11 +157,15 @@ Each decision follows this structure:
 - Need dual-band antennas (~$100-200)
 - Well-documented configuration process
 
-**Status:** Decided
-
 ---
 
-### D-005: RTK via LoRa (Not Cellular) — **SUPERSEDED by D-031**
+### DEC-005: RTK via LoRa (Not Cellular)
+
+**Status:** Superseded by DEC-031 (2026-05-23)
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale (original):** No subscription, no coverage dependency,
+predictable ~1–2 s latency, full control of correction stream.
 
 **Decision:** Deliver RTCM corrections via LoRa radio link, not cellular/internet.
 
@@ -153,13 +187,19 @@ Each decision follows this structure:
 - Bandwidth constrained (~600-800 bytes/sec usable)
 - Range limited to ~2-5 km LOS
 
-**Status:** Superseded 2026-05-23 by D-031. The `arm-drone-lidar-workflow` Base-Station
-exposes its corrections via an NTRIP caster (mountpoint `ARM_BASE` on port 2101); LoRa
-is retained only as the off-network fallback. See D-031.
+**Supersession note:** The `arm-drone-lidar-workflow` Base-Station exposes
+its corrections via an NTRIP caster (mountpoint `ARM_BASE` on port 2101);
+LoRa is retained only as the off-network fallback. See DEC-031.
 
 ---
 
-### D-006: RTCM Routing — ESP32 Direct to F9P — **SUPERSEDED by D-032**
+### DEC-006: RTCM Routing — ESP32 Direct to F9P
+
+**Status:** Superseded by DEC-032 (2026-05-23)
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale (original):** Lower latency for corrections, RTK survives a
+Linux crash, simpler ESP32 code as a "dumb pipe" for RTCM.
 
 **Decision:** Route RTCM corrections directly from ESP32 (LoRa) to ZED-F9P via UART, bypassing the Raspberry Pi.
 
@@ -180,13 +220,19 @@ is retained only as the off-network fallback. See D-031.
 - Pi not in critical path for positioning
 - Less real-time RTCM visibility on Pi (acceptable)
 
-**Status:** Superseded 2026-05-23 by D-032. The blanket "Pi never in the correction path"
-rule no longer holds — the Pi runs the NTRIP client in the default configuration. ESP32-as-
-direct-pipe is retained as a per-session opt-in. See D-032.
+**Supersession note:** The blanket "Pi never in the correction path" rule
+no longer holds — the Pi runs the NTRIP client in the default configuration.
+ESP32-as-direct-pipe is retained as a per-session opt-in. See DEC-032.
 
 ---
 
-### D-007: RTCM Constellation Profiles
+### DEC-007: RTCM Constellation Profiles
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Two profiles let the operator trade constellation coverage
+against bandwidth at config time without code changes.
 
 **Decision:** Implement two RTCM message profiles: Robust (GPS+GLONASS+Galileo+BeiDou) and Low-Bandwidth (GPS+GLONASS only).
 
@@ -207,13 +253,17 @@ direct-pipe is retained as a per-session opt-in. See D-032.
 - Base station must generate appropriate RTCM set
 - Monitor bandwidth utilization during testing
 
-**Status:** Decided
-
 ---
 
 ## 3. Communications Decisions
 
-### D-008: LoRa Parameters
+### DEC-008: LoRa Parameters
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** SF 9–10 / BW 125 kHz / CR 4/5 balances 1–3 km range with
+throughput sufficient for RTCM + sparse telemetry.
 
 **Decision:** Use LoRa with SF 9-10, 125 kHz bandwidth, CR 4/5.
 
@@ -235,11 +285,15 @@ direct-pipe is retained as a per-session opt-in. See D-032.
 - Telemetry must be sparse (multiplex with RTCM)
 - Range adequate for typical field operations
 
-**Status:** Decided
-
 ---
 
-### D-009: LoRa Packet Loss Handling
+### DEC-009: LoRa Packet Loss Handling
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** RTK tolerates occasional correction loss inherently;
+retries add latency and code complexity without enough payoff.
 
 **Decision:** Tolerate RTCM packet loss without retries; rover continues logging autonomously.
 
@@ -260,11 +314,15 @@ direct-pipe is retained as a per-session opt-in. See D-032.
 - Telemetry may have gaps
 - Need sequence numbers to detect loss rate
 
-**Status:** Decided
-
 ---
 
-### D-010: T-Deck Receive-Only (v1.0) — **SUPERSEDED by D-033**
+### DEC-010: T-Deck Receive-Only (v1.0)
+
+**Status:** Superseded by DEC-033 (2026-05-23)
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale (original):** Receive-only is simpler to implement; sufficient
+for monitoring; reduces risk of accidental commands.
 
 **Decision:** Monitoring terminal is receive-only in v1.0; no remote commands.
 
@@ -285,17 +343,22 @@ direct-pipe is retained as a per-session opt-in. See D-032.
 - Cannot change settings remotely
 - Revisit in v1.1 for remote control
 
-**Status:** Superseded 2026-05-23 by D-033. The T-Deck is now owned by the
-`arm-drone-lidar-workflow` Base-Station (handheld for base monitoring), not a
-rover-attached field monitor. Rover field visibility comes from the triple-channel
-telemetry described in D-033 — Base-Station-compatible `status.json`, an own HTTP
-endpoint, and LoRa STATUS/LINK packets. See D-033.
+**Supersession note:** The T-Deck is now owned by the
+`arm-drone-lidar-workflow` Base-Station (handheld for base monitoring),
+not a rover-attached field monitor. Rover field visibility comes from the
+triple-channel telemetry described in DEC-033. See DEC-033.
 
 ---
 
 ## 4. Sensor & Fusion Decisions
 
-### D-011: MPU-9250 as Primary IMU
+### DEC-011: MPU-9250 as Primary IMU
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** 9-axis gives indoor heading when GNSS is unavailable;
+6-axis (MPU-6050) is bench-test only.
 
 **Decision:** Use MPU-9250 (9-axis with magnetometer) as primary IMU; MPU-6050 for testing only.
 
@@ -316,11 +379,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Calibration required (hard/soft iron)
 - More complex than 6-axis but necessary
 
-**Status:** Decided
-
 ---
 
-### D-012: Madgwick Filter for Sensor Fusion
+### DEC-012: Madgwick Filter for Sensor Fusion
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Computationally light, widely validated, adequate for the
+rover's scan-rate orientation needs; EKF available if v1.1 needs it.
 
 **Decision:** Use Madgwick filter for IMU sensor fusion (v1.0).
 
@@ -342,11 +409,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Tuning parameter (beta) may need adjustment
 - EKF path available for v1.1 if needed
 
-**Status:** Decided
-
 ---
 
-### D-013: Magnetometer Disabled During Motor Operation
+### DEC-013: Magnetometer Disabled During Motor Operation
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Stepper EMI corrupts mag readings; shielding is expensive
+and unreliable; gyro integration carries short-term heading instead.
 
 **Decision:** Disable magnetometer readings while stepper motor is energized or rotating.
 
@@ -368,11 +439,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Indoor scans rely on gyro (drift over time)
 - Outdoor scans use GNSS-derived heading
 
-**Status:** Decided
-
 ---
 
-### D-014: IMU-LiDAR Timestamp Correlation via Slerp
+### DEC-014: IMU-LiDAR Timestamp Correlation via Slerp
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Ring-buffer + bracket lookup + quaternion slerp gives
+smooth O(1) per-scan orientation without gimbal-lock or hardware sync.
 
 **Decision:** Correlate IMU orientation to LiDAR scan timestamps using ring buffer + bracket lookup + spherical linear interpolation (slerp).
 
@@ -394,13 +469,17 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - IMU must sample faster than LiDAR (200-400 Hz vs 5-10 Hz)
 - Quality of point cloud depends on correct implementation
 
-**Status:** Decided
-
 ---
 
 ## 5. Mechanical Decisions
 
-### D-015: Direct Drive Rotation (No Slip Ring)
+### DEC-015: Direct Drive Rotation (No Slip Ring)
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Slip ring adds cost and failure modes; ±180° with a
+flexible cable loop is sufficient for v1.0 use cases.
 
 **Decision:** Use direct drive from NEMA17 to rotating platform without slip ring; manage cables via flexible loop.
 
@@ -420,11 +499,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Cable fatigue is potential long-term issue
 - Slip ring is v1.1+ upgrade path
 
-**Status:** Decided
-
 ---
 
-### D-016: Open-Loop Stepper Indexing
+### DEC-016: Open-Loop Stepper Indexing
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Steppers rarely miss steps at low speed; closed-loop adds
+hardware for marginal benefit at v1.0 scale.
 
 **Decision:** Use open-loop step counting for position; no limit switch or encoder in v1.0.
 
@@ -446,11 +529,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Potential for cumulative error over very long scans
 - Revisit if step loss becomes problem
 
-**Status:** Decided
-
 ---
 
-### D-017: 1/16 Microstepping
+### DEC-017: 1/16 Microstepping
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Smoothest motion + finest position resolution the A4988
+supports; torque adequate for light LiDAR payload.
 
 **Decision:** Configure A4988 for 1/16 microstepping (3200 steps/rev).
 
@@ -472,13 +559,17 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Lower holding torque than full step (acceptable)
 - Motor runs quieter
 
-**Status:** Decided
-
 ---
 
 ## 6. Power Decisions
 
-### D-018: Split Power Domains
+### DEC-018: Split Power Domains
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Stepper transients can brown out shared compute power;
+isolated rails keep the Pi alive when the motor battery dies.
 
 **Decision:** Separate power supplies for compute (5V) and motors (12V).
 
@@ -499,11 +590,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Separate charging
 - Slightly more weight/complexity
 
-**Status:** Decided
-
 ---
 
-### D-019: Dedicated 3.3V Regulator
+### DEC-019: Dedicated 3.3V Regulator
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** F9P peaks at 150+ mA; the Pi's 3.3V GPIO rail tops out at
+~50–100 mA; dedicated switching reg avoids brownouts and protects the Pi.
 
 **Decision:** Power ZED-F9P and IMU from dedicated 3.3V switching regulator (≥1A), NOT from Pi's GPIO 3.3V rail.
 
@@ -525,13 +620,17 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Must verify F9P board power options (some accept 5V USB)
 - Additional wiring complexity
 
-**Status:** Decided
-
 ---
 
 ## 7. Software Decisions
 
-### D-020: Python on Raspberry Pi OS Lite
+### DEC-020: Python on Raspberry Pi OS Lite
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Rapid development + extensive sensor libraries; OS Lite
+drops GUI overhead while keeping 64-bit memory headroom.
 
 **Decision:** Use Python 3 on Raspberry Pi OS Lite (64-bit) for rover software.
 
@@ -554,11 +653,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - May need to optimize hot paths if issues arise
 - Threading via Python threads (GIL limitations)
 
-**Status:** Decided
-
 ---
 
-### D-021: JSONL for Logging
+### DEC-021: JSONL for Logging
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Append-only + crash-safe + human-readable; size penalty
+vs binary is acceptable for v1.0 data rates.
 
 **Decision:** Log sensor data in JSONL (newline-delimited JSON) format.
 
@@ -581,11 +684,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Fast enough for v1.0 data rates
 - Easy post-processing with Python/jq
 
-**Status:** Decided
-
 ---
 
-### D-022: Post-Processed Georeferencing
+### DEC-022: Post-Processed Georeferencing
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Real-time georef is significant complexity for no v1.0
+benefit; post-processing also enables better tooling (PDAL, CloudCompare).
 
 **Decision:** Georeferencing is post-processed in v1.0; not real-time.
 
@@ -606,11 +713,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Need robust metadata (timestamps, poses, GNSS fixes)
 - Python scripts for georeferencing pipeline
 
-**Status:** Decided
-
 ---
 
-### D-023: SLAM Deferred to v1.1+
+### DEC-023: SLAM Deferred to v1.1+
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** SLAM is significant scope; v1.0 focus is RTK-outdoor;
+relative scans are useful indoors without it.
 
 **Decision:** No real-time SLAM in v1.0; indoor mode provides relative mapping only.
 
@@ -631,13 +742,18 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - No loop closure or drift correction
 - Post-processing can apply ICP registration
 
-**Status:** Decided
-
 ---
 
 ## 8. Accuracy Decisions
 
-### D-024: v1.0 Point Cloud Accuracy Target
+### DEC-024: v1.0 Point Cloud Accuracy Target
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Honest accounting — RTK is cm-level at the antenna, but
+the transform chain adds error without extrinsic calibration. ±5–10 cm is
+what you actually get in v1.0.
 
 **Decision:** v1.0 point cloud accuracy target is ±5-10 cm absolute; RTK solution accuracy is ±2-3 cm at antenna.
 
@@ -658,11 +774,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Calibration is v1.1 upgrade path
 - Still significantly better than non-RTK (~3m)
 
-**Status:** Decided
-
 ---
 
-### D-025: Validation via Repeatability + Control Points
+### DEC-025: Validation via Repeatability + Control Points
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Repeatability is self-verifiable; control points add ground
+truth when accessible; CloudCompare catches gross errors visually.
 
 **Decision:** Validate accuracy through repeatability testing and comparison to known control points (if available).
 
@@ -683,13 +803,17 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Seek opportunity to compare against survey data
 - Document achieved vs. claimed accuracy
 
-**Status:** Decided
-
 ---
 
 ## 9. Camera Decisions
 
-### D-026: Camera as Visual Reference (Not Photogrammetry)
+### DEC-026: Camera as Visual Reference (Not Photogrammetry)
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Context imagery is high-value for QA; full photogrammetry
+is significant scope and deferred to v1.2+.
 
 **Decision:** Camera captures context imagery for visual reference; not integrated into 3D reconstruction in v1.0.
 
@@ -710,11 +834,15 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Associated with scans via timestamp/index
 - Future colorization possible via nearest-frame lookup
 
-**Status:** Decided
-
 ---
 
-### D-027: Camera Triggered Per Rotation Step
+### DEC-027: Camera Triggered Per Rotation Step
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Triggered capture matches scan structure, keeps storage
+sane, and aligns naturally with step indices for post-processing.
 
 **Decision:** Capture one image per rotation step (or per N steps), not continuous video.
 
@@ -736,13 +864,24 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Storage ~500KB-1MB per image
 - Exact cadence tunable via config
 
-**Status:** Decided
-
 ---
 
 ## 10. Configuration Decisions
 
-### D-028: TOML Configuration File
+### DEC-028: TOML Configuration File
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** Typed, readable, comment-supporting; Python 3.11 stdlib
+`tomllib` removes the dependency surface; less whitespace-fragile than YAML.
+
+> **Cross-repo note:** The sibling `arm-drone-lidar-workflow` Base-Station
+> uses YAML for the same role. The two repos deliberately differ here —
+> alignment was discussed in the v0.10 overhaul and TOML was kept on the
+> rover side because (a) Python 3.11 ships a TOML reader in stdlib but not
+> a YAML one, and (b) the on-wire contract between the two systems is JSON,
+> so the config-file format is internal and divergence costs nothing.
 
 **Decision:** Use single TOML configuration file for all runtime parameters.
 
@@ -755,7 +894,7 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Single file is simpler than per-subsystem files
 
 **Alternatives Considered:**
-- YAML (more common but whitespace-sensitive)
+- YAML (more common but whitespace-sensitive; also requires pyyaml dep)
 - JSON (no comments, verbose)
 - INI (limited structure)
 - Per-subsystem files (more files to manage)
@@ -765,17 +904,21 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - Must define config schema
 - Can split to per-subsystem in future if needed
 
-**Status:** Decided
-
 ---
 
 ## 11. Upstream Compatibility Decisions
 
-### D-029: GPIO Library — rpi-lgpio over RPi.GPIO
+### DEC-029: GPIO Library — rpi-lgpio over RPi.GPIO
+
+**Status:** Accepted
+**Date:** 2026-03-22
+**Decided by:** Brian
+**Rationale:** `RPi.GPIO` is broken on Bookworm (sysfs GPIO removed);
+`rpi-lgpio` is a drop-in API replacement using the lgpio backend.
 
 **Decision:** Use `rpi-lgpio` (or `gpiozero`) for GPIO control on Raspberry Pi, NOT the legacy `RPi.GPIO` library.
 
-**Context:** Raspberry Pi OS Bookworm (the current 64-bit release) deprecated the sysfs GPIO interface. The upstream PiLiDAR project migrated from `RPi.GPIO` to `rpi-lgpio` to address this. Since our project targets Pi OS Lite 64-bit (D-020), this affects stepper motor control and any future GPIO-based interfaces.
+**Context:** Raspberry Pi OS Bookworm (the current 64-bit release) deprecated the sysfs GPIO interface. The upstream PiLiDAR project migrated from `RPi.GPIO` to `rpi-lgpio` to address this. Since our project targets Pi OS Lite 64-bit (DEC-020), this affects stepper motor control and any future GPIO-based interfaces.
 
 **Rationale:**
 - `RPi.GPIO` fails on Bookworm with `RuntimeError: Failed to add edge detection`
@@ -795,8 +938,6 @@ endpoint, and LoRa STATUS/LINK packets. See D-033.
 - lgpio creates temp files (`.lgd-nfy*`); set `LG_WD=/tmp` environment variable
 - No code impact if `gpiozero` is chosen instead (different API but well-documented)
 
-**Status:** Decided
-
 ---
 
 ## 12. Base-Station Integration Decisions (v0.10 overhaul)
@@ -805,7 +946,14 @@ These decisions reframe the rover around `ixhlbxi/arm-drone-lidar-workflow`'s pr
 Base-Station rather than the original self-contained design. The integration contract is
 documented in `docs/BASE_STATION_INTEGRATION.md`.
 
-### D-030: Dual-Mode Operation — Personal DIY vs. ARM Group Companion
+### DEC-030: Dual-Mode Operation — Personal DIY vs. ARM Group Companion
+
+**Status:** Accepted
+**Date:** 2026-05-23
+**Decided by:** Brian
+**Rationale:** Single binary + per-session profile switch avoids forking
+the codebase while letting ARM Group projects pull project-specific
+defaults (NTRIP, CRS, status.json output path).
 
 **Decision:** Add a session-level `profile` selector: `"personal"` (DIY use, off-grid)
 or `"arm_group"` (companion to the ARM Group drone/LiDAR survey workflow). All major
@@ -837,11 +985,16 @@ hard-codes either choice is a lock-in; one that branches on a config flag isn't.
 - Logger writes `session.profile` + tags into `metadata.json`.
 - `scripts/georef.py` honors the session-recorded profile when picking export defaults.
 
-**Status:** Decided
-
 ---
 
-### D-031: NTRIP-Primary RTK with LoRa Fallback (supersedes D-005)
+### DEC-031: NTRIP-Primary RTK with LoRa Fallback (supersedes DEC-005)
+
+**Status:** Accepted
+**Date:** 2026-05-23
+**Decided by:** Brian
+**Rationale:** Network NTRIP is the cheap reliable case (Base-Station
+already runs a caster the drone uses); LoRa is the rare-but-essential
+off-grid fallback.
 
 **Decision:** The rover's primary RTK transport is NTRIP-over-IP, consumed from the
 `arm-drone-lidar-workflow` Base-Station's caster (mountpoint `ARM_BASE` on
@@ -860,28 +1013,34 @@ Base-Station path.
 - LoRa fallback survives the "no LAN, no hotspot" case (deep-rural).
 
 **Alternatives Considered:**
-- NTRIP-only (D-005 reversed but no fallback — fragile in genuinely remote work).
-- LoRa-only (original D-005; ignores existing NTRIP infrastructure).
+- NTRIP-only (DEC-005 reversed but no fallback — fragile in genuinely remote work).
+- LoRa-only (original DEC-005; ignores existing NTRIP infrastructure).
 - Both always active, with the F9P picking the better stream (over-engineered for v1.0).
 
 **Implications:**
 - `[ntrip]` section in config; `[lora].role` configures whether LoRa carries RTCM-Rx
   in addition to STATUS/LINK-Tx.
-- Base-Station gains a LoRa-RTCM-Tx path (Phase D in the overhaul plan, separate PR).
+- Base-Station gains a LoRa-RTCM-Tx path (Phase D in the overhaul plan, separate PR
+  in the sibling repo — tracked in `docs/CROSS_REPO_BACKLOG.md`).
 - Operator switches between paths via config; runtime hot-switching is v1.1+.
-- Rover ESP32 firmware grows two modes (LoRa-RTCM-relay, NTRIP-over-WiFi-client) — see D-032.
-
-**Status:** Decided
+- Rover ESP32 firmware grows two modes (LoRa-RTCM-relay, NTRIP-over-WiFi-client) — see DEC-032.
 
 ---
 
-### D-032: NTRIP Client Location — Pi or ESP32, Per-Session (supersedes D-006's blanket rule)
+### DEC-032: NTRIP Client Location — Pi or ESP32, Per-Session (supersedes DEC-006's blanket rule)
+
+**Status:** Accepted
+**Date:** 2026-05-23
+**Decided by:** Brian
+**Rationale:** Pi-hosted is simpler (single config surface, easier to
+debug); ESP32-hosted preserves the "RTK survives Pi crash" property for
+critical missions. Per-session config-driven choice covers both.
 
 **Decision:** The NTRIP client can run on either the Pi or the ESP32, selected per session
 via `[ntrip].client_location = "pi" | "esp32"`. Both paths terminate at the same F9P
 (via USB or UART2 respectively).
 
-**Context:** D-006 mandated that the Pi never sit in the correction path — that was a
+**Context:** DEC-006 mandated that the Pi never sit in the correction path — that was a
 sound rule for the LoRa-relay architecture, but the NTRIP-primary model means the
 correction source is now usually a network endpoint, not an on-board LoRa packet stream.
 Either the Pi or the ESP32 can be the network client.
@@ -889,7 +1048,7 @@ Either the Pi or the ESP32 can be the network client.
 **Rationale:**
 - Pi-hosted NTRIP is simpler — credentials live in the Pi's environment, single config
   surface, easier to debug.
-- ESP32-hosted NTRIP preserves the D-006 property (RTK survives a Pi crash) for missions
+- ESP32-hosted NTRIP preserves the DEC-006 property (RTK survives a Pi crash) for missions
   where that matters.
 - One binary supports both via config; no firmware-side either/or lock-in.
 - Field experience will determine which one is the practical default for ARM Group sessions.
@@ -907,11 +1066,16 @@ Either the Pi or the ESP32 can be the network client.
 - When `client_location = "esp32"`, `src/rover/ntrip.py` does not start; `gnss.py` still
   reads NMEA/UBX from F9P USB for status.
 
-**Status:** Decided
-
 ---
 
-### D-033: Triple-Channel Telemetry (supersedes D-010)
+### DEC-033: Triple-Channel Telemetry (supersedes DEC-010)
+
+**Status:** Accepted
+**Date:** 2026-05-23
+**Decided by:** Brian
+**Rationale:** Different deployment modes want different observability —
+status.json for Base-Station tools, HTTP for personal DIY, LoRa for the
+no-network case. Each channel is independently enable-able.
 
 **Decision:** The rover publishes telemetry on three independent, individually enable-able
 channels:
@@ -925,7 +1089,7 @@ channels:
    LINK (`0x02`) packets, updated to the LoRa frame v2 envelope shared with the
    Base-Station.
 
-**Context:** The original D-010 assumed a custom rover-attached T-Deck consuming a
+**Context:** The original DEC-010 assumed a custom rover-attached T-Deck consuming a
 self-contained LoRa STATUS/LINK protocol. With the T-Deck now owned by the Base-Station,
 that single channel isn't enough — different deployment modes want different observability
 paths.
@@ -946,15 +1110,23 @@ paths.
 - `src/rover/telemetry.py` becomes a `TelemetryRouter` with pluggable publishers
   (`StatusJsonPublisher`, `LocalHttpPublisher`, `LoRaPublisher`).
 - Each publisher start/stop is independent; failures in one don't take down the others.
-- Status schema is rover-side (versioned independently from the Base-Station's v7).
+- Status schema is rover-side (versioned independently from the Base-Station's; sibling
+  is at v9, rover at v1 — both grow additively).
 - Atomic-write pattern is borrowed byte-for-byte from
-  `arm-drone-lidar-workflow/base-station/rtk_io.py:atomic_write_json` for compatibility.
-
-**Status:** Decided
+  `arm-drone-lidar-workflow/base-station/rtk_io.py:atomic_write_json` for compatibility
+  (extracted to `src/rover/_io.py` in Stage B of the deep-alignment overhaul).
 
 ---
 
-### D-034: Rover Coordinate Handling — Log SI/WGS84, Convert at Export
+### DEC-034: Rover Coordinate Handling — Log SI/WGS84, Convert at Export
+
+**Status:** Accepted
+**Date:** 2026-05-23
+**Decided by:** Brian
+**Rationale:** Logging hot path stays simple in native units; choice of
+target CRS is recorded once in metadata.json and applied at export by
+scripts/georef.py — also enables re-export to alternative CRS without
+re-acquiring data.
 
 **Decision:** Sensor acquisition and JSONL logging stay in SI units + WGS84 (the current
 design). Coordinate-system conversion to the session's `target_crs_epsg` (e.g.,
@@ -962,7 +1134,7 @@ NAD83(2011) / PA-N, US Survey Foot for ARM Group profile) happens at export time
 `scripts/georef.py`, not in the hot logging path.
 
 **Context:** The ARM Group survey workflow standardizes on NAD83 / NAVD88 / GEOID18 /
-State Plane / US Survey Foot (DEC-001 in the other repo). The rover's original
+State Plane / US Survey Foot (DEC-001 in the sibling repo). The rover's original
 design implicitly assumed meters / WGS84 / local ENU; nothing in JSONL records the
 target CRS.
 
@@ -983,8 +1155,75 @@ target CRS.
 - `metadata.json` gains `session.target_crs_epsg` + `session.units` fields.
 - `scripts/georef.py` becomes the canonical CRS-conversion boundary (Phase E).
 - Adds `pyproj` as an optional dependency (`[project.optional-dependencies].post`).
+- `scripts/georef.py:ZONE_EPSG` mirrors the sibling repo's `configure_base.py:ZONE_EPSG`
+  *naming* but uses NAD83(2011) ft-US codes (6346 etc.) where sibling uses
+  NAD83(HARN) codes (2271 etc.) — divergence noted in code.
 
-**Status:** Decided
+---
+
+### DEC-035: Deep Alignment with arm-drone-lidar-workflow (v0.10 Overhaul)
+
+**Status:** Accepted
+**Date:** 2026-05-30
+**Decided by:** Brian
+**Rationale:** Two weeks of cross-repo divergence had already started
+showing in conventions and missing pieces — finish the v0.10 integration
+in a coordinated deep-alignment pass before more drift accumulates.
+
+**Decision:** Treat this rover as a sibling project of `arm-drone-lidar-workflow`,
+mirroring its conventions wherever doing so reduces cognitive load for someone working
+across both repos. Specifically: schema-version constants and changelogs, atomic-write
+helper extraction, ZONE_EPSG zone-name vocabulary, sd_notify integration, systemd +
+udev deployment kit, decision-log format (DEC-NNN with Status/Date/Decided-by/Rationale
+metadata), and explicit positioning of the DIY rover as the LiDAR-scanning companion
+to the SparkFun RTK Facet (which the sibling repo selected as its production GNSS-only
+rover).
+
+**Context:** The v0.10 overhaul landed two weeks ago as a single broad commit that stood
+up the integration **contract** but left the rover unable to run (main.py / watchdog.py
+were stubs) and out of sync with the sibling repo's deployment patterns. The sibling has
+matured significantly (status schema at v9, 12+ systemd units, 3 udev rules, mature
+redeploy.sh) and the gap between repos was widening every week.
+
+**Rationale:**
+- Conventions copied: schema-version constants, atomic writes, env-var secrets via
+  `/etc/{repo}/secret`, sd_notify, decision-log DEC-NNN naming + metadata blocks.
+- Deployment infrastructure copied: deploy/systemd/, deploy/udev/, deploy/install.sh
+  modeled on sibling's bin/redeploy.sh.
+- Positioning made explicit: README and CLAUDE.md now state the DIY rover is a
+  LiDAR-scanning companion to the SparkFun RTK Facet (which the sibling repo
+  identified as the production rover for GCP occupations / single-point RTK).
+- TOML config retained instead of switching to YAML — too invasive a refactor for
+  marginal benefit; stdlib `tomllib` vs `pyyaml` dependency tilts back the other way.
+  Flagged explicitly in DEC-028 cross-repo note.
+- LoRa frame v2 kept rover-side-ready; flag that sibling's Heltec firmware is still
+  at v1 in `docs/CROSS_REPO_BACKLOG.md` and `docs/BASE_STATION_INTEGRATION.md`.
+
+**Alternatives Considered:**
+- Continue ad-hoc divergence (cheap now, expensive at the first cross-repo
+  field-debugging session).
+- Hard-fork the sibling's `base-station/` patterns into this repo as a vendored
+  copy (locks rover into a snapshot; misses sibling's ongoing improvements).
+- Switch rover to YAML to match sibling exactly (huge refactor for marginal
+  alignment payoff; sibling chose YAML for `pyyaml`-era reasons that don't apply
+  to a Python 3.11+ stdlib-tomllib codebase).
+
+**Implications:**
+- `src/rover/_io.py` carries the atomic-write helper (Stage B).
+- `src/rover/telemetry.py:STATUS_SCHEMA_VERSION = 1` exists as the canonical
+  rover-side schema version (Stage B).
+- `scripts/georef.py:ZONE_EPSG` mirrors sibling's zone-name vocabulary (Stage B).
+- `src/rover/watchdog.py` sends `READY=1` / `WATCHDOG=1` to systemd via
+  `NOTIFY_SOCKET` when present (Stage C).
+- `deploy/` directory with systemd units, udev rules, and install.sh exists
+  (Stage C).
+- This DECISIONS.md uses DEC-NNN naming with sibling-style metadata headers (Stage D.1).
+- `README.md` and `CLAUDE.md` explicitly position the DIY rover relative to the
+  SparkFun Facet (Stage D.2).
+- `docs/CROSS_REPO_BACKLOG.md` tracks sibling-side work the rover is waiting on
+  (Stage D.4).
+- `docs/BASE_STATION_INTEGRATION.md` §4 carries a clear callout that sibling's
+  Heltec firmware is still on LoRa frame v1 (Stage E).
 
 ---
 
@@ -992,37 +1231,38 @@ target CRS.
 
 | ID | Topic | Section |
 |----|-------|---------|
-| D-001 | DIY vs Commercial | System |
-| D-002 | PiLiDAR Foundation | System |
-| D-003 | Pi vs MCU | System |
-| D-004 | ZED-F9P Selection | GNSS |
-| D-005 | RTK via LoRa | GNSS — **superseded by D-031** |
-| D-006 | RTCM Routing Direct | GNSS — **superseded by D-032** |
-| D-007 | RTCM Profiles | GNSS |
-| D-008 | LoRa Parameters | Comms |
-| D-009 | Packet Loss Handling | Comms |
-| D-010 | T-Deck Receive-Only | Comms — **superseded by D-033** |
-| D-011 | MPU-9250 Primary | Sensor |
-| D-012 | Madgwick Filter | Sensor |
-| D-013 | Mag Disabled w/ Motor | Sensor |
-| D-014 | Timestamp Slerp | Sensor |
-| D-015 | Direct Drive | Mechanical |
-| D-016 | Open-Loop Indexing | Mechanical |
-| D-017 | 1/16 Microstepping | Mechanical |
-| D-018 | Split Power Domains | Power |
-| D-019 | Dedicated 3.3V Reg | Power |
-| D-020 | Python + Pi OS Lite | Software |
-| D-021 | JSONL Logging | Software |
-| D-022 | Post-Processed Georef | Software |
-| D-023 | SLAM Deferred | Software |
-| D-024 | Accuracy Target | Accuracy |
-| D-025 | Validation Method | Accuracy |
-| D-026 | Camera as Reference | Camera |
-| D-027 | Triggered Capture | Camera |
-| D-028 | TOML Config | Config |
-| D-029 | GPIO Library (rpi-lgpio) | Upstream Compat |
-| D-030 | Dual-Mode (personal / arm_group) | Base-Station Integration |
-| D-031 | NTRIP-Primary + LoRa Fallback | Base-Station Integration |
-| D-032 | NTRIP Client Location (Pi or ESP32) | Base-Station Integration |
-| D-033 | Triple-Channel Telemetry | Base-Station Integration |
-| D-034 | Coords: log SI/WGS84, convert at export | Base-Station Integration |
+| DEC-001 | DIY vs Commercial | System |
+| DEC-002 | PiLiDAR Foundation | System |
+| DEC-003 | Pi vs MCU | System |
+| DEC-004 | ZED-F9P Selection | GNSS |
+| DEC-005 | RTK via LoRa | GNSS — **superseded by DEC-031** |
+| DEC-006 | RTCM Routing Direct | GNSS — **superseded by DEC-032** |
+| DEC-007 | RTCM Profiles | GNSS |
+| DEC-008 | LoRa Parameters | Comms |
+| DEC-009 | Packet Loss Handling | Comms |
+| DEC-010 | T-Deck Receive-Only | Comms — **superseded by DEC-033** |
+| DEC-011 | MPU-9250 Primary | Sensor |
+| DEC-012 | Madgwick Filter | Sensor |
+| DEC-013 | Mag Disabled w/ Motor | Sensor |
+| DEC-014 | Timestamp Slerp | Sensor |
+| DEC-015 | Direct Drive | Mechanical |
+| DEC-016 | Open-Loop Indexing | Mechanical |
+| DEC-017 | 1/16 Microstepping | Mechanical |
+| DEC-018 | Split Power Domains | Power |
+| DEC-019 | Dedicated 3.3V Reg | Power |
+| DEC-020 | Python + Pi OS Lite | Software |
+| DEC-021 | JSONL Logging | Software |
+| DEC-022 | Post-Processed Georef | Software |
+| DEC-023 | SLAM Deferred | Software |
+| DEC-024 | Accuracy Target | Accuracy |
+| DEC-025 | Validation Method | Accuracy |
+| DEC-026 | Camera as Reference | Camera |
+| DEC-027 | Triggered Capture | Camera |
+| DEC-028 | TOML Config | Config |
+| DEC-029 | GPIO Library (rpi-lgpio) | Upstream Compat |
+| DEC-030 | Dual-Mode (personal / arm_group) | Base-Station Integration |
+| DEC-031 | NTRIP-Primary + LoRa Fallback | Base-Station Integration |
+| DEC-032 | NTRIP Client Location (Pi or ESP32) | Base-Station Integration |
+| DEC-033 | Triple-Channel Telemetry | Base-Station Integration |
+| DEC-034 | Coords: log SI/WGS84, convert at export | Base-Station Integration |
+| DEC-035 | Deep Alignment with arm-drone-lidar-workflow | Deep-Alignment Overhaul |

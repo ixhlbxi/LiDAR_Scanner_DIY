@@ -22,7 +22,7 @@ how that integration is wired.
 | `arm_group` | Companion to ARM Group drone/LiDAR survey workflow | NTRIP required (default mountpoint `ARM_BASE`); project code + mission tag required; output in session-recorded CRS (e.g., NAD83(2011) / PA-N / ft-US); `status.json` published to a path the Base-Station's existing tooling can read |
 
 Selection is per session via `[session].profile` in the rover's TOML config.
-See D-030 in `docs/DECISIONS.md`.
+See DEC-030 in `docs/DECISIONS.md`.
 
 ---
 
@@ -92,7 +92,7 @@ ships in `arm-drone-lidar-workflow`'s Phase D PR.
 
 ---
 
-## 3. Telemetry — Three Independent Channels (D-033)
+## 3. Telemetry — Three Independent Channels (DEC-033)
 
 Each channel is independently enable-able via config. None is required.
 
@@ -212,7 +212,7 @@ SF is reserved for the "marginal link" tuning later.
 
 ---
 
-## 5. Coordinate Handling (D-034)
+## 5. Coordinate Handling (DEC-034)
 
 The rover acquires and logs in SI units / WGS84. Coordinate conversion to the session's
 `target_crs_epsg` happens at export time in `scripts/georef.py`.
@@ -288,4 +288,4 @@ lidar-rover-integration.md` (Phase D deliverable in that repo).
 | Status schema | This doc §3.1 | `base-station/rtk_io.py:STATUS_SCHEMA_VERSION` |
 | LoRa frame envelope | This doc §4 | `base-station/heltec-display/src/main.cpp` (v1 today, v2 after Phase D) |
 | NTRIP caster | (consumer) | `base-station/rtk_base_manager.py` (caster lifecycle) |
-| Decision records | `docs/DECISIONS.md` D-030..D-034 | `docs/decisions/decision-log.md` |
+| Decision records | `docs/DECISIONS.md` DEC-030..DEC-034 | `docs/decisions/decision-log.md` |

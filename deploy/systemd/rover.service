@@ -43,7 +43,7 @@ User=root
 ProtectSystem=strict
 ProtectHome=true
 NoNewPrivileges=true
-# /run/rover/ — atomic status.json (D-033 channel A) goes here.
+# /run/rover/ — atomic status.json (DEC-033 channel A) goes here.
 # /var/log/rover/ — future log destination if file logging is enabled.
 # /etc/rover/ — config + secret + mission tag file (Stage C convention).
 ReadWritePaths=/run/rover /var/log/rover /etc/rover

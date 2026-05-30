@@ -8,8 +8,8 @@ Two responsibilities, owned by GnssReceiver:
    discrimination including RTK FLOAT vs FIX).
 
 2. **Write** RTCM3 corrections **to** the F9P when [ntrip].client_location =
-   "pi". This is the data path that supersedes the original D-006 "Pi never in
-   the correction path" rule — see D-032. NtripClient calls `write_rtcm(bytes)`
+   "pi". This is the data path that supersedes the original DEC-006 "Pi never in
+   the correction path" rule — see DEC-032. NtripClient calls `write_rtcm(bytes)`
    on us; we forward to the open serial port.
 
 When [ntrip].client_location = "esp32", the ESP32 firmware writes RTCM to the
@@ -26,9 +26,9 @@ Public API:
         .subscribe(callback)  — register a per-fix callback
 
 Decision references:
-    D-004  ZED-F9P selection
-    D-031  NTRIP-primary RTK (rover is a client; was D-005)
-    D-032  NTRIP client location pi or esp32 (was D-006)
+    DEC-004  ZED-F9P selection
+    DEC-031  NTRIP-primary RTK (rover is a client; was DEC-005)
+    DEC-032  NTRIP client location pi or esp32 (was DEC-006)
 
 Dependencies:
     pyserial (required for actual hardware)

@@ -1,7 +1,7 @@
 """Unit tests for rover.telemetry — TelemetryRouter + StatusJsonPublisher +
 LocalHttpPublisher. No hardware required.
 
-See D-033 in docs/DECISIONS.md and §3 of docs/BASE_STATION_INTEGRATION.md.
+See DEC-033 in docs/DECISIONS.md and §3 of docs/BASE_STATION_INTEGRATION.md.
 """
 
 import json

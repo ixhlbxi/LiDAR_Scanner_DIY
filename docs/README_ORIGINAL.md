@@ -131,7 +131,7 @@ This project **extends** the [PiLiDAR project](https://github.com/PiLiDAR/PiLiDA
 
 | Version | Date | Description |
 |---------|------|-------------|
-| v0.9.2 | 2026-02-22 | Audit update; fix upstream repo URL, add GPIO library decision (D-029), note upstream STL27L support |
+| v0.9.2 | 2026-02-22 | Audit update; fix upstream repo URL, add GPIO library decision (DEC-029), note upstream STL27L support |
 | v0.9.1 | 2025-12-26 | Architecture freeze; all major decisions documented |
 | v0.9.0 | 2025-12-26 | Initial dev guide created |
 

@@ -20,10 +20,10 @@ Usage:
     python -m rover.main --duration-sec 30  # bench timer
 
 Decision references:
-    D-020  Python on Pi OS Lite
-    D-021  JSONL logging
-    D-031  NTRIP-primary RTK (NtripClient wired here when client_location=pi)
-    D-033  Triple-channel telemetry (TelemetryRouter wired here)
+    DEC-020  Python on Pi OS Lite
+    DEC-021  JSONL logging
+    DEC-031  NTRIP-primary RTK (NtripClient wired here when client_location=pi)
+    DEC-033  Triple-channel telemetry (TelemetryRouter wired here)
 
 Changelog:
     0.10.1  2026-05-30  Real orchestrator (Stage A of deep-alignment overhaul).

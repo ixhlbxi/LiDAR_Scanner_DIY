@@ -24,7 +24,7 @@ dev = [
     "pytest",
     "ruff",
 ]
-# Post-processing / CRS-aware export (D-034, Phase E)
+# Post-processing / CRS-aware export (DEC-034, Phase E)
 post = [
     "laspy",
     "pyproj",

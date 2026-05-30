@@ -367,7 +367,7 @@ class TestMetadata:
         assert "start_time" in meta
         assert "end_time" in meta
         assert "config_hash" in meta
-        # v0.10 — session block added (D-030, D-034)
+        # v0.10 — session block added (DEC-030, DEC-034)
         assert "session" in meta
         assert meta["session"]["profile"] == "personal"
         assert meta["session"]["target_crs_epsg"] == 0

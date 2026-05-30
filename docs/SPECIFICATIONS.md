@@ -1,128 +1,28 @@
 # Technical Specifications
 
-**Document Status:** v0.10 — partial revision (Base-Station integration)
-**Last Updated:** 2026-05-23
+**Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
+**Last Updated:** 2026-05-30
 
-> **v0.10 overhaul note:** The LoRa Packet Format section below describes the original
-> v0.9.2 frame (Sync `0xAA 0x55`, Version `0x01`). The authoritative LoRa frame v2
-> spec — shared with `arm-drone-lidar-workflow`'s Heltec/T-Deck firmware — lives in
-> `docs/BASE_STATION_INTEGRATION.md` §4 and `CLAUDE.md` Appendix C. Both supersede
-> §1 below. The §1 text is retained as historical reference until the next pass.
+Rover-internal specifications. Cross-repo / on-wire contracts live in
+[BASE_STATION_INTEGRATION.md](BASE_STATION_INTEGRATION.md); this file is
+the home for things only the rover cares about (TOML schema, JSONL records,
+internal pinout, performance budgets).
 
 ---
 
-## 1. LoRa Packet Format
+## 1. LoRa Packet Format — Moved
 
-### 1.1 Packet Structure
+The original v0.9.2 self-contained LoRa frame (Sync `0xAA 0x55`, Version `0x01`)
+is **retired**. The current LoRa frame v2 envelope — shared with the
+`arm-drone-lidar-workflow` Heltec/T-Deck firmware — lives in:
 
-All LoRa packets use a common framing structure:
+  * [BASE_STATION_INTEGRATION.md §4](BASE_STATION_INTEGRATION.md#4-lora-frame-v2)
+    — authoritative wire format, packet types (`STATUS`, `LINK`, `RTCM_CHUNK`,
+    `DISPLAY`, `DEBUG_TEXT`), CRC16-CCITT spec, radio parameters.
 
-```
-┌──────────┬─────────┬─────────┬─────────┬──────────┬─────────────┬─────────┐
-│  Sync    │ Version │  Type   │ Length  │ Sequence │   Payload   │  CRC16  │
-│ (2 bytes)│ (1 byte)│ (1 byte)│ (2 bytes)│ (2 bytes)│ (N bytes)   │ (2 bytes)│
-└──────────┴─────────┴─────────┴─────────┴──────────┴─────────────┴─────────┘
-```
-
-| Field | Size | Description |
-|-------|------|-------------|
-| Sync | 2 bytes | Magic bytes: `0xAA 0x55` |
-| Version | 1 byte | Protocol version (v1.0 = `0x01`) |
-| Type | 1 byte | Packet type identifier |
-| Length | 2 bytes | Payload length in bytes (little-endian) |
-| Sequence | 2 bytes | Packet sequence number (little-endian, wrapping) |
-| Payload | N bytes | Type-specific payload data |
-| CRC16 | 2 bytes | CRC16-CCITT over Version through Payload (little-endian) |
-
-**Total overhead:** 10 bytes per packet
-
-### 1.2 Packet Types
-
-| Type ID | Name | Direction | Description |
-|---------|------|-----------|-------------|
-| `0x01` | STATUS | Rover → Monitor | Rover health + GNSS summary |
-| `0x02` | LINK | Rover → Monitor | Link quality metrics |
-| `0x10` | RTCM_CHUNK | Base → Rover | RTCM3 correction data |
-| `0x7F` | DEBUG_TEXT | Any | Human-readable debug string |
-
-### 1.3 STATUS Packet Payload (Type 0x01)
-
-```
-┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
-│ Fix Type │ Sat Count│   HDOP   │ Battery  │Scan State│ Reserved │ Reserved │
-│ (1 byte) │ (1 byte) │ (2 bytes)│ (2 bytes)│ (1 byte) │ (1 byte) │ (2 bytes)│
-└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
-```
-
-| Field | Size | Encoding | Description |
-|-------|------|----------|-------------|
-| Fix Type | 1 byte | Enum | 0=NONE, 1=2D, 2=3D, 3=DGPS, 4=RTK_FLOAT, 5=RTK_FIX |
-| Sat Count | 1 byte | Unsigned | Number of satellites used |
-| HDOP | 2 bytes | Fixed-point (×100) | e.g., 85 = HDOP 0.85 |
-| Battery | 2 bytes | mV | Battery voltage in millivolts |
-| Scan State | 1 byte | Enum | 0=IDLE, 1=SCANNING, 2=PAUSED, 3=ERROR |
-| Reserved | 3 bytes | — | Future use, set to 0x00 |
-
-**Payload size:** 10 bytes
-
-### 1.4 LINK Packet Payload (Type 0x02)
-
-```
-┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
-│   RSSI   │   SNR    │ Rx Count │ Tx Count │ Err Count│ Reserved │
-│ (1 byte) │ (1 byte) │ (4 bytes)│ (4 bytes)│ (2 bytes)│ (2 bytes)│
-└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
-```
-
-| Field | Size | Encoding | Description |
-|-------|------|----------|-------------|
-| RSSI | 1 byte | Signed | Received signal strength (dBm, offset +128) |
-| SNR | 1 byte | Signed | Signal-to-noise ratio (dB, offset +128) |
-| Rx Count | 4 bytes | Unsigned LE | Total packets received |
-| Tx Count | 4 bytes | Unsigned LE | Total packets transmitted |
-| Err Count | 2 bytes | Unsigned LE | CRC error count |
-| Reserved | 2 bytes | — | Future use |
-
-**Payload size:** 14 bytes
-
-### 1.5 RTCM_CHUNK Packet Payload (Type 0x10)
-
-```
-┌──────────┬──────────────────────────────────────────────────────┐
-│  Flags   │                   RTCM Data                          │
-│ (1 byte) │                   (N bytes)                          │
-└──────────┴──────────────────────────────────────────────────────┘
-```
-
-| Field | Size | Description |
-|-------|------|-------------|
-| Flags | 1 byte | Bit 0: More fragments follow; Bits 1-7: Reserved |
-| RTCM Data | Variable | Raw RTCM3 bytes (passthrough) |
-
-**Notes:**
-- RTCM messages may span multiple packets if >~200 bytes
-- Receiver reassembles based on RTCM framing (preamble 0xD3)
-- No retry on loss; RTK tolerates occasional missing corrections
-
-### 1.6 DEBUG_TEXT Packet Payload (Type 0x7F)
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                   ASCII Text String                              │
-│                   (N bytes, no null terminator)                  │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-**Notes:**
-- Human-readable debug/log messages
-- Optional; for development and troubleshooting
-- Length determined by packet Length field
-
-### 1.7 CRC Calculation
-
-**Algorithm:** CRC16-CCITT (polynomial 0x1021, init 0xFFFF, no final XOR)
-
-**Scope:** CRC calculated over bytes from Version through end of Payload (excludes Sync bytes).
+See also [`src/rover/lora_protocol.py`](../src/rover/lora_protocol.py) for the
+codec implementation and [`docs/CROSS_REPO_BACKLOG.md`](CROSS_REPO_BACKLOG.md)
+for the sibling-side Heltec-v2 firmware work that's still pending.
 
 ---
 
@@ -322,7 +222,7 @@ critical_battery_mv = 10000       # Shutdown threshold
 | `config.py` | TOML parsing | Filesystem |
 | `watchdog.py` | Health monitoring, restart | System |
 
-**GPIO Library Note (D-029):** Use `rpi-lgpio` (drop-in replacement for `RPi.GPIO`) or `gpiozero` for all GPIO operations. The legacy `RPi.GPIO` is broken on Raspberry Pi OS Bookworm 64-bit. Install via `pip install rpi-lgpio` or `sudo apt install python3-rpi-lgpio`. Set environment variable `LG_WD=/tmp` to manage lgpio temp files.
+**GPIO Library Note (DEC-029):** Use `rpi-lgpio` (drop-in replacement for `RPi.GPIO`) or `gpiozero` for all GPIO operations. The legacy `RPi.GPIO` is broken on Raspberry Pi OS Bookworm 64-bit. Install via `pip install rpi-lgpio` or `sudo apt install python3-rpi-lgpio`. Set environment variable `LG_WD=/tmp` to manage lgpio temp files.
 
 ---
 

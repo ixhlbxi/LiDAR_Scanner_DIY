@@ -42,7 +42,7 @@ AK8963 (magnetometer at 0x0C via bypass):
 
 Limitations:
     - Requires MPU-9250 wired to I2C bus with 4.7k pull-ups on SDA/SCL
-    - Magnetometer readings may be corrupted near stepper motor (D-013)
+    - Magnetometer readings may be corrupted near stepper motor (DEC-013)
     - Does not perform Madgwick fusion — raw sensor values only
 
 Changelog:

@@ -1,13 +1,18 @@
 # Hardware Inventory
 
-**Document Status:** v0.10 — in overhaul (Base-Station integration)
-**Last Updated:** 2026-05-23
+**Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
+**Last Updated:** 2026-05-30
 
-> **v0.10 overhaul note:** Rover hardware is largely unchanged. The T-Deck has moved
-> out of the rover BOM (now owned by the Base-Station in `arm-drone-lidar-workflow`,
-> per D-033). The ESP32 LoRa role expands to support NTRIP-over-WiFi as an alternative
-> to LoRa RTCM relay (D-032). See `docs/BASE_STATION_INTEGRATION.md` for the
-> rover↔Base-Station contract.
+> **Rover BOM is unchanged from v0.9.2** except: T-Deck moved out (now owned
+> by Base-Station, per DEC-033); ESP32 LoRa role expanded to dual-mode (LoRa
+> RTCM relay OR NTRIP-over-WiFi client, per DEC-032).
+>
+> **Cross-references:**
+> - Rover-to-Base contract: [`BASE_STATION_INTEGRATION.md`](BASE_STATION_INTEGRATION.md)
+> - Base-side wiring (the other end of the LoRa + network cables):
+>   `arm-drone-lidar-workflow/base-station/HARDWARE_WIRING_CHECKLIST.md`
+> - Stable device symlinks + serial-disambiguation guidance:
+>   [`deploy/udev/`](../deploy/udev/) (`/dev/rover-f9p`, `/dev/rover-lidar`, `/dev/rover-esp32`)
 
 ---
 
@@ -26,7 +31,7 @@
 | GNSS (RTK) | — | 🔲 | ZED-F9P × 2 needed (one for the Base-Station Pi, one for this rover) |
 | Antennas | — | 🔲 | Dual-band L1/L2 × 2 needed |
 | LoRa + WiFi (rover) | ✅ | — | ESP32 LoRa V3 ready — dual-purpose (LoRa RTCM Rx OR NTRIP-over-WiFi client) |
-| Handheld monitor | — | — | Owned by Base-Station; **removed from rover BOM** (D-033) |
+| Handheld monitor | — | — | Owned by Base-Station; **removed from rover BOM** (DEC-033) |
 | Power | — | 🔲 | Batteries + regulators needed |
 | Network | — | — | Rover Pi shares WiFi/cellular path with Base-Station Pi |
 
@@ -290,7 +295,7 @@ Two firmware modes selected via config (lives in `firmware/esp32-rover/`):
 
 - **Mode A — `lora_rtcm_relay`** (default): Receives RTCM_CHUNK LoRa frame v2 packets
   from the Base-Station Heltec, writes the RTCM3 payload to F9P UART2 (preserves
-  D-006-style "Pi out of correction path" robustness). Also transmits rover STATUS
+  DEC-006-style "Pi out of correction path" robustness). Also transmits rover STATUS
   (0x01) and LINK (0x02) frames to handhelds.
 - **Mode B — `ntrip_client`** (new): Connects to the Base-Station NTRIP caster
   over WiFi, writes RTCM3 to F9P UART2 directly. Same status/link Tx as Mode A.
@@ -303,7 +308,7 @@ WiFi credentials and NTRIP password live in a non-committed `include/config.h`
 > **Compatibility check:** confirm rover ESP32 model has both LoRa **and** WiFi
 > (the Muzi/Heltec V3 does — bare SX1262 breakouts do not). Mode B requires WiFi.
 
-### 7.2 LILYGO T-Deck — **Removed from rover BOM (D-033)**
+### 7.2 LILYGO T-Deck — **Removed from rover BOM (DEC-033)**
 
 The T-Deck is now owned by the `arm-drone-lidar-workflow` Base-Station, where its
 firmware lives at `base-station/t-deck/`. It is **not flashed with rover-specific

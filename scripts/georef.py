@@ -8,15 +8,15 @@ by applying per-scan GNSS position + IMU orientation to each LiDAR slice;
 emits PLY (always) and, when `laspy` + `pyproj` are available, a LAS file in
 the session's target CRS.
 
-This is the deliberate v0.10 deferred-georef pipeline (D-022, D-034). Acquisition
+This is the deliberate v0.10 deferred-georef pipeline (DEC-022, DEC-034). Acquisition
 logs in SI / WGS84 / local ENU; CRS conversion happens here.
 
 Coordinate flow:
 
     LiDAR polar (angle, distance)  →  local Cartesian (forward, left, up)
-    ─(T_lidar_imu — identity in v1.0 absent calibration; D-024)─►
+    ─(T_lidar_imu — identity in v1.0 absent calibration; DEC-024)─►
     IMU frame
-    ─(slerp(t_scan) using IMU ring buffer; D-014)─►
+    ─(slerp(t_scan) using IMU ring buffer; DEC-014)─►
     World-aligned per-scan orientation
     ─(GNSS antenna position; T_body_gnss zero in v1.0 absent calibration)─►
     Local ENU (origin = first valid GNSS fix in the session)
@@ -36,7 +36,7 @@ Failure modes:
     * Session has no GNSS records → emits points in raw LiDAR frame and warns;
       useful for indoor / no-fix scans.
 
-Decision references: D-014, D-022, D-024, D-034.
+Decision references: DEC-014, DEC-022, DEC-024, DEC-034.
 
 Dependencies: numpy (required); laspy + pyproj (optional, install via `[post]`
 extra).
@@ -219,7 +219,7 @@ def _quat_normalize(q):
 def _quat_slerp(q1, q2, t: float):
     """Spherical linear interpolation for two scalar-first quaternions.
 
-    Implements D-014's slerp directly without scipy so the script runs anywhere
+    Implements DEC-014's slerp directly without scipy so the script runs anywhere
     numpy is installed.
     """
     np = _require_numpy()

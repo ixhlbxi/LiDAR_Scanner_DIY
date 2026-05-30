@@ -4,12 +4,12 @@ Raspberry Pi HQ Camera capture via picamera2.
 Captures JPEG images at each rotation step for visual context.
 Images are associated with scan data via step_index and timestamp.
 
-The camera provides reference imagery, not photogrammetry input (D-026).
+The camera provides reference imagery, not photogrammetry input (DEC-026).
 Capture cadence is configurable (every N steps).
 
 Decision references:
-    D-026  Camera as visual reference
-    D-027  Triggered capture per rotation step
+    DEC-026  Camera as visual reference
+    DEC-027  Triggered capture per rotation step
 
 Dependencies:
     picamera2

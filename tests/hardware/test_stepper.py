@@ -9,7 +9,7 @@ Purpose:
 Context:
     PiLiDAR-RTK Rover — Phase 3, Task 4 (sensor test scripts).
     This is a field diagnostic tool, NOT a pytest test.
-    Uses rpi-lgpio per D-029 (RPi.GPIO broken on Bookworm).
+    Uses rpi-lgpio per DEC-029 (RPi.GPIO broken on Bookworm).
 
 Dependencies:
     - rpi-lgpio (pip install rpi-lgpio)
@@ -37,9 +37,9 @@ Motor Control:
     - Motor is ALWAYS disabled on exit (including Ctrl-C)
 
 Limitations:
-    - Open-loop control — no encoder feedback (D-016)
-    - Requires A4988 wired with 1/16 microstepping jumpers set (D-017)
-    - 12V motor power must be supplied separately (D-018)
+    - Open-loop control — no encoder feedback (DEC-016)
+    - Requires A4988 wired with 1/16 microstepping jumpers set (DEC-017)
+    - 12V motor power must be supplied separately (DEC-018)
 
 Changelog:
     0.1.0  2026-03-22  Initial implementation
@@ -54,7 +54,7 @@ import statistics
 import sys
 import time
 
-# Suppress lgpio temp file clutter (D-029)
+# Suppress lgpio temp file clutter (DEC-029)
 os.environ.setdefault("LG_WD", "/tmp")
 
 # Default GPIO pins (BCM)

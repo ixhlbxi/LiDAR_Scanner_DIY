@@ -2,7 +2,7 @@
 NEMA17 stepper motor control via A4988 driver.
 
 Controls the rotation platform for 3D scan acquisition.
-Uses rpi-lgpio for GPIO (D-029) — NOT RPi.GPIO (broken on Bookworm).
+Uses rpi-lgpio for GPIO (DEC-029) — NOT RPi.GPIO (broken on Bookworm).
 
 BCM GPIO assignments (from config):
   - direction_pin (17): rotation direction
@@ -12,10 +12,10 @@ BCM GPIO assignments (from config):
 Step-and-scan approach: step to angle, settle, acquire, repeat.
 
 Decision references:
-    D-015  Direct drive, no slip ring
-    D-016  Open-loop step indexing
-    D-017  1/16 microstepping (3200 steps/rev)
-    D-029  rpi-lgpio over RPi.GPIO
+    DEC-015  Direct drive, no slip ring
+    DEC-016  Open-loop step indexing
+    DEC-017  1/16 microstepping (3200 steps/rev)
+    DEC-029  rpi-lgpio over RPi.GPIO
 
 Dependencies:
     rpi-lgpio (on Pi) or gpiozero
@@ -35,7 +35,7 @@ from rover.config import StepperConfig
 
 logger = logging.getLogger(__name__)
 
-# Suppress lgpio temp file clutter (D-029) — must be set before import
+# Suppress lgpio temp file clutter (DEC-029) — must be set before import
 os.environ.setdefault("LG_WD", "/tmp")
 
 try:

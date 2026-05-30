@@ -4,18 +4,18 @@ MPU-9250 IMU polling and Madgwick sensor fusion.
 Reads accelerometer, gyroscope, and (optionally) magnetometer data
 via I2C, then runs a Madgwick filter to produce quaternion orientation.
 
-The magnetometer is disabled during motor operation (D-013) to avoid
+The magnetometer is disabled during motor operation (DEC-013) to avoid
 stepper EMI corruption.
 
 Outputs quaternion orientation at fusion_output_hz (default 100 Hz).
 IMU samples are stored in a ring buffer for timestamp correlation
-with LiDAR scans via slerp interpolation (D-014).
+with LiDAR scans via slerp interpolation (DEC-014).
 
 Decision references:
-    D-011  MPU-9250 as primary IMU
-    D-012  Madgwick filter
-    D-013  Magnetometer disabled during motor operation
-    D-014  IMU-LiDAR timestamp correlation via slerp
+    DEC-011  MPU-9250 as primary IMU
+    DEC-012  Madgwick filter
+    DEC-013  Magnetometer disabled during motor operation
+    DEC-014  IMU-LiDAR timestamp correlation via slerp
 
 Dependencies:
     smbus2
@@ -184,7 +184,7 @@ class ImuDriver:
         self._last_time: float | None = None
         self._identity: str | None = None
 
-        # Ring buffer for timestamp correlation (D-014)
+        # Ring buffer for timestamp correlation (DEC-014)
         self._ring_buffer: collections.deque[ImuSample] = collections.deque(
             maxlen=config.sample_rate_hz * 2,  # ~2 seconds of samples
         )
@@ -398,14 +398,14 @@ class ImuDriver:
         return (mx, my, mz)
 
     def enable_magnetometer(self, enable: bool) -> None:
-        """Enable or disable magnetometer readings (D-013)."""
+        """Enable or disable magnetometer readings (DEC-013)."""
         self._mag_enabled = enable
         logger.info("Magnetometer %s", "enabled" if enable else "disabled")
 
     def get_sample_at(self, timestamp: float) -> ImuSample | None:
         """Find the closest sample in the ring buffer to the given timestamp.
 
-        Used for IMU-LiDAR timestamp correlation (D-014).
+        Used for IMU-LiDAR timestamp correlation (DEC-014).
 
         Args:
             timestamp: Unix timestamp to match.

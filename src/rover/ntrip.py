@@ -1,4 +1,4 @@
-"""Pi-side NTRIP client (D-031, D-032).
+"""Pi-side NTRIP client (DEC-031, DEC-032).
 
 Connects to an NTRIP caster (default: the arm-drone-lidar-workflow Base-Station's
 ARM_BASE mountpoint on rtk-base.local:2101), reads RTCM3 from the response stream,

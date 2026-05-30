@@ -1,7 +1,7 @@
 """Unit tests for the v0.10 config sections — session, ntrip, lora v2, base-station
 integration, telemetry HTTP. No hardware required.
 
-See D-030 through D-034 in docs/DECISIONS.md.
+See DEC-030 through DEC-034 in docs/DECISIONS.md.
 """
 
 import textwrap
@@ -30,7 +30,7 @@ def tmp_toml(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Session (D-030)
+# Session (DEC-030)
 # ---------------------------------------------------------------------------
 
 
@@ -196,7 +196,7 @@ class TestArmGroupCrossValidation:
 
 
 # ---------------------------------------------------------------------------
-# NTRIP (D-031, D-032)
+# NTRIP (DEC-031, DEC-032)
 # ---------------------------------------------------------------------------
 
 
@@ -253,7 +253,7 @@ class TestNtripConfig:
 
 
 # ---------------------------------------------------------------------------
-# LoRa (D-031 — frame v2 fields)
+# LoRa (DEC-031 — frame v2 fields)
 # ---------------------------------------------------------------------------
 
 
@@ -303,7 +303,7 @@ class TestLoraV2Fields:
 
 
 # ---------------------------------------------------------------------------
-# Base-station integration (D-033 channel A)
+# Base-station integration (DEC-033 channel A)
 # ---------------------------------------------------------------------------
 
 
@@ -327,7 +327,7 @@ class TestBaseStationIntegration:
 
 
 # ---------------------------------------------------------------------------
-# Telemetry HTTP (D-033 channel B)
+# Telemetry HTTP (DEC-033 channel B)
 # ---------------------------------------------------------------------------
 
 

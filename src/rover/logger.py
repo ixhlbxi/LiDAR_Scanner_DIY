@@ -294,7 +294,7 @@ class SessionLogger:
         """Write metadata.json to the session directory.
 
         Includes a `session` block carrying profile / project_code / mission_tag /
-        target_crs_epsg / units (D-030, D-034) so that `scripts/georef.py` can
+        target_crs_epsg / units (DEC-030, DEC-034) so that `scripts/georef.py` can
         re-export the session in the recorded CRS without parsing config.toml.
         """
         assert self._session_dir is not None
