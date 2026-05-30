@@ -1,0 +1,28 @@
+# Stable /dev/rover-lidar symlink for the LDRobot LD19 LiDAR.
+#
+# The LD19 ships with a CP2102 USB-UART bridge (Silicon Labs vid:pid
+# 10c4:ea60). The rover's ESP32 LoRa unit also uses a CP2102 — so we cannot
+# match by vid:pid alone or both devices race for the same symlink.
+#
+# REQUIRED STEP BEFORE INSTALL: replace LD19_SERIAL_PLACEHOLDER below with
+# this LD19's actual serial number. Discover it with:
+#
+#   udevadm info -a -n /dev/ttyUSB0 2>/dev/null | grep '{serial}' | head -1
+#
+# Example output:
+#     ATTRS{serial}=="0001"
+# Then set ATTRS{serial}=="0001" below.
+#
+# If the LD19 has a programmable but unprogrammed CP2102, all CP2102 boards
+# from the factory share serial "0001" — in that case, distinguish by the
+# UART chip's physical USB port topology instead:
+#   ATTRS{devpath}=="1.2" (etc.) — find via `udevadm info -a -n /dev/ttyUSB0`.
+#
+# After install:
+#   sudo cp deploy/udev/99-rover-lidar.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   ls -la /dev/rover-lidar
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
+    ATTRS{serial}=="LD19_SERIAL_PLACEHOLDER", \
+    SYMLINK+="rover-lidar", MODE="0660", GROUP="dialout"

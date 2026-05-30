@@ -15,7 +15,9 @@ units = "m"                       # "m" | "ft" — controls georef.py default ou
 
 [lidar]
 enabled = true
-port = "/dev/ttyUSB0"             # Serial port (USB-serial adapter)
+# Stable symlink created by deploy/udev/99-rover-lidar.rules. Pre-install
+# fallback: "/dev/ttyUSB0" (whichever USB-CDC enumerates first).
+port = "/dev/rover-lidar"
 baud = 230400                     # LD19 default baud rate
 scan_rate_hz = 10                 # Target scan rate (1–20)
 
@@ -39,7 +41,9 @@ fusion_beta = 0.1                 # Madgwick filter gain
 
 [gnss]
 enabled = true
-port = "/dev/ttyACM0"             # ZED-F9P USB port
+# Stable symlink created by deploy/udev/99-rover-f9p.rules. Pre-install
+# fallback: "/dev/ttyACM0" (default F9P enumeration).
+port = "/dev/rover-f9p"
 baud = 115200                     # Default F9P baud
 rtcm_profile = "robust"           # "robust" or "low_bandwidth"
 survey_in_duration_sec = 300      # Base station survey-in time
@@ -53,11 +57,16 @@ caster_port = 2101
 mountpoint = "ARM_BASE"
 username = "rover"
 password_env = "ROVER_NTRIP_PASSWORD"
+# Recommended source: /etc/rover/secret (mode 0600 root:root), populated as
+# `ROVER_NTRIP_PASSWORD=...` and pulled into systemd via EnvironmentFile=
+# in deploy/systemd/rover.service. Mirrors sibling's /etc/rtk-base/secret.
 gga_send_interval_sec = 10.0      # 0 = never; needed for VRS-style casters
 
 [lora]                            # D-031 — RTCM fallback + telemetry transport
 enabled = true
-port = "/dev/ttyUSB1"             # rover ESP32 USB
+# Stable symlink created by deploy/udev/99-rover-esp32.rules. Pre-install
+# fallback: "/dev/ttyUSB1" (whichever CP2102 enumerates second).
+port = "/dev/rover-esp32"
 baud = 115200
 spreading_factor = 7              # SF7 matches Base-Station Heltec defaults
 bandwidth_khz = 125               # 125, 250, or 500

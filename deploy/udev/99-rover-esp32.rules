@@ -1,0 +1,22 @@
+# Stable /dev/rover-esp32 symlink for the rover-side ESP32 LoRa unit.
+#
+# Same CP2102 vid:pid as the LD19 LiDAR — see 99-rover-lidar.rules for the
+# full explanation. Distinguish by serial.
+#
+# REQUIRED STEP BEFORE INSTALL: replace ESP32_SERIAL_PLACEHOLDER below with
+# this ESP32's actual CP2102 serial. Discover it with:
+#
+#   udevadm info -a -n /dev/ttyUSB1 2>/dev/null | grep '{serial}' | head -1
+#
+# Many ESP32 dev boards use unique serials per board (e.g. flashed during
+# manufacturing). If yours doesn't, you can program one once with esptool
+# (espefuse.py — search for "CP2102 serial programming").
+#
+# After install:
+#   sudo cp deploy/udev/99-rover-esp32.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   ls -la /dev/rover-esp32
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
+    ATTRS{serial}=="ESP32_SERIAL_PLACEHOLDER", \
+    SYMLINK+="rover-esp32", MODE="0660", GROUP="dialout"

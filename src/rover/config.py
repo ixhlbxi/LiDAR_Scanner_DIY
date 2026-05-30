@@ -224,7 +224,9 @@ _DEFAULTS: dict = {
     },
     "lidar": {
         "enabled": True,
-        "port": "/dev/ttyUSB0",
+        # Stable symlink from deploy/udev/99-rover-lidar.rules.
+        # Pre-deploy fallback: /dev/ttyUSB0.
+        "port": "/dev/rover-lidar",
         "baud": 230400,
         "scan_rate_hz": 10,
     },
@@ -248,7 +250,9 @@ _DEFAULTS: dict = {
     },
     "gnss": {
         "enabled": True,
-        "port": "/dev/ttyACM0",
+        # Stable symlink from deploy/udev/99-rover-f9p.rules.
+        # Pre-deploy fallback: /dev/ttyACM0.
+        "port": "/dev/rover-f9p",
         "baud": 115200,
         "rtcm_profile": "robust",
         "survey_in_duration_sec": 300,
@@ -266,7 +270,9 @@ _DEFAULTS: dict = {
     },
     "lora": {
         "enabled": True,
-        "port": "/dev/ttyUSB1",
+        # Stable symlink from deploy/udev/99-rover-esp32.rules.
+        # Pre-deploy fallback: /dev/ttyUSB1.
+        "port": "/dev/rover-esp32",
         "baud": 115200,
         "spreading_factor": 7,
         "bandwidth_khz": 125,

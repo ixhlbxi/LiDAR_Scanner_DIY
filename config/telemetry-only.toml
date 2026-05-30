@@ -1,0 +1,61 @@
+# Telemetry-only profile — for indoor bench tests + smoke runs.
+#
+# Disables the stepper / lidar / camera / imu so nothing physically moves
+# and nothing is read from hardware that may not be wired up.
+#
+# Keeps the GNSS reader on (it's read-only) so status.json carries fix
+# info if a F9P is plugged in.
+#
+# Keeps the three telemetry channels on so you can watch the rover's
+# health publishing live during bench work:
+#
+#   curl http://127.0.0.1:8090/status     # local HTTP (Channel B)
+#   cat  /run/rover/status.json           # atomic file (Channel A)
+#
+# Loaded by /etc/systemd/system/rover-telemetry.service.
+
+[general]
+device_name = "rover-01-bench"
+log_level = "INFO"
+
+[session]
+profile = "personal"
+
+[lidar]
+enabled = false
+
+[stepper]
+enabled = false
+
+[imu]
+enabled = false
+
+[camera]
+enabled = false
+
+[gnss]
+enabled = true                    # still useful: shows fix status in telemetry
+
+[ntrip]
+enabled = false                   # leave off unless bench-testing NTRIP integration
+
+[lora]
+enabled = false                   # no ESP32 expected on bench rig
+role = "disabled"
+
+[base_station_integration]
+enabled = true                    # status.json publisher ON
+
+[telemetry]
+http_enabled = true               # local HTTP /status endpoint ON
+
+[logging]
+output_dir = "/var/log/rover/bench"
+session_prefix = "bench"
+save_images = false
+
+[watchdog]
+enabled = true                    # exercise sd_notify / WATCHDOG=1 path
+
+[power]
+monitor_battery = false

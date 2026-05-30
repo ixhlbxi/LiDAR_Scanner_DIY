@@ -1,0 +1,52 @@
+[Unit]
+Description=PiLiDAR-RTK Rover — acquisition orchestrator
+# No After=/Wants=multi-user.target here; combined with WantedBy=multi-user.target
+# in [Install] that creates an ordering cycle systemd resolves by deleting our
+# start job. Caught in sibling repo (DEC-013 of arm-drone-lidar-workflow).
+
+[Service]
+# Type=notify lets the rover send READY=1 once main loop is up and WATCHDOG=1
+# every heartbeat. systemd kills us if WATCHDOG=1 stops arriving for WatchdogSec.
+# Pairs with rover/watchdog.py — see Stage C of v0.10 deep-alignment.
+Type=notify
+WatchdogSec=60s
+
+# Adjust if the rover code lives elsewhere. /opt/rover is the deploy-script
+# install target, mirroring the sibling's /opt/rtk-base layout.
+ExecStart=/usr/bin/python3 -m rover.main --config /etc/rover/config.toml
+WorkingDirectory=/opt/rover
+
+# Optional secret file. The leading `-` makes systemd ignore "file missing".
+# Format: standard env-file (e.g. ROVER_NTRIP_PASSWORD=hunter2). Should be
+# mode 0600 owned by root (the install.sh script enforces this). Mirrors
+# sibling's /etc/rtk-base/secret convention.
+EnvironmentFile=-/etc/rover/secret
+
+# Make rover code importable when run as `python3 -m rover.main`.
+Environment=PYTHONPATH=/opt/rover/src
+
+# Suppresses lgpio temp-file clutter in WorkingDirectory; documented in CLAUDE.md.
+Environment=LG_WD=/tmp
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rover
+
+# Root for serial + GPIO access. Could be tightened to a 'rover' user in the
+# dialout + gpio groups once the install.sh script creates one; for v0.10
+# root keeps things simple and matches sibling.
+User=root
+
+# Hardening — minimal, mirrors sibling's posture.
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+# /run/rover/ — atomic status.json (D-033 channel A) goes here.
+# /var/log/rover/ — future log destination if file logging is enabled.
+# /etc/rover/ — config + secret + mission tag file (Stage C convention).
+ReadWritePaths=/run/rover /var/log/rover /etc/rover
+
+[Install]
+WantedBy=multi-user.target
