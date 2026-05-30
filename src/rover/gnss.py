@@ -120,14 +120,27 @@ def _nmea_to_decimal(coord: str, hemi: str) -> float:
 
 
 # Mapping from NMEA GGA quality indicator → our internal fix_type enum.
-# Source: NMEA 0183 spec; aligns with arm-drone-lidar-workflow base-station GGA gate.
+#
+# NMEA-0183 GGA quality (key side, the wire vocabulary the F9P emits — and
+# the same vocabulary the sibling Base-Station speaks; see
+# arm-drone-lidar-workflow/base-station/manager_nav_pvt.py:nav_pvt_to_quality):
+#   0=no fix, 1=SPS, 2=DGPS, 4=RTK FIXED, 5=RTK FLOAT.
+#
+# Rover internal fix_type (value side, the enum the rest of this codebase
+# uses — see GnssFix above):
+#   0=NONE, 1=2D, 2=3D, 3=DGPS, 4=RTK_FLOAT, 5=RTK_FIX.
+#
+# Watch the swap: NMEA puts FIXED=4 and FLOAT=5; we put FLOAT=4 and FIX=5 so
+# the enum is monotonic-in-quality. Any external consumer that reads our
+# status.json must therefore use the rover's enum, not the GGA wire one. This
+# divergence is called out in BASE_STATION_INTEGRATION.md.
 _GGA_QUALITY_TO_FIX = {
     0: 0,  # invalid → NONE
     1: 2,  # GPS standalone → 3D (approximation; we don't distinguish 2D here)
     2: 3,  # DGPS
     3: 3,  # PPS (rare; map to DGPS for our buckets)
-    4: 5,  # RTK FIX
-    5: 4,  # RTK FLOAT
+    4: 5,  # GGA "RTK Fixed" → rover RTK_FIX
+    5: 4,  # GGA "RTK Float" → rover RTK_FLOAT
     6: 2,  # estimated/dead-reckoning → call it 3D-ish
     7: 0,  # manual → NONE
     8: 0,  # simulator → NONE

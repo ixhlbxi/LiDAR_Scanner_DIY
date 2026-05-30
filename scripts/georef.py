@@ -60,6 +60,47 @@ logger = logging.getLogger("georef")
 
 
 # ---------------------------------------------------------------------------
+# State-Plane zone vocabulary
+# ---------------------------------------------------------------------------
+#
+# Mirrors the *naming* of arm-drone-lidar-workflow/base-station/configure_base.py:
+# ZONE_EPSG, so cross-repo conversation about zones uses the same keys. The
+# *values* differ deliberately:
+#
+#   sibling repo uses NAD83(HARN) State Plane codes in meters (e.g. PA_NORTH=2271)
+#                 because their NTRIP base-setup workflow is HARN/meters native.
+#   this rover uses NAD83(2011) State Plane codes in US Survey Foot (e.g.
+#                 PA_NORTH=6346) because BASE_STATION_INTEGRATION.md §5 specifies
+#                 that as the rover-output contract for arm_group profile.
+#
+# If you need the sibling's HARN codes here (rare — you'd be using rover output
+# in a HARN-native workflow), pass --crs directly with the EPSG code; this dict
+# is only consulted for the friendly-name lookup in CLI logs.
+ZONE_EPSG: dict[str, int] = {
+    "PA_NORTH":   6346,   # NAD83(2011) / Pennsylvania North (ftUS)
+    "PA_SOUTH":   6347,   # NAD83(2011) / Pennsylvania South (ftUS)
+    "NJ":         6527,   # NAD83(2011) / New Jersey (ftUS)
+    "MD":         6487,   # NAD83(2011) / Maryland (ftUS)
+    "DE":         6446,   # NAD83(2011) / Delaware (ftUS)
+    "NY_EAST":    6535,   # NAD83(2011) / New York East (ftUS)
+    "NY_CENTRAL": 6536,   # NAD83(2011) / New York Central (ftUS)
+    "NY_WEST":    6537,   # NAD83(2011) / New York West (ftUS)
+    "VA_NORTH":   6592,   # NAD83(2011) / Virginia North (ftUS)
+    "VA_SOUTH":   6593,   # NAD83(2011) / Virginia South (ftUS)
+    "WV_NORTH":   6601,   # NAD83(2011) / West Virginia North (ftUS)
+    "WV_SOUTH":   6602,   # NAD83(2011) / West Virginia South (ftUS)
+}
+
+
+def zone_name_for(epsg: int) -> str:
+    """Return the friendly zone name for an EPSG code, or 'EPSG:NNNN' as fallback."""
+    for name, code in ZONE_EPSG.items():
+        if code == epsg:
+            return name
+    return f"EPSG:{epsg}"
+
+
+# ---------------------------------------------------------------------------
 # Lazy-import wrappers — keep the script importable even when post-process
 # deps aren't installed
 # ---------------------------------------------------------------------------
@@ -535,8 +576,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
 
     logger.info(
-        "Exporting session=%s profile=%s target_epsg=%d units=%s",
-        session_dir.name, profile, target_epsg, units,
+        "Exporting session=%s profile=%s target=%s (EPSG:%d) units=%s",
+        session_dir.name, profile, zone_name_for(target_epsg), target_epsg, units,
     )
 
     xyz, intensity, origin = session_to_pointcloud(session)

@@ -21,34 +21,46 @@ Each publisher's lifecycle (start/stop) is independent; one publisher failing or
 being disabled never takes down the others.
 
 Public API:
+    STATUS_SCHEMA_VERSION — module-level constant; rover-side schema version
     RoverStatus       — dataclass; current rover snapshot for routing
     TelemetryRouter   — composes the configured channels and fans out publish()
     StatusJsonPublisher / LocalHttpPublisher / LoRaPublisher — individual channels
-    atomic_write_json — mirror of the Base-Station's helper (so external code can
-                        reuse it for tests / sidecar consumers)
+    atomic_write_json — re-exported from rover._io (mirror of base-station helper)
 
 Decision references: D-033 (this whole module exists for D-033).
 
 Dependencies: stdlib only (pyserial is imported lazily inside LoRaPublisher.start()
 so off-Pi tests don't require it).
 
+Schema version history (rover side; versioned independently from base):
+    v1 (2026-05-23): initial set per BASE_STATION_INTEGRATION.md §3.1. Fields:
+                     schema_version, timestamp_epoch, device, profile, mission,
+                     project_code, scan_state, fix_type, sat_count, hdop, lat,
+                     lon, alt_m, rtk_age_s, battery_mv, lora_link_rssi,
+                     lora_link_snr, ntrip_connected, ntrip_bytes_per_sec.
+
+Adding a field is a minor bump (consumers ignore unknown keys); removing or
+renaming is a major bump. Cross-ref: arm-drone-lidar-workflow/base-station/
+rtk_io.py:STATUS_SCHEMA_VERSION (currently 9 — versioned independently).
+
 Changelog:
     0.10.0  2026-05-23  Initial multi-publisher router (Phase B of overhaul).
+    0.10.2  2026-05-30  STATUS_SCHEMA_VERSION constant; atomic_write_json moved
+                        to rover._io (Stage B of deep-alignment overhaul).
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 
+from rover._io import atomic_write_json
 from rover.config import RoverConfig
 from rover.lora_protocol import (
     TYPE_LINK,
@@ -59,6 +71,12 @@ from rover.lora_protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Rover-side status.json schema version. Bumped on field add/remove; consumers
+# (Base-Station sidecars, dashboards) read this to decide whether they
+# understand the payload. See module docstring for the full version history.
+STATUS_SCHEMA_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -105,43 +123,8 @@ class RoverStatus:
 
 
 # ---------------------------------------------------------------------------
-# atomic_write_json — port of arm-drone-lidar-workflow/base-station/rtk_io.py
-# ---------------------------------------------------------------------------
-
-
-def atomic_write_json(path: Path, data: dict) -> None:
-    """Write *data* as JSON to *path* via mkstemp + os.rename.
-
-    Mirrors `base-station/rtk_io.py:atomic_write_json`. Any process that already
-    knows how to read /run/rtk-base/status.json can read this rover's status.json
-    using the same expectations (atomicity, 0644 perms, trailing newline).
-
-    Creates parent directory if absent. Raises on failure — callers log at
-    whatever severity suits their context.
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-            f.write("\n")
-        # Windows: chmod is mostly a no-op for 0o644 but harmless.
-        try:
-            os.chmod(tmp, 0o644)
-        except OSError:
-            pass
-        os.replace(tmp, str(path))  # os.replace is atomic on Windows too
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
-# ---------------------------------------------------------------------------
 # Publisher base + concrete channels
+# (atomic_write_json lives in rover._io and is re-exported above.)
 # ---------------------------------------------------------------------------
 
 
@@ -168,7 +151,12 @@ class StatusJsonPublisher(_Publisher):
     def __init__(self, config: RoverConfig) -> None:
         self._bsi = config.base_station_integration
         self._device = config.general.device_name
-        self._schema_version = self._bsi.status_schema_version
+        # STATUS_SCHEMA_VERSION is the code-level source of truth (mirrors
+        # base-station/rtk_io.py:STATUS_SCHEMA_VERSION). The config field
+        # is retained as a per-session override hatch — e.g. for testing a
+        # newer schema against an older consumer. Normal runs use the
+        # constant by leaving the config at its default.
+        self._schema_version = self._bsi.status_schema_version or STATUS_SCHEMA_VERSION
 
     def publish(self, status: RoverStatus) -> None:
         payload = self.build_payload(status)
@@ -450,6 +438,7 @@ def status_from_config(config: RoverConfig) -> RoverStatus:
 
 
 __all__ = [
+    "STATUS_SCHEMA_VERSION",
     "RoverStatus",
     "TelemetryRouter",
     "StatusJsonPublisher",
@@ -458,8 +447,3 @@ __all__ = [
     "atomic_write_json",
     "status_from_config",
 ]
-
-
-# Cleanup: asdict is imported above for parity with config.py patterns even
-# though this module doesn't use it directly. Keep import minimal.
-_ = asdict
