@@ -168,6 +168,29 @@ Shared envelope used by both repos. Strict superset of the original Appendix C a
 Heltec v1 display frame — receivers that only understood v1 (display body) MUST reject
 v2 frames; v2-aware receivers handle both by dispatching on `type`.
 
+> ⚠️ **Reality check (as of 2026-05-30, Stage E of the deep-alignment overhaul):**
+> the sibling `arm-drone-lidar-workflow` Heltec firmware in
+> `base-station/heltec-display/src/main.cpp` still runs
+> `LORA_PROTO_VERSION = 1` (DISPLAY-only body, no envelope). The rover's
+> [`src/rover/lora_protocol.py`](../src/rover/lora_protocol.py) and the
+> rover ESP32 firmware in [`firmware/esp32-rover/`](../firmware/esp32-rover/)
+> implement v2 fully and are forward-compatible, **but**:
+>
+>   * No sibling-side receiver currently parses rover STATUS / LINK frames.
+>   * No sibling-side transmitter currently emits `RTCM_CHUNK` frames, so the
+>     LoRa-RTCM fallback path described in §2.2 is not end-to-end functional.
+>
+> Sibling-side work is tracked in
+> [`docs/CROSS_REPO_BACKLOG.md`](CROSS_REPO_BACKLOG.md) as **CR-001** (Heltec
+> v2 envelope bump), **CR-002** (base-side LoRa-RTCM transmitter), and
+> **CR-003** (sibling handheld recognition of STATUS / LINK).
+>
+> Until those land, the rover's NTRIP-primary RTK path (§2.1) and the
+> non-LoRa telemetry channels (status.json + HTTP, §3.1–§3.2) provide
+> full end-to-end function on their own. NTRIP-only field validation
+> can proceed independently — see
+> [`ROADMAP.md` v1.0 Field Validation](ROADMAP.md#v10-field-validation-next).
+
 ```
 ┌─────────┬─────────┬─────────┬─────────┬──────────────┬─────────┐
 │ Version │  Type   │ Seq LE  │ Len LE  │   Payload    │ CRC16   │
