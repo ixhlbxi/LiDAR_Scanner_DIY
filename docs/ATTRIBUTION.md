@@ -1,6 +1,6 @@
 # Attribution and Upstream Obligations
 
-**Status: OPEN. Read this before any public release, before any ARM Group field use, and before changing LICENSE.**
+**Status: OPEN. Read this before any public release, before changing LICENSE, and before the device's use category ever changes.**
 
 Created September 14, 2026. This file exists because the rover is derived from someone else's work and the obligations that come with that are easy to forget once the hardware finally works.
 
@@ -22,28 +22,39 @@ If the Unitree L2 path is adopted (retiring DEC-015 through DEC-017 and the PiLi
 
 ---
 
-## The two problems that must be resolved
+## Use category (decided September 14, 2026)
 
-### 1. License conflict: this repo says GPL-3.0, upstream requires CC BY-NC-SA
+**This device is categorized as educational and internal-use only. It will not be used on billable jobs or to produce client deliverables.**
 
-The LICENSE file in this repo is GPL-3.0. CC BY-NC-SA 4.0 is ShareAlike: derivative works must be distributed under the same license (or a CC-designated compatible one). GPL-3.0 is not on that list. As of the creation date, this repo is out of compliance with its upstream license the moment it is shared publicly.
+This decision is what keeps the project inside the NonCommercial clause of the upstream license. CC BY-NC-SA defines commercial use as use "primarily intended for or directed towards commercial advantage or monetary compensation." Internal learning, workflow experimentation, and training at ARM Group, with no revenue tied to the output, is the defensible reading of non-commercial. It is not a bright line, so keep it clean: no client project codes on real deliverables, no scan data handed to a client, no billing against the device's output.
+
+**If this category ever changes** (someone wants to use it on a real job, even once), stop and read the "If commercial use is ever reconsidered" section below before doing so.
+
+The `arm_group` mode in the README (project-code tagging, State Plane export for TBC) is fine to keep as a workflow exercise. It is the use of the output, not the existence of the mode, that matters.
+
+---
+
+## The one problem that still must be resolved
+
+### License conflict: this repo says GPL-3.0, upstream requires CC BY-NC-SA
+
+The LICENSE file in this repo is GPL-3.0. CC BY-NC-SA 4.0 is ShareAlike: derivative works must be distributed under the same license (or a CC-designated compatible one). GPL-3.0 is not on that list. As of the creation date, this repo is out of compliance with its upstream license the moment it is shared publicly. The educational-use decision does not fix this; it only closes the NonCommercial question.
 
 Fix options, in order of preference:
 
 - Change LICENSE to CC BY-NC-SA 4.0 to match upstream. Simplest, honest, and the only option that requires no permission.
 - Ask Philip Gutjahr for written permission to relicense the derivative. Unlikely to be needed unless the other option is unworkable.
 
-### 2. NonCommercial conflict: the `arm_group` mode is commercial use
+---
 
-The README describes an `arm_group` operating mode that tags output with project codes and exports to State Plane for TBC import. Using this device to produce deliverables for ARM Group clients is commercial use. CC BY-NC-SA forbids that without a separate grant.
+## If commercial use is ever reconsidered
 
 The upstream LICENSE.md includes a **backer exception**: backers who support the project through its funding platforms may use the device to offer scanning as a service (but may not sell the device or derivatives as a product). Read the full text in the upstream repo before relying on it.
 
-Fix options:
+Paths, in order of preference:
 
-- Become a backer of PiLiDAR through whatever funding platform the project uses, keep the receipt, and note it here with the date. This is the path the author explicitly built for people in exactly this situation.
+- Become a backer of PiLiDAR through whatever funding platform the project uses, keep the receipt, and note it in the resolution log with the date.
 - Contact Philip Gutjahr directly for a written commercial-use grant. Keep the correspondence with the repo.
-- Keep the rover strictly in `personal` mode and never use it for ARM work until one of the above is done.
 
 Doing nothing is not an option once the device produces a billable deliverable.
 
@@ -54,7 +65,6 @@ Doing nothing is not an option once the device produces a billable deliverable.
 - [ ] Add an "Acknowledgements" or "Based on" section to README.md naming PiLiDAR, Philip Gutjahr, the upstream URL, and the CC BY-NC-SA 4.0 license, with a plain statement that this project modifies the original.
 - [ ] Change LICENSE to CC BY-NC-SA 4.0, or obtain and document written permission to do otherwise.
 - [ ] Keep upstream copyright notices intact in any file that still contains PiLiDAR code, and add a header line noting it was adapted from PiLiDAR.
-- [ ] Resolve the commercial-use question (backer status or written grant) and record the outcome below.
 - [ ] Consider opening an issue or discussion on the upstream repo describing what this fork does (RTK integration, IMU, LoRa telemetry). The author may want to know, and it is the courteous thing to do for a project you built on. Not required by the license.
 - [ ] If any bug fixes are made to PiLiDAR-derived code that would apply upstream (the rpi-lgpio Bookworm fix in DEC-029 is an example, though upstream has since fixed it independently), offer them back as a pull request.
 
@@ -66,7 +76,7 @@ Record dates and outcomes here as items above are closed.
 
 | Date | Item | Outcome |
 |---|---|---|
-| | | |
+| September 14, 2026 | Commercial-use question | Closed by decision: device is educational / internal-use only. No billable use. Reopen this file if that changes. |
 
 ---
 
