@@ -24,13 +24,13 @@ If the Unitree L2 path is adopted (retiring DEC-015 through DEC-017 and the PiLi
 
 ## Use category (decided September 14, 2026)
 
-**This device is categorized as educational and internal-use only. It will not be used on billable jobs or to produce client deliverables.**
+**This is Brian's personal educational project. It is not an ARM Group product, tool, or deliverable, and it will not be used on billable jobs or client work.**
 
-This decision is what keeps the project inside the NonCommercial clause of the upstream license. CC BY-NC-SA defines commercial use as use "primarily intended for or directed towards commercial advantage or monetary compensation." Internal learning, workflow experimentation, and training at ARM Group, with no revenue tied to the output, is the defensible reading of non-commercial. It is not a bright line, so keep it clean: no client project codes on real deliverables, no scan data handed to a client, no billing against the device's output.
+Where ARM Group appears in this repo (the `arm_group` mode, the Base-Station NTRIP companion role, State Plane export for TBC), it is a novelty: a personal hobby device being pointed at the firm's base station because that is the RTK source Brian has access to. Nothing the device produces feeds a client deliverable, a project record, or an invoice.
+
+This is squarely non-commercial under CC BY-NC-SA. To keep it that way: no real client project codes on output, no scan data handed to a client or dropped into a job folder, no billing against anything the device produces.
 
 **If this category ever changes** (someone wants to use it on a real job, even once), stop and read the "If commercial use is ever reconsidered" section below before doing so.
-
-The `arm_group` mode in the README (project-code tagging, State Plane export for TBC) is fine to keep as a workflow exercise. It is the use of the output, not the existence of the mode, that matters.
 
 ---
 
@@ -38,7 +38,7 @@ The `arm_group` mode in the README (project-code tagging, State Plane export for
 
 ### License conflict: this repo says GPL-3.0, upstream requires CC BY-NC-SA
 
-The LICENSE file in this repo is GPL-3.0. CC BY-NC-SA 4.0 is ShareAlike: derivative works must be distributed under the same license (or a CC-designated compatible one). GPL-3.0 is not on that list. As of the creation date, this repo is out of compliance with its upstream license the moment it is shared publicly. The educational-use decision does not fix this; it only closes the NonCommercial question.
+The LICENSE file in this repo is GPL-3.0. CC BY-NC-SA 4.0 is ShareAlike: derivative works must be distributed under the same license (or a CC-designated compatible one). GPL-3.0 is not on that list. As of the creation date, this repo is out of compliance with its upstream license the moment it is shared publicly. The personal-use decision does not fix this; it only closes the NonCommercial question.
 
 Fix options, in order of preference:
 
@@ -76,7 +76,7 @@ Record dates and outcomes here as items above are closed.
 
 | Date | Item | Outcome |
 |---|---|---|
-| September 14, 2026 | Commercial-use question | Closed by decision: device is educational / internal-use only. No billable use. Reopen this file if that changes. |
+| September 14, 2026 | Commercial-use question | Closed by decision: personal educational project, not an ARM Group tool. ARM involvement is a novelty (shared base station), not a business use. Reopen this file if that changes. |
 
 ---
 
