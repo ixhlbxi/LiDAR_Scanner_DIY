@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "structure_fingerprint": "2d7c6153fc05dd4c49e3ba96701bc41b4de097c4",
+  "tiers": {
+    "1": ["src/rover/", "scripts/georef.py", "firmware/esp32-rover/src/", "config/", "docs/"],
+    "2": ["tests/", "deploy/", "firmware/esp32-rover/platformio.ini", "firmware/esp32-rover/include/"],
+    "3": ["docs/README_ORIGINAL.md", "docs/V2_SLAM_CONCEPT.md"]
+  },
+  "one_shot_exempt": [],
+  "findings_dir": "docs/",
+  "tracking_file": "docs/CROSS_REPO_BACKLOG.md",
+  "conventions_doc": "CLAUDE.md"
+}
