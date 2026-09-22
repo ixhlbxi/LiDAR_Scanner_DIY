@@ -69,3 +69,18 @@ proceeds in phases — see the approved plan and current state at
 - [Hardware](docs/HARDWARE.md) — bill of materials, GPIO/serial map, power
 - [Specifications](docs/SPECIFICATIONS.md) — sensors, accuracy targets, performance budgets
 - [Roadmap](docs/ROADMAP.md) — phased delivery plan
+
+## Acknowledgements
+
+This project is a derivative of [PiLiDAR](https://github.com/PiLiDAR/PiLiDAR) by
+Philip Gutjahr, released under the
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) licence.
+It modifies the original: RTK GNSS integration, IMU fusion, LoRa telemetry, and
+the Base-Station companion workflow are additions; the rotating-mast LD19 scan
+concept is inherited. Full attribution detail and the licence reasoning are in
+[docs/ATTRIBUTION.md](docs/ATTRIBUTION.md).
+
+## Licence
+
+[CC BY-NC-SA 4.0](LICENSE) — Attribution-NonCommercial-ShareAlike 4.0 International,
+matching the upstream project. Personal, educational use only; not an ARM Group tool.

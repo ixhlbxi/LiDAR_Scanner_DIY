@@ -62,8 +62,8 @@ Doing nothing is not an option once the device produces a billable deliverable.
 
 ## Credit checklist (do all of these before any public release)
 
-- [ ] Add an "Acknowledgements" or "Based on" section to README.md naming PiLiDAR, Philip Gutjahr, the upstream URL, and the CC BY-NC-SA 4.0 license, with a plain statement that this project modifies the original.
-- [ ] Change LICENSE to CC BY-NC-SA 4.0, or obtain and document written permission to do otherwise.
+- [x] Add an "Acknowledgements" or "Based on" section to README.md naming PiLiDAR, Philip Gutjahr, the upstream URL, and the CC BY-NC-SA 4.0 license, with a plain statement that this project modifies the original.
+- [x] Change LICENSE to CC BY-NC-SA 4.0, or obtain and document written permission to do otherwise.
 - [ ] Keep upstream copyright notices intact in any file that still contains PiLiDAR code, and add a header line noting it was adapted from PiLiDAR.
 - [ ] Consider opening an issue or discussion on the upstream repo describing what this fork does (RTK integration, IMU, LoRa telemetry). The author may want to know, and it is the courteous thing to do for a project you built on. Not required by the license.
 - [ ] If any bug fixes are made to PiLiDAR-derived code that would apply upstream (the rpi-lgpio Bookworm fix in DEC-029 is an example, though upstream has since fixed it independently), offer them back as a pull request.
@@ -77,6 +77,7 @@ Record dates and outcomes here as items above are closed.
 | Date | Item | Outcome |
 |---|---|---|
 | September 14, 2026 | Commercial-use question | Closed by decision: personal educational project, not an ARM Group tool. ARM involvement is a novelty (shared base station), not a business use. Reopen this file if that changes. |
+| September 22, 2026 | LICENSE + README credit | Relicensed to CC BY-NC-SA 4.0 (commit <sha, fill after commit>); Acknowledgements and Licence sections added to README; pyproject `license` set. Remaining checklist items (upstream notices in derived files, upstream issue, PR of fixes) stay open. |
 
 ---
 
