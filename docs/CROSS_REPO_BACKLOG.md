@@ -107,6 +107,33 @@ operators can point it at the project folder per the contract.
 
 ---
 
+## Rover-side deferred (from the 2026-09-22 super-audit)
+
+Items dispositioned `defer` or `track` in `docs/AUDIT_super_20260922_1810.md`, plus the
+firmware rows deferred because PlatformIO is not installed on the dev machine. These are
+rover-side, not sibling-side; they live here because this file is the repo's single
+tracking file. Each carries its finding ID so the report and this list stay cross-referenced.
+
+| ID | Where | What | Why deferred |
+|---|---|---|---|
+| T1-018 | `src/rover/imu.py` free-fall branch | Quaternion derivative uses already-modified q0 | Low; superseded when the MARG update lands in stage 3 |
+| T1-021 | `src/rover/gnss.py` `_nmea_checksum_ok` | Non-hex checksum raises ValueError into the catch-all | Low; one 0.5 s stall on a corrupt sentence |
+| T1-024 | `src/rover/ntrip.py` `stop()` / stats | Socket not closed on stop; stats handed live | Low; partially addressed in stage 4 |
+| T1-028 | `src/rover/config.py` `_require_type` | bool passes int checks | Low; no config key plausibly set to a bool by mistake |
+| T1-037 | `src/rover/main.py` scan_state | Stays SCAN_ERROR after a recovered stepper fault | Low; cosmetic on the telemetry channel |
+| T1-038 | `src/rover/main.py` settle | Stop latency up to ~6 s | Low; the settle half is fixed in stage 2, the read_scan half waits for stage 3 |
+| T1-040 | `src/rover/gnss.py` `line_buf` | Unbounded if the stream never contains newline | Low; capped in stage 4 while in the file |
+| T1-045 | four driver modules | Shared `_Device` base class | Medium-effort refactor with no behaviour change; after v1.0 field validation |
+| T1-048 | `src/rover/config.py` `_validate` | Declarative validation table | Medium-effort refactor with no behaviour change; after v1.0 field validation |
+| D-016 | `deploy/systemd/rover.service:4` | Wrong sibling DEC reference | Track; removed in stage 2 if trivial |
+| D-018 | workspace `../CLAUDE.md` | No row for this repo in the signpost table | Track; outside this repo, per-file confirm |
+| T1-034 | `firmware/esp32-rover/src/main.cpp:233` | `"200"` substring accepts SOURCETABLE reply | Firmware: needs PlatformIO build + flash on hardware |
+| T1-035 | `firmware/esp32-rover/src/main.cpp:170-196` | USB framing drops back-to-back frames; millis wrap | Firmware: needs PlatformIO build + flash on hardware |
+| T1-051 | `firmware/esp32-rover/` | Dead `encode_frame_v2`, duplicated checks, unused ArduinoJson dep and macros | Firmware: needs PlatformIO build + flash on hardware |
+| T1-042 (firmware half) | `firmware/esp32-rover/src/main.cpp` | Quote the golden frame vector from `tests/test_lora_protocol.py` | Firmware: Python half lands in stage 4 |
+
+---
+
 ## How to use this file
 
 - **Adding an item:** when you find a "rover side codes for X, sibling side
