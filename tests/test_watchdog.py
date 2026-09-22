@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
 import sys
 import threading
@@ -108,19 +107,13 @@ def test_default_timeout_exits_process_with_code_2() -> None:
     assert "STILL ALIVE" not in proc.stdout
 
 
-@pytest.mark.skipif(
-    not hasattr(socket, "AF_UNIX"),
-    reason=(
-        "AF_UNIX not exposed by this Python/OS build (observed on the official "
-        "python.org Windows 3.13/3.14 builds on this machine, which are compiled "
-        "without AF_UNIX support even though Windows itself supports it since "
-        "10 build 17063). Production runs on Raspberry Pi OS (Linux), where "
-        "AF_UNIX is always available."
-    ),
-)
 def test_sd_notify_reuses_one_socket(monkeypatch, tmp_path) -> None:
     """One connected datagram socket per process, not one per heartbeat."""
     monkeypatch.setenv("NOTIFY_SOCKET", "@rover-test-notify")
+    # socket.socket is already mocked below; AF_UNIX itself is a plain module
+    # attribute the real socket module doesn't define on every platform (e.g. the
+    # official python.org Windows builds) — stub it so the test runs everywhere.
+    monkeypatch.setattr(wd_mod.socket, "AF_UNIX", 1, raising=False)
     wd_mod._reset_notify_socket_for_tests()
     fake = mock.MagicMock()
     with mock.patch("rover.watchdog.socket.socket", return_value=fake) as ctor:
@@ -129,4 +122,19 @@ def test_sd_notify_reuses_one_socket(monkeypatch, tmp_path) -> None:
         wd_mod._sd_notify("WATCHDOG=1\n")
     assert ctor.call_count == 1
     assert fake.sendall.call_count == 3
+    wd_mod._reset_notify_socket_for_tests()
+
+
+def test_sd_notify_reconnects_after_send_failure(monkeypatch) -> None:
+    """A send failure drops the cached socket so the next call reconnects."""
+    monkeypatch.setenv("NOTIFY_SOCKET", "@rover-test-notify")
+    monkeypatch.setattr(wd_mod.socket, "AF_UNIX", 1, raising=False)
+    wd_mod._reset_notify_socket_for_tests()
+    first = mock.MagicMock()
+    first.sendall.side_effect = OSError("boom")
+    second = mock.MagicMock()
+    with mock.patch("rover.watchdog.socket.socket", side_effect=[first, second]) as ctor:
+        wd_mod._sd_notify("READY=1\n")  # connects `first`, sendall raises, dropped
+        wd_mod._sd_notify("READY=1\n")  # reconnects: constructs `second`
+    assert ctor.call_count == 2
     wd_mod._reset_notify_socket_for_tests()
