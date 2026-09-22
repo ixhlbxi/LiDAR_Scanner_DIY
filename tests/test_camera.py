@@ -1,12 +1,11 @@
 """Unit tests for rover.camera — runs anywhere, no hardware required."""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from rover.config import CameraConfig
 from rover.camera import Camera
+from rover.config import CameraConfig
 
 
 @pytest.fixture

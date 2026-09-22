@@ -27,7 +27,6 @@ import tomllib
 from dataclasses import asdict, dataclass, fields
 from difflib import get_close_matches
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -175,9 +174,9 @@ class PowerConfig:
 
 @dataclass(frozen=True)
 class CalibrationConfig:
-    lidar_to_imu_translation: Optional[list[float]] = None
-    lidar_to_imu_rotation: Optional[list[float]] = None
-    imu_to_gnss_translation: Optional[list[float]] = None
+    lidar_to_imu_translation: list[float] | None = None
+    lidar_to_imu_rotation: list[float] | None = None
+    imu_to_gnss_translation: list[float] | None = None
 
 
 @dataclass(frozen=True)
@@ -385,17 +384,13 @@ def _check_unknown_keys(raw: dict) -> None:
     for section in raw:
         if section not in valid_sections:
             hint = _suggest(section, valid_sections)
-            raise ValueError(
-                f"Unknown config section '[{section}]'.{hint}"
-            )
+            raise ValueError(f"Unknown config section '[{section}]'.{hint}")
         if isinstance(raw[section], dict):
             valid = _valid_keys(section)
             for key in raw[section]:
                 if key not in valid:
                     hint = _suggest(key, valid)
-                    raise ValueError(
-                        f"Unknown key '{key}' in [{section}].{hint}"
-                    )
+                    raise ValueError(f"Unknown key '{key}' in [{section}].{hint}")
 
 
 def _validate(raw: dict) -> None:
@@ -410,15 +405,11 @@ def _validate(raw: dict) -> None:
 
     def _require_in(section: str, key: str, value, allowed: set) -> None:
         if value not in allowed:
-            raise ValueError(
-                f"[{section}] {key}: must be one of {sorted(allowed)}, got {value!r}"
-            )
+            raise ValueError(f"[{section}] {key}: must be one of {sorted(allowed)}, got {value!r}")
 
     def _require_range(section: str, key: str, value, lo, hi) -> None:
         if not (lo <= value <= hi):
-            raise ValueError(
-                f"[{section}] {key}: must be in [{lo}, {hi}], got {value}"
-            )
+            raise ValueError(f"[{section}] {key}: must be in [{lo}, {hi}], got {value}")
 
     def _require_positive(section: str, key: str, value) -> None:
         if value <= 0:
@@ -428,8 +419,9 @@ def _validate(raw: dict) -> None:
     g = raw["general"]
     _require_type("general", "device_name", g["device_name"], str)
     _require_type("general", "log_level", g["log_level"], str)
-    _require_in("general", "log_level", g["log_level"].upper(),
-                {"DEBUG", "INFO", "WARNING", "ERROR"})
+    _require_in(
+        "general", "log_level", g["log_level"].upper(), {"DEBUG", "INFO", "WARNING", "ERROR"}
+    )
     # Normalize to uppercase
     g["log_level"] = g["log_level"].upper()
 
@@ -483,9 +475,7 @@ def _validate(raw: dict) -> None:
         try:
             im["address"] = int(addr, 0)
         except (ValueError, TypeError):
-            raise ValueError(
-                f"[imu] address: cannot parse {addr!r} as integer"
-            )
+            raise ValueError(f"[imu] address: cannot parse {addr!r} as integer")  # noqa: B904 — keep implicit exception chaining; revisited in stage 4
     _require_type("imu", "address", im["address"], int)
     _require_type("imu", "sample_rate_hz", im["sample_rate_hz"], int)
     _require_positive("imu", "sample_rate_hz", im["sample_rate_hz"])
@@ -553,10 +543,21 @@ def _validate(raw: dict) -> None:
     bsi = raw["base_station_integration"]
     _require_type("base_station_integration", "enabled", bsi["enabled"], bool)
     _require_type("base_station_integration", "status_json_path", bsi["status_json_path"], str)
-    _require_type("base_station_integration", "status_schema_version", bsi["status_schema_version"], int)
-    _require_positive("base_station_integration", "status_schema_version", bsi["status_schema_version"])
-    _require_type("base_station_integration", "publish_interval_sec", bsi["publish_interval_sec"], (int, float))
-    _require_positive("base_station_integration", "publish_interval_sec", bsi["publish_interval_sec"])
+    _require_type(
+        "base_station_integration", "status_schema_version", bsi["status_schema_version"], int
+    )
+    _require_positive(
+        "base_station_integration", "status_schema_version", bsi["status_schema_version"]
+    )
+    _require_type(
+        "base_station_integration",
+        "publish_interval_sec",
+        bsi["publish_interval_sec"],
+        (int, float),
+    )
+    _require_positive(
+        "base_station_integration", "publish_interval_sec", bsi["publish_interval_sec"]
+    )
     bsi["publish_interval_sec"] = float(bsi["publish_interval_sec"])
 
     # -- telemetry (DEC-033 channel B) --
@@ -571,13 +572,9 @@ def _validate(raw: dict) -> None:
     _require_type("camera", "enabled", ca["enabled"], bool)
     res = ca["resolution"]
     if not isinstance(res, (list, tuple)) or len(res) != 2:
-        raise ValueError(
-            f"[camera] resolution: must be [width, height], got {res!r}"
-        )
+        raise ValueError(f"[camera] resolution: must be [width, height], got {res!r}")
     if not all(isinstance(v, int) and v > 0 for v in res):
-        raise ValueError(
-            f"[camera] resolution: both values must be positive integers, got {res!r}"
-        )
+        raise ValueError(f"[camera] resolution: both values must be positive integers, got {res!r}")
     _require_type("camera", "capture_cadence", ca["capture_cadence"], int)
     _require_positive("camera", "capture_cadence", ca["capture_cadence"])
     _require_type("camera", "jpeg_quality", ca["jpeg_quality"], int)
@@ -595,9 +592,7 @@ def _validate(raw: dict) -> None:
     lg["flush_interval_sec"] = float(lg["flush_interval_sec"])
     _require_type("logging", "rotate_size_mb", lg["rotate_size_mb"], int)
     if lg["rotate_size_mb"] < 0:
-        raise ValueError(
-            f"[logging] rotate_size_mb: must be >= 0, got {lg['rotate_size_mb']}"
-        )
+        raise ValueError(f"[logging] rotate_size_mb: must be >= 0, got {lg['rotate_size_mb']}")
     _require_type("logging", "save_images", lg["save_images"], bool)
 
     # -- watchdog --
@@ -629,9 +624,7 @@ def _validate(raw: dict) -> None:
     # -- cross-section: arm_group profile constraints (DEC-030) --
     if se["profile"] == "arm_group":
         if not se["project_code"]:
-            raise ValueError(
-                "[session] profile = 'arm_group' requires a non-empty project_code"
-            )
+            raise ValueError("[session] profile = 'arm_group' requires a non-empty project_code")
         if se["target_crs_epsg"] == 0:
             raise ValueError(
                 "[session] profile = 'arm_group' requires target_crs_epsg > 0 "
@@ -642,9 +635,7 @@ def _validate(raw: dict) -> None:
                 "[session] profile = 'arm_group' requires [base_station_integration].enabled = true"
             )
         if not nt["enabled"]:
-            raise ValueError(
-                "[session] profile = 'arm_group' requires [ntrip].enabled = true"
-            )
+            raise ValueError("[session] profile = 'arm_group' requires [ntrip].enabled = true")
 
     # -- calibration (all optional) --
     cal = raw.get("calibration", {})
@@ -652,13 +643,9 @@ def _validate(raw: dict) -> None:
         if key in cal and cal[key] is not None:
             v = cal[key]
             if not isinstance(v, list) or len(v) != 3:
-                raise ValueError(
-                    f"[calibration] {key}: must be [x, y, z] (3 floats), got {v!r}"
-                )
+                raise ValueError(f"[calibration] {key}: must be [x, y, z] (3 floats), got {v!r}")
             if not all(isinstance(x, (int, float)) for x in v):
-                raise ValueError(
-                    f"[calibration] {key}: all values must be numeric, got {v!r}"
-                )
+                raise ValueError(f"[calibration] {key}: all values must be numeric, got {v!r}")
     if "lidar_to_imu_rotation" in cal and cal["lidar_to_imu_rotation"] is not None:
         v = cal["lidar_to_imu_rotation"]
         if not isinstance(v, list) or len(v) != 4:

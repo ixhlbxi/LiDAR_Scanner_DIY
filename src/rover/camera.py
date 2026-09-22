@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from picamera2 import Picamera2
+
     _CAMERA_AVAILABLE = True
 except ImportError:
     Picamera2 = None  # type: ignore[assignment, misc]
@@ -56,14 +57,14 @@ class Camera:
             return
 
         if not _CAMERA_AVAILABLE:
-            logger.warning(
-                "Camera enabled but picamera2 not available — running without hardware"
-            )
+            logger.warning("Camera enabled but picamera2 not available — running without hardware")
             return
 
         logger.info(
             "Camera initialized (resolution=%s, quality=%d, cadence=%d)",
-            config.resolution, config.jpeg_quality, config.capture_cadence,
+            config.resolution,
+            config.jpeg_quality,
+            config.capture_cadence,
         )
 
     @property
@@ -163,7 +164,9 @@ class Camera:
         full_path = images_dir / filename
 
         self._cam.capture_file(
-            str(full_path), format="jpeg", quality=self._config.jpeg_quality,
+            str(full_path),
+            format="jpeg",
+            quality=self._config.jpeg_quality,
         )
         self._capture_count += 1
 

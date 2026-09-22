@@ -33,7 +33,7 @@ import socket
 import sys
 import threading
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from rover.config import WatchdogConfig
 
@@ -87,18 +87,19 @@ class Watchdog:
     def __init__(
         self,
         config: WatchdogConfig,
-        on_timeout: Optional[Callable[[], None]] = None,
+        on_timeout: Callable[[], None] | None = None,
     ) -> None:
         self._config = config
         self._on_timeout = on_timeout or _default_on_timeout
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._last_beat_monotonic: float = 0.0
         self._lock = threading.Lock()
         self._fired = False  # one-shot — don't re-fire on subsequent checks
         logger.info(
             "Watchdog initialized (timeout=%ds, heartbeat=%ds)",
-            config.timeout_sec, config.heartbeat_interval_sec,
+            config.timeout_sec,
+            config.heartbeat_interval_sec,
         )
 
     def start(self) -> None:
@@ -160,7 +161,8 @@ class Watchdog:
                 self._fired = True
                 logger.error(
                     "Watchdog timeout: last heartbeat %.1fs ago (limit %.1fs)",
-                    age, timeout,
+                    age,
+                    timeout,
                 )
                 try:
                     self._on_timeout()

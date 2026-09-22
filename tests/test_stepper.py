@@ -1,6 +1,6 @@
 """Unit tests for rover.stepper — runs anywhere, no hardware required."""
 
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 

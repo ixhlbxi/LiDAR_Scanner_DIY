@@ -45,15 +45,16 @@ import os
 import socket
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
+from rover import __version__
 from rover.config import RoverConfig
 
 logger = logging.getLogger(__name__)
 
 
-USER_AGENT = "PiLiDAR-RTK-Rover/0.10 (NTRIP)"
+USER_AGENT = f"PiLiDAR-RTK-Rover/{__version__} (NTRIP)"
 NTRIP_VERSION = "Ntrip/2.0"
 
 # Tunables — not exposed via config until field experience says they should be.
@@ -122,7 +123,7 @@ def build_request(
     """
     if not mountpoint:
         raise NtripError("mountpoint is required")
-    creds = f"{username}:{password}".encode("utf-8")
+    creds = f"{username}:{password}".encode()
     auth = base64.b64encode(creds).decode("ascii")
 
     lines = [
@@ -169,7 +170,7 @@ def parse_response_status(header_bytes: bytes) -> tuple[int, str]:
     try:
         code = int(code_str)
     except ValueError:
-        raise NtripError(f"non-numeric status code: {code_str!r}")
+        raise NtripError(f"non-numeric status code: {code_str!r}")  # noqa: B904 — keep implicit exception chaining; revisited in stage 4
 
     return code, reason
 
@@ -196,7 +197,7 @@ class NtripClient:
         self,
         config: RoverConfig,
         rtcm_sink: Callable[[bytes], None],
-        status_sink: Optional[Callable[[NtripStats], None]] = None,
+        status_sink: Callable[[NtripStats], None] | None = None,
     ) -> None:
         self._cfg = config.ntrip
         self._device_name = config.general.device_name
@@ -204,7 +205,7 @@ class NtripClient:
         self._status_sink = status_sink
         self._stats = NtripStats()
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._password = self._resolve_password()
 
     @property
@@ -252,7 +253,9 @@ class NtripClient:
         self._thread.start()
         logger.info(
             "NtripClient started: %s:%d/%s as user=%r",
-            self._cfg.caster_host, self._cfg.caster_port, self._cfg.mountpoint,
+            self._cfg.caster_host,
+            self._cfg.caster_port,
+            self._cfg.mountpoint,
             self._cfg.username,
         )
 
@@ -279,7 +282,7 @@ class NtripClient:
                 self._stats.last_error = str(e)
                 logger.error("NTRIP fatal error: %s", e)
                 self._publish_stats()
-            except (OSError, socket.timeout) as e:
+            except (OSError, TimeoutError) as e:
                 self._stats.error_count += 1
                 self._stats.last_error = str(e)
                 logger.info("NTRIP transient error: %s", e)
@@ -326,9 +329,7 @@ class NtripClient:
                     f"{self._cfg.mountpoint!r}; check ${self._cfg.password_env}"
                 )
             if code == 404:
-                raise NtripError(
-                    f"caster does not serve mountpoint {self._cfg.mountpoint!r} (404)"
-                )
+                raise NtripError(f"caster does not serve mountpoint {self._cfg.mountpoint!r} (404)")
             if code != 200:
                 raise NtripError(f"caster returned HTTP {code} {reason!r}")
 
@@ -338,7 +339,9 @@ class NtripClient:
             self._publish_stats()
             logger.info(
                 "NTRIP connected to %s:%d/%s",
-                self._cfg.caster_host, self._cfg.caster_port, self._cfg.mountpoint,
+                self._cfg.caster_host,
+                self._cfg.caster_port,
+                self._cfg.mountpoint,
             )
 
             # Stream RTCM until close
@@ -376,7 +379,7 @@ class NtripClient:
         while not self._stop_event.is_set():
             try:
                 chunk = sock.recv(_READ_CHUNK_SIZE)
-            except socket.timeout:
+            except TimeoutError:
                 logger.info("NTRIP read timeout; will reconnect")
                 return
             if not chunk:

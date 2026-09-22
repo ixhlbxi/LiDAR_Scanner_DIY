@@ -24,7 +24,6 @@ from rover.lora_protocol import (
     encode_status_payload,
 )
 
-
 # ---------------------------------------------------------------------------
 # CRC16-CCITT
 # ---------------------------------------------------------------------------
@@ -69,7 +68,7 @@ class TestFrameRoundtrip:
 
     def test_frame_has_expected_overhead(self):
         # Frame: [version 1][type 1][seq 2][len 2][payload N][crc 2] = N + 8
-        frame = encode_frame(TYPE_STATUS, 1, b"\xAA" * 10)
+        frame = encode_frame(TYPE_STATUS, 1, b"\xaa" * 10)
         assert len(frame) == 10 + 8
 
     def test_frame_starts_with_version_byte(self):
@@ -85,7 +84,7 @@ class TestFrameRoundtrip:
 
 class TestFrameErrors:
     def test_unsupported_version_rejected(self):
-        good = encode_frame(TYPE_STATUS, 1, b"\xAA\xBB")
+        good = encode_frame(TYPE_STATUS, 1, b"\xaa\xbb")
         # Flip the version byte to 0x01 (the old self-contained spec)
         bad = bytes([0x01]) + good[1:]
         # Re-CRC so the failure is specifically version, not CRC
@@ -101,14 +100,14 @@ class TestFrameErrors:
             decode_frame(b"\x02\x01\x00\x00")
 
     def test_length_mismatch_rejected(self):
-        good = encode_frame(TYPE_STATUS, 1, b"\xAA\xBB")
+        good = encode_frame(TYPE_STATUS, 1, b"\xaa\xbb")
         # Truncate the last payload byte (and its CRC), so declared length > actual
         bad = good[:-3]
         with pytest.raises(FrameError):
             decode_frame(bad)
 
     def test_crc_mismatch_rejected(self):
-        good = encode_frame(TYPE_STATUS, 1, b"\xAA\xBB")
+        good = encode_frame(TYPE_STATUS, 1, b"\xaa\xbb")
         # Flip a bit in the payload — CRC will no longer match
         mutable = bytearray(good)
         mutable[6] ^= 0x80  # payload starts at offset 6

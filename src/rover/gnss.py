@@ -43,8 +43,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from rover.config import RoverConfig
 
@@ -64,15 +64,15 @@ class GnssFix:
     serialization is straightforward.
     """
 
-    timestamp: float = 0.0      # Unix timestamp at fix
-    fix_type: int = 0           # 0=NONE 1=2D 2=3D 3=DGPS 4=RTK_FLOAT 5=RTK_FIX
-    lat: float = 0.0            # WGS84 decimal degrees
-    lon: float = 0.0            # WGS84 decimal degrees
-    alt: float = 0.0            # Ellipsoidal meters
+    timestamp: float = 0.0  # Unix timestamp at fix
+    fix_type: int = 0  # 0=NONE 1=2D 2=3D 3=DGPS 4=RTK_FLOAT 5=RTK_FIX
+    lat: float = 0.0  # WGS84 decimal degrees
+    lon: float = 0.0  # WGS84 decimal degrees
+    alt: float = 0.0  # Ellipsoidal meters
     hdop: float = 99.9
     vdop: float = 99.9
     sat_count: int = 0
-    rtk_age: float = -1.0       # Seconds since last RTCM; -1 = unknown
+    rtk_age: float = -1.0  # Seconds since last RTCM; -1 = unknown
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ _GGA_QUALITY_TO_FIX = {
 }
 
 
-def parse_gga(sentence: str) -> Optional[GnssFix]:
+def parse_gga(sentence: str) -> GnssFix | None:
     """Parse a `$GPGGA`/`$GNGGA` sentence into a GnssFix.
 
     Returns None if checksum fails or the sentence doesn't have enough fields.
@@ -227,11 +227,11 @@ class GnssReceiver:
         self._ntrip_cfg = config.ntrip
         self._running = False
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._serial = None  # opened in start(); pyserial is a Pi-only dep
         self._serial_lock = threading.Lock()  # protects write_rtcm vs read loop
         self._lock = threading.Lock()
-        self._latest: Optional[GnssFix] = None
+        self._latest: GnssFix | None = None
         self._callbacks: list[Callable[[GnssFix], None]] = []
 
     # ------------------------------------------------------------------
@@ -250,19 +250,17 @@ class GnssReceiver:
         try:
             import serial  # type: ignore[import-not-found]
         except ImportError:
-            logger.warning(
-                "GnssReceiver: pyserial not available; receiver disabled this run"
-            )
+            logger.warning("GnssReceiver: pyserial not available; receiver disabled this run")
             return
 
         try:
-            self._serial = serial.Serial(
-                self._cfg.port, self._cfg.baud, timeout=0.5
-            )
+            self._serial = serial.Serial(self._cfg.port, self._cfg.baud, timeout=0.5)
         except OSError as e:
             logger.warning(
                 "GnssReceiver: cannot open %s @ %d: %s",
-                self._cfg.port, self._cfg.baud, e,
+                self._cfg.port,
+                self._cfg.baud,
+                e,
             )
             return
 
@@ -364,7 +362,7 @@ class GnssReceiver:
             except Exception as e:
                 logger.warning("GNSS fix callback raised: %s", e)
 
-    def latest_fix(self) -> Optional[GnssFix]:
+    def latest_fix(self) -> GnssFix | None:
         with self._lock:
             return self._latest
 

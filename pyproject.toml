@@ -1,12 +1,13 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pilidar-rtk"
-version = "0.10.0"
+dynamic = ["version"]
 description = "RTK-enabled LiDAR scanning rover, integrates with arm-drone-lidar-workflow Base-Station"
 requires-python = ">=3.11"
+license = "CC-BY-NC-SA-4.0"
 dependencies = []
 
 [project.scripts]
@@ -22,7 +23,7 @@ pi = [
 ]
 dev = [
     "pytest",
-    "ruff",
+    "ruff>=0.16,<0.17",
 ]
 # Post-processing / CRS-aware export (DEC-034, Phase E)
 post = [
@@ -34,5 +35,26 @@ post = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.dynamic]
+version = {attr = "rover.__version__"}
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "scripts", "tests"]
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I isort, UP pyupgrade, B bugbear.
+select = ["E", "F", "W", "I", "UP", "B"]
+# Line length is the formatter's job; B008 (function-call defaults) is a
+# pattern this codebase uses deliberately for dataclass factories.
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rover"]
+
+[tool.ruff.format]
+quote-style = "double"

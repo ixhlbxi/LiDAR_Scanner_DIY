@@ -48,21 +48,15 @@ def main() -> None:
         description="Pi HQ Camera diagnostic — capture frames and report latency"
     )
     parser.add_argument(
-        "--output", default="/tmp/test_capture.jpg",
-        help="Output path for single capture"
+        "--output", default="/tmp/test_capture.jpg", help="Output path for single capture"
     )
     parser.add_argument(
-        "--burst", type=int, default=1,
-        help="Number of frames to capture (1 = single shot)"
+        "--burst", type=int, default=1, help="Number of frames to capture (1 = single shot)"
     )
     parser.add_argument(
-        "--resolution", default="1920x1080",
-        help="Capture resolution as WxH (default: 1920x1080)"
+        "--resolution", default="1920x1080", help="Capture resolution as WxH (default: 1920x1080)"
     )
-    parser.add_argument(
-        "--quality", type=int, default=85,
-        help="JPEG quality 1-100 (default: 85)"
-    )
+    parser.add_argument("--quality", type=int, default=85, help="JPEG quality 1-100 (default: 85)")
     args = parser.parse_args()
 
     try:
@@ -135,8 +129,10 @@ def main() -> None:
             file_sizes.append(fsize)
 
             if args.burst > 1:
-                print(f"  Frame {i + 1}/{args.burst}: {latency_ms:.1f} ms, "
-                      f"{fsize / 1024:.1f} KB — {output_path}")
+                print(
+                    f"  Frame {i + 1}/{args.burst}: {latency_ms:.1f} ms, "
+                    f"{fsize / 1024:.1f} KB — {output_path}"
+                )
             else:
                 print(f"  Captured: {output_path}")
 

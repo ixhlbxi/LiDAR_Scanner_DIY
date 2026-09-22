@@ -39,7 +39,6 @@ import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
 
 from rover.config import RoverConfig, load_config
 from rover.gnss import GnssFix, GnssReceiver
@@ -48,7 +47,7 @@ from rover.lidar import LidarScanner
 from rover.logger import SessionLogger
 from rover.ntrip import NtripClient, NtripStats
 from rover.stepper import StepperMotor
-from rover.telemetry import RoverStatus, TelemetryRouter, status_from_config
+from rover.telemetry import TelemetryRouter, status_from_config
 from rover.watchdog import Watchdog
 
 # Optional import — Camera depends on picamera2 which may not be importable off-Pi.
@@ -56,6 +55,7 @@ from rover.watchdog import Watchdog
 # subsystem is unavailable, but the rest of the system runs.
 try:
     from rover.camera import Camera
+
     _CAMERA_IMPORT_OK = True
 except Exception as _e:  # pragma: no cover — import-time only
     Camera = None  # type: ignore[assignment]
@@ -129,11 +129,11 @@ class _Sensors:
     """Container for initialized sensor instances. Holds None when init failed."""
 
     def __init__(self) -> None:
-        self.stepper: Optional[StepperMotor] = None
-        self.lidar: Optional[LidarScanner] = None
-        self.imu: Optional[ImuDriver] = None
-        self.camera: Optional["Camera"] = None
-        self.gnss: Optional[GnssReceiver] = None
+        self.stepper: StepperMotor | None = None
+        self.lidar: LidarScanner | None = None
+        self.imu: ImuDriver | None = None
+        self.camera: Camera | None = None
+        self.gnss: GnssReceiver | None = None
 
 
 def _init_sensors(config: RoverConfig) -> _Sensors:
@@ -222,10 +222,10 @@ def _scan_loop(
     sensors: _Sensors,
     session_logger: SessionLogger,
     telemetry: TelemetryRouter,
-    watchdog: Optional[Watchdog],
+    watchdog: Watchdog | None,
     ntrip_stats_holder: dict,
     stop_event: threading.Event,
-    duration_sec: Optional[float],
+    duration_sec: float | None,
 ) -> None:
     """Run the acquisition loop until stop_event is set or duration elapses.
 
@@ -244,8 +244,7 @@ def _scan_loop(
     if sensors.stepper is not None and sensors.stepper.available:
         steps_per_increment = max(
             1,
-            int(round(config.stepper.step_interval_deg
-                      / (360.0 / config.stepper.steps_per_rev))),
+            int(round(config.stepper.step_interval_deg / (360.0 / config.stepper.steps_per_rev))),
         )
         settle_sec = 1.0 / max(1, config.lidar.scan_rate_hz)
     else:
@@ -295,7 +294,7 @@ def _scan_loop(
                 logger.debug("IMU read skipped: %s", e)
 
         # --- Camera (cadence-gated) ---
-        image_relpath: Optional[str] = None
+        image_relpath: str | None = None
         if (
             sensors.camera is not None
             and sensors.camera.available
@@ -303,61 +302,67 @@ def _scan_loop(
             and session_logger.session_dir is not None
         ):
             try:
-                image_relpath = sensors.camera.capture(
-                    session_logger.session_dir, step_index
-                )
+                image_relpath = sensors.camera.capture(session_logger.session_dir, step_index)
             except RuntimeError as e:
                 logger.debug("Camera capture skipped: %s", e)
 
         # --- Log records ---
         now = time.time()
         if lidar_points:
-            session_logger.write({
-                "type": "lidar",
-                "timestamp": now,
-                "step_index": step_index,
-                "points": [
-                    {"angle": p.angle, "distance": p.distance, "intensity": p.intensity}
-                    for p in lidar_points
-                ],
-            })
+            session_logger.write(
+                {
+                    "type": "lidar",
+                    "timestamp": now,
+                    "step_index": step_index,
+                    "points": [
+                        {"angle": p.angle, "distance": p.distance, "intensity": p.intensity}
+                        for p in lidar_points
+                    ],
+                }
+            )
         if imu_sample is not None:
-            session_logger.write({
-                "type": "imu",
-                "timestamp": imu_sample.timestamp,
-                "accel": list(imu_sample.accel),
-                "gyro": list(imu_sample.gyro),
-                "mag": list(imu_sample.mag) if imu_sample.mag is not None else None,
-                "orientation": list(imu_sample.orientation),
-            })
+            session_logger.write(
+                {
+                    "type": "imu",
+                    "timestamp": imu_sample.timestamp,
+                    "accel": list(imu_sample.accel),
+                    "gyro": list(imu_sample.gyro),
+                    "mag": list(imu_sample.mag) if imu_sample.mag is not None else None,
+                    "orientation": list(imu_sample.orientation),
+                }
+            )
         if image_relpath is not None:
-            session_logger.write({
-                "type": "camera",
-                "timestamp": now,
-                "step_index": step_index,
-                "filename": image_relpath,
-            })
+            session_logger.write(
+                {
+                    "type": "camera",
+                    "timestamp": now,
+                    "step_index": step_index,
+                    "filename": image_relpath,
+                }
+            )
 
         # --- GNSS fix (log + status update; only on new fix) ---
-        gnss_fix: Optional[GnssFix] = None
+        gnss_fix: GnssFix | None = None
         if sensors.gnss is not None:
             try:
                 gnss_fix = sensors.gnss.latest_fix()
             except Exception:
                 gnss_fix = None
         if gnss_fix is not None and gnss_fix.timestamp > last_logged_fix_ts:
-            session_logger.write({
-                "type": "gnss",
-                "timestamp": gnss_fix.timestamp,
-                "fix_type": gnss_fix.fix_type,
-                "lat": gnss_fix.lat,
-                "lon": gnss_fix.lon,
-                "alt": gnss_fix.alt,
-                "hdop": gnss_fix.hdop,
-                "vdop": gnss_fix.vdop,
-                "sat_count": gnss_fix.sat_count,
-                "rtk_age": gnss_fix.rtk_age,
-            })
+            session_logger.write(
+                {
+                    "type": "gnss",
+                    "timestamp": gnss_fix.timestamp,
+                    "fix_type": gnss_fix.fix_type,
+                    "lat": gnss_fix.lat,
+                    "lon": gnss_fix.lon,
+                    "alt": gnss_fix.alt,
+                    "hdop": gnss_fix.hdop,
+                    "vdop": gnss_fix.vdop,
+                    "sat_count": gnss_fix.sat_count,
+                    "rtk_age": gnss_fix.rtk_age,
+                }
+            )
             last_logged_fix_ts = gnss_fix.timestamp
             status.fix_type = gnss_fix.fix_type
             status.sat_count = gnss_fix.sat_count
@@ -387,9 +392,9 @@ def _scan_loop(
 
 
 def run(
-    config_path: Optional[Path] = None,
-    duration_sec: Optional[float] = None,
-    stop_event: Optional[threading.Event] = None,
+    config_path: Path | None = None,
+    duration_sec: float | None = None,
+    stop_event: threading.Event | None = None,
 ) -> int:
     """Programmatic entry — same flow as main(), but with no CLI parsing.
 
@@ -444,29 +449,27 @@ def run(
         logger.error("SessionLogger.start() failed: %s — aborting", e)
         _stop_sensors(sensors)
         return 3
-    session_logger.write({
-        "type": "event",
-        "timestamp": time.time(),
-        "event": "scan_start",
-        "details": {"profile": config.session.profile},
-    })
+    session_logger.write(
+        {
+            "type": "event",
+            "timestamp": time.time(),
+            "event": "scan_start",
+            "details": {"profile": config.session.profile},
+        }
+    )
 
     # --- Telemetry ---
     telemetry = TelemetryRouter(config)
     telemetry.start()
 
     # --- NTRIP (Pi-mode only — ESP32 mode owns the path itself) ---
-    ntrip_client: Optional[NtripClient] = None
+    ntrip_client: NtripClient | None = None
     ntrip_stats_holder: dict = {"stats": None}
 
     def _ntrip_stats_sink(stats: NtripStats) -> None:
         ntrip_stats_holder["stats"] = stats
 
-    if (
-        config.ntrip.enabled
-        and config.ntrip.client_location == "pi"
-        and sensors.gnss is not None
-    ):
+    if config.ntrip.enabled and config.ntrip.client_location == "pi" and sensors.gnss is not None:
         try:
             ntrip_client = NtripClient(
                 config,
@@ -479,7 +482,7 @@ def run(
             ntrip_client = None
 
     # --- Watchdog ---
-    watchdog: Optional[Watchdog] = None
+    watchdog: Watchdog | None = None
     if config.watchdog.enabled:
         try:
             watchdog = Watchdog(config.watchdog)
@@ -505,11 +508,13 @@ def run(
         logger.exception("Acquisition loop crashed: %s", e)
         exit_code = 1
     finally:
-        session_logger.write({
-            "type": "event",
-            "timestamp": time.time(),
-            "event": "scan_complete" if exit_code == 0 else "scan_abort",
-        })
+        session_logger.write(
+            {
+                "type": "event",
+                "timestamp": time.time(),
+                "event": "scan_complete" if exit_code == 0 else "scan_abort",
+            }
+        )
 
         # --- Reverse-order teardown ---
         if watchdog is not None:
@@ -536,9 +541,7 @@ def run(
         ntrip_stats = ntrip_stats_holder.get("stats")
         if isinstance(ntrip_stats, NtripStats):
             metadata["ntrip_stats"] = asdict(ntrip_stats)
-        metadata["lora_rtcm_used"] = (
-            config.lora.enabled and config.lora.role == "rtcm_rx+status_tx"
-        )
+        metadata["lora_rtcm_used"] = config.lora.enabled and config.lora.role == "rtcm_rx+status_tx"
 
         try:
             session_logger.stop(metadata=metadata)
@@ -548,7 +551,7 @@ def run(
     return exit_code
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """CLI entry point — used by `rover` console script and `python -m rover.main`."""
     args = _build_argparser().parse_args(argv)
     return run(config_path=args.config, duration_sec=args.duration_sec)

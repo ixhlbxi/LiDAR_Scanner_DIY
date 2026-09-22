@@ -360,9 +360,21 @@ class TestRoverConfigComposition:
         cfg = load_config()
         assert isinstance(cfg, RoverConfig)
         for name in (
-            "general", "session", "lidar", "stepper", "imu", "gnss",
-            "ntrip", "lora", "base_station_integration", "telemetry",
-            "camera", "logging", "watchdog", "power", "calibration",
+            "general",
+            "session",
+            "lidar",
+            "stepper",
+            "imu",
+            "gnss",
+            "ntrip",
+            "lora",
+            "base_station_integration",
+            "telemetry",
+            "camera",
+            "logging",
+            "watchdog",
+            "power",
+            "calibration",
         ):
             assert hasattr(cfg, name), f"missing section {name}"
 

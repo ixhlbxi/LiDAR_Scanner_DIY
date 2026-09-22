@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Install / refresh rover deployment assets on a Raspberry Pi.
 #
+# Clone this repo on the Pi (git checkout honours .gitattributes and writes LF).
+# Do NOT copy the working tree from a Windows machine with scp/rsync/OneDrive:
+# that ships CRLF and bash/systemd/udev will reject these files.
+#
 # Mirrors the structure of arm-drone-lidar-workflow/base-station/bin/redeploy.sh
 # but slimmed down for the rover (no /opt/* binary deploy, fewer services,
 # fewer udev rules).

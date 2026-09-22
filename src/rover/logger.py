@@ -25,11 +25,11 @@ import logging
 import queue
 import shutil
 import threading
-import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+from rover import __version__
 from rover.config import RoverConfig
 
 logger = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ class SessionLogger:
         if self._running:
             raise RuntimeError("SessionLogger is already running")
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self._start_time = now
         timestamp = now.strftime("%Y%m%d_%H%M%S")
         session_name = f"{self._lc.session_prefix}_{timestamp}"
@@ -202,9 +202,7 @@ class SessionLogger:
         """Schedule the next periodic flush."""
         if not self._running:
             return
-        self._flush_timer = threading.Timer(
-            self._lc.flush_interval_sec, self._periodic_flush
-        )
+        self._flush_timer = threading.Timer(self._lc.flush_interval_sec, self._periodic_flush)
         self._flush_timer.daemon = True
         self._flush_timer.start()
 
@@ -271,18 +269,14 @@ class SessionLogger:
             if self._scan_file is not None and not self._scan_file.closed:
                 self._scan_file.close()
             self._scan_index += 1
-            self._scan_path = (
-                self._session_dir / f"scan_{self._scan_index:03d}.jsonl"
-            )
+            self._scan_path = self._session_dir / f"scan_{self._scan_index:03d}.jsonl"
             self._scan_file = open(self._scan_path, "a", encoding="utf-8")
             logger.info("Rotated scan log to %s", self._scan_path.name)
         elif which == "gnss":
             if self._gnss_file is not None and not self._gnss_file.closed:
                 self._gnss_file.close()
             self._gnss_index += 1
-            self._gnss_path = (
-                self._session_dir / f"gnss_{self._gnss_index:03d}.jsonl"
-            )
+            self._gnss_path = self._session_dir / f"gnss_{self._gnss_index:03d}.jsonl"
             self._gnss_file = open(self._gnss_path, "a", encoding="utf-8")
             logger.info("Rotated gnss log to %s", self._gnss_path.name)
 
@@ -299,18 +293,16 @@ class SessionLogger:
         """
         assert self._session_dir is not None
 
-        end_time = datetime.now(timezone.utc)
+        end_time = datetime.now(UTC)
         config_hash = self._compute_config_hash()
 
         sess = self._config.session
         meta: dict[str, Any] = {
             "session_id": self._session_dir.name,
-            "start_time": (
-                self._start_time.isoformat() if self._start_time else None
-            ),
+            "start_time": (self._start_time.isoformat() if self._start_time else None),
             "end_time": end_time.isoformat(),
             "device_name": self._config.general.device_name,
-            "firmware_version": "0.10.0",
+            "firmware_version": __version__,
             "config_hash": config_hash,
             "session": {
                 "profile": sess.profile,
@@ -325,9 +317,7 @@ class SessionLogger:
             meta.update(extra)
 
         meta_path = self._session_dir / "metadata.json"
-        meta_path.write_text(
-            json.dumps(meta, indent=2), encoding="utf-8"
-        )
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
         logger.info("Metadata written: %s", meta_path)
 
     def _compute_config_hash(self) -> str | None:

@@ -197,18 +197,14 @@ def main() -> None:
     )
     parser.add_argument("--bus", type=int, default=1, help="I2C bus number")
     parser.add_argument(
-        "--address", type=lambda x: int(x, 0), default=0x68,
-        help="MPU-9250 I2C address (hex, default: 0x68)"
+        "--address",
+        type=lambda x: int(x, 0),
+        default=0x68,
+        help="MPU-9250 I2C address (hex, default: 0x68)",
     )
-    parser.add_argument(
-        "--duration", type=int, default=10, help="Run duration in seconds"
-    )
-    parser.add_argument(
-        "--rate", type=int, default=200, help="Target sample rate in Hz"
-    )
-    parser.add_argument(
-        "--no-mag", action="store_true", help="Disable magnetometer reading"
-    )
+    parser.add_argument("--duration", type=int, default=10, help="Run duration in seconds")
+    parser.add_argument("--rate", type=int, default=200, help="Target sample rate in Hz")
+    parser.add_argument("--no-mag", action="store_true", help="Disable magnetometer reading")
     args = parser.parse_args()
 
     try:

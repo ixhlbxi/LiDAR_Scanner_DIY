@@ -66,6 +66,7 @@ WHO_AM_I_MPU9255 = 0x73
 
 try:
     from smbus2 import SMBus
+
     _I2C_AVAILABLE = True
 except ImportError:
     SMBus = None  # type: ignore[assignment, misc]
@@ -75,9 +76,10 @@ except ImportError:
 @dataclass
 class ImuSample:
     """Single IMU measurement with fused orientation."""
-    timestamp: float                        # Unix timestamp
-    accel: tuple[float, float, float]       # m/s², (x, y, z)
-    gyro: tuple[float, float, float]        # rad/s, (x, y, z)
+
+    timestamp: float  # Unix timestamp
+    accel: tuple[float, float, float]  # m/s², (x, y, z)
+    gyro: tuple[float, float, float]  # rad/s, (x, y, z)
     mag: tuple[float, float, float] | None  # µT, (x, y, z) or None if disabled
     orientation: tuple[float, float, float, float]  # quaternion [w, x, y, z]
 
@@ -103,8 +105,12 @@ class MadgwickFilter:
 
     def update(
         self,
-        gx: float, gy: float, gz: float,
-        ax: float, ay: float, az: float,
+        gx: float,
+        gy: float,
+        gz: float,
+        ax: float,
+        ay: float,
+        az: float,
         dt: float,
     ) -> None:
         """Update orientation from gyro (rad/s) and accel (m/s²)."""
@@ -136,10 +142,7 @@ class MadgwickFilter:
         j_t_f2 = -2.0 * q0 * f1 + 2.0 * q3 * f2 - 4.0 * q2 * f3
         j_t_f3 = 2.0 * q1 * f1 + 2.0 * q2 * f2
 
-        grad_norm = math.sqrt(
-            j_t_f0 * j_t_f0 + j_t_f1 * j_t_f1 +
-            j_t_f2 * j_t_f2 + j_t_f3 * j_t_f3
-        )
+        grad_norm = math.sqrt(j_t_f0 * j_t_f0 + j_t_f1 * j_t_f1 + j_t_f2 * j_t_f2 + j_t_f3 * j_t_f3)
         if grad_norm > 1e-10:
             j_t_f0 /= grad_norm
             j_t_f1 /= grad_norm
@@ -194,14 +197,14 @@ class ImuDriver:
             return
 
         if not _I2C_AVAILABLE:
-            logger.warning(
-                "IMU enabled but smbus2 not available — running without hardware"
-            )
+            logger.warning("IMU enabled but smbus2 not available — running without hardware")
             return
 
         logger.info(
             "ImuDriver initialized (bus=%d, addr=0x%02X, mag=%s)",
-            config.bus, config.address, config.use_magnetometer,
+            config.bus,
+            config.address,
+            config.use_magnetometer,
         )
 
     @property
@@ -346,8 +349,12 @@ class ImuDriver:
 
         # Run Madgwick filter
         self._filter.update(
-            gyro[0], gyro[1], gyro[2],
-            accel[0], accel[1], accel[2],
+            gyro[0],
+            gyro[1],
+            gyro[2],
+            accel[0],
+            accel[1],
+            accel[2],
             dt,
         )
 
@@ -362,9 +369,7 @@ class ImuDriver:
         self._ring_buffer.append(sample)
         return sample
 
-    def _read_accel_gyro(self) -> tuple[
-        tuple[float, float, float], tuple[float, float, float]
-    ]:
+    def _read_accel_gyro(self) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
         """Read accel (m/s²) and gyro (rad/s) from MPU-9250."""
         addr = self._config.address
         raw = self._bus.read_i2c_block_data(addr, _REG_ACCEL_XOUT_H, 14)

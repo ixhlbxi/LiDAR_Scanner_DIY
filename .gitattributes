@@ -1,0 +1,21 @@
+# Line-ending policy — every text file is stored and checked out LF.
+# The deploy tree runs on a Raspberry Pi; bash, systemd and udev reject CRLF.
+* text=auto eol=lf
+
+# Explicit, so a future `text=auto` heuristic miss can never CRLF these.
+*.sh       text eol=lf
+*.service  text eol=lf
+*.rules    text eol=lf
+*.toml     text eol=lf
+*.py       text eol=lf
+*.md       text eol=lf
+*.json     text eol=lf
+*.ini      text eol=lf
+*.cpp      text eol=lf
+*.h        text eol=lf
+deploy/**  text eol=lf
+
+# Binary assets.
+*.png  binary
+*.jpg  binary
+*.jpeg binary

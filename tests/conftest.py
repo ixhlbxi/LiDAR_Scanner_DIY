@@ -15,11 +15,7 @@ def tmp_dir(tmp_path: Path) -> Path:
 def sample_toml(tmp_path: Path) -> Path:
     """Write a minimal valid TOML config and return its path."""
     config_path = tmp_path / "test_config.toml"
-    config_path.write_text(
-        '[general]\n'
-        'device_name = "test-rover"\n'
-        'log_level = "DEBUG"\n'
-    )
+    config_path.write_text('[general]\ndevice_name = "test-rover"\nlog_level = "DEBUG"\n')
     return config_path
 
 
