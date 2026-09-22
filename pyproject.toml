@@ -36,3 +36,21 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "scripts", "tests"]
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I isort, UP pyupgrade, B bugbear.
+select = ["E", "F", "W", "I", "UP", "B"]
+# Line length is the formatter's job; B008 (function-call defaults) is a
+# pattern this codebase uses deliberately for dataclass factories.
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rover"]
+
+[tool.ruff.format]
+quote-style = "double"

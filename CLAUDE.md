@@ -95,7 +95,9 @@ LiDAR_Scanner_DIY/
 
 ## 5. Coding Standards
 
-- Python 3.11+, type hints on public APIs. Format with `ruff` (preferred) or `black`+`isort`.
+- Python 3.11+, type hints on public APIs. Format and lint with `ruff` (config in
+  `pyproject.toml`): `python -m ruff format src scripts tests` then
+  `python -m ruff check src scripts tests`. Both must be clean before a merge.
 - **Testing:** `pytest`. Unit tests off-Pi (mock hardware). Hardware tests in
   `tests/hardware/` require the device.
 - **Logging:** stdlib `logging`; level from `[general] log_level`.
