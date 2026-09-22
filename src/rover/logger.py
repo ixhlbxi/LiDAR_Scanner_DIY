@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+from rover import __version__
 from rover.config import RoverConfig
 
 logger = logging.getLogger(__name__)
@@ -301,7 +302,7 @@ class SessionLogger:
             "start_time": (self._start_time.isoformat() if self._start_time else None),
             "end_time": end_time.isoformat(),
             "device_name": self._config.general.device_name,
-            "firmware_version": "0.10.0",
+            "firmware_version": __version__,
             "config_hash": config_hash,
             "session": {
                 "profile": sess.profile,

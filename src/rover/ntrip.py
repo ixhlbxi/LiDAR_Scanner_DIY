@@ -48,12 +48,13 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from rover import __version__
 from rover.config import RoverConfig
 
 logger = logging.getLogger(__name__)
 
 
-USER_AGENT = "PiLiDAR-RTK-Rover/0.10 (NTRIP)"
+USER_AGENT = f"PiLiDAR-RTK-Rover/{__version__} (NTRIP)"
 NTRIP_VERSION = "Ntrip/2.0"
 
 # Tunables — not exposed via config until field experience says they should be.

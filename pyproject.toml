@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pilidar-rtk"
-version = "0.10.0"
+dynamic = ["version"]
 description = "RTK-enabled LiDAR scanning rover, integrates with arm-drone-lidar-workflow Base-Station"
 requires-python = ">=3.11"
 dependencies = []
@@ -33,6 +33,9 @@ post = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "rover.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
