@@ -4,7 +4,6 @@ import pytest
 
 from rover.gnss import GnssFix, parse_gga
 
-
 # Real-world-ish GGA sentences with valid checksums.
 # Generated via: body XOR'd byte-by-byte, hex two-digit checksum after `*`.
 

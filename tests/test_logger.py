@@ -3,7 +3,6 @@
 import json
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
@@ -87,7 +86,7 @@ class TestSessionDirectory:
     def test_images_dir_created_when_camera_enabled(self, cfg):
         config, config_path = cfg
         lg = SessionLogger(config, config_path)
-        session_dir = lg.start()
+        lg.start()
         try:
             assert lg.images_dir is not None
             assert lg.images_dir.exists()
@@ -127,9 +126,7 @@ class TestConfigSnapshot:
         session_dir = lg.start()
         try:
             assert (session_dir / "effective_config.json").exists()
-            data = json.loads(
-                (session_dir / "effective_config.json").read_text()
-            )
+            data = json.loads((session_dir / "effective_config.json").read_text())
             assert data["general"]["device_name"] == "rover-01"
         finally:
             lg.stop()
@@ -179,16 +176,12 @@ class TestJSONLWriting:
             lg._flush()
 
             # Should appear in gnss.jsonl
-            gnss_lines = (
-                (session_dir / "gnss.jsonl").read_text().strip().split("\n")
-            )
+            gnss_lines = (session_dir / "gnss.jsonl").read_text().strip().split("\n")
             assert len(gnss_lines) == 1
             assert json.loads(gnss_lines[0])["type"] == "gnss"
 
             # Should also appear in scan.jsonl (all records go there)
-            scan_lines = (
-                (session_dir / "scan.jsonl").read_text().strip().split("\n")
-            )
+            scan_lines = (session_dir / "scan.jsonl").read_text().strip().split("\n")
             assert len(scan_lines) == 1
         finally:
             lg.stop()
@@ -245,18 +238,17 @@ class TestThreadSafety:
         def writer(thread_id: int) -> None:
             try:
                 for i in range(n_per_thread):
-                    lg.write({
-                        "type": "imu",
-                        "thread": thread_id,
-                        "seq": i,
-                    })
+                    lg.write(
+                        {
+                            "type": "imu",
+                            "thread": thread_id,
+                            "seq": i,
+                        }
+                    )
             except Exception as e:
                 errors.append(e)
 
-        threads = [
-            threading.Thread(target=writer, args=(t,))
-            for t in range(n_threads)
-        ]
+        threads = [threading.Thread(target=writer, args=(t,)) for t in range(n_threads)]
         for t in threads:
             t.start()
         for t in threads:
@@ -379,9 +371,7 @@ class TestMetadata:
         lg.start()
         lg.stop(metadata={"total_steps": 180, "total_scans": 180})
 
-        meta = json.loads(
-            (lg.session_dir / "metadata.json").read_text()
-        )
+        meta = json.loads((lg.session_dir / "metadata.json").read_text())
         assert meta["total_steps"] == 180
         assert meta["total_scans"] == 180
 
@@ -391,9 +381,7 @@ class TestMetadata:
         lg.start()
         lg.stop()
 
-        meta = json.loads(
-            (lg.session_dir / "metadata.json").read_text()
-        )
+        meta = json.loads((lg.session_dir / "metadata.json").read_text())
         assert meta["config_hash"] is not None
         assert len(meta["config_hash"]) == 64  # SHA-256 hex length
 

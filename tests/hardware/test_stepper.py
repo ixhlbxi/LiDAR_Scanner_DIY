@@ -68,28 +68,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="A4988 stepper motor diagnostic — rotate and measure timing"
     )
+    parser.add_argument("--degrees", type=float, default=360.0, help="Degrees to rotate")
+    parser.add_argument("--rpm", type=float, default=1.0, help="Rotation speed in RPM")
+    parser.add_argument("--reverse", action="store_true", help="Reverse after forward rotation")
+    parser.add_argument("--dir-pin", type=int, default=DEFAULT_DIR_PIN, help="BCM GPIO for DIR")
+    parser.add_argument("--step-pin", type=int, default=DEFAULT_STEP_PIN, help="BCM GPIO for STEP")
     parser.add_argument(
-        "--degrees", type=float, default=360.0, help="Degrees to rotate"
+        "--enable-pin",
+        type=int,
+        default=DEFAULT_ENABLE_PIN,
+        help="BCM GPIO for ENABLE (active low)",
     )
     parser.add_argument(
-        "--rpm", type=float, default=1.0, help="Rotation speed in RPM"
-    )
-    parser.add_argument(
-        "--reverse", action="store_true", help="Reverse after forward rotation"
-    )
-    parser.add_argument(
-        "--dir-pin", type=int, default=DEFAULT_DIR_PIN, help="BCM GPIO for DIR"
-    )
-    parser.add_argument(
-        "--step-pin", type=int, default=DEFAULT_STEP_PIN, help="BCM GPIO for STEP"
-    )
-    parser.add_argument(
-        "--enable-pin", type=int, default=DEFAULT_ENABLE_PIN,
-        help="BCM GPIO for ENABLE (active low)"
-    )
-    parser.add_argument(
-        "--steps-per-rev", type=int, default=DEFAULT_STEPS_PER_REV,
-        help="Steps per full revolution"
+        "--steps-per-rev", type=int, default=DEFAULT_STEPS_PER_REV, help="Steps per full revolution"
     )
     args = parser.parse_args()
 
@@ -104,7 +95,7 @@ def main() -> None:
     steps_per_sec = args.rpm / 60.0 * args.steps_per_rev
     step_interval = 1.0 / steps_per_sec
 
-    print(f"Stepper Motor Diagnostic")
+    print("Stepper Motor Diagnostic")
     print(f"  Degrees:       {args.degrees}°")
     print(f"  RPM:           {args.rpm}")
     print(f"  Steps needed:  {steps_needed}")
@@ -182,7 +173,9 @@ def main() -> None:
 
             if jitter_us:
                 print(f"    Jitter mean:     {statistics.mean(jitter_us):+.1f} µs")
-                print(f"    Jitter stdev:    {statistics.stdev(jitter_us) if len(jitter_us) > 1 else 0:.1f} µs")
+                print(
+                    f"    Jitter stdev:    {statistics.stdev(jitter_us) if len(jitter_us) > 1 else 0:.1f} µs"
+                )
                 print(f"    Jitter max:      {max(abs(j) for j in jitter_us):.1f} µs")
             print()
 

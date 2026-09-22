@@ -40,6 +40,7 @@ os.environ.setdefault("LG_WD", "/tmp")
 
 try:
     import RPi.GPIO as GPIO  # rpi-lgpio is a drop-in replacement
+
     _GPIO_AVAILABLE = True
 except ImportError:
     GPIO = None  # type: ignore[assignment]
@@ -69,15 +70,16 @@ class StepperMotor:
             return
 
         if not _GPIO_AVAILABLE:
-            logger.warning(
-                "Stepper enabled but GPIO not available — running without hardware"
-            )
+            logger.warning("Stepper enabled but GPIO not available — running without hardware")
             return
 
         logger.info(
             "StepperMotor initialized (steps/rev=%d, rpm=%.1f, pins DIR=%d STEP=%d EN=%d)",
-            config.steps_per_rev, config.rpm,
-            config.direction_pin, config.step_pin, config.enable_pin,
+            config.steps_per_rev,
+            config.rpm,
+            config.direction_pin,
+            config.step_pin,
+            config.enable_pin,
         )
 
     @property

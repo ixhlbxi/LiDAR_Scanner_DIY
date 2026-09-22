@@ -1,7 +1,7 @@
 """Unit tests for rover.imu — runs anywhere, no hardware required."""
 
 import math
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -214,13 +214,15 @@ class TestImuWithMockI2C:
 
         # Manually add samples with known timestamps
         for t in [1.0, 2.0, 3.0, 4.0, 5.0]:
-            driver._ring_buffer.append(ImuSample(
-                timestamp=t,
-                accel=(0, 0, 9.81),
-                gyro=(0, 0, 0),
-                mag=None,
-                orientation=(1, 0, 0, 0),
-            ))
+            driver._ring_buffer.append(
+                ImuSample(
+                    timestamp=t,
+                    accel=(0, 0, 9.81),
+                    gyro=(0, 0, 0),
+                    mag=None,
+                    orientation=(1, 0, 0, 0),
+                )
+            )
 
         closest = driver.get_sample_at(3.2)
         assert closest is not None
@@ -241,6 +243,7 @@ class TestImuWithMockI2C:
     def test_ak8963_not_found_disables_mag(self, imu_config, mock_smbus):
         # First calls are for MPU init (WHO_AM_I etc.), last one for AK8963
         call_count = [0]
+
         def read_byte_side_effect(addr, reg):
             call_count[0] += 1
             if addr == 0x0C:

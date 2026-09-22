@@ -30,15 +30,14 @@ Changelog:
 from __future__ import annotations
 
 import struct
-from typing import Tuple
 
 FRAME_VERSION: int = 0x02
 
 # Packet types (see BASE_STATION_INTEGRATION.md §4)
-TYPE_STATUS: int = 0x01      # rover → handhelds/base
-TYPE_LINK: int = 0x02        # rover → handhelds/base
+TYPE_STATUS: int = 0x01  # rover → handhelds/base
+TYPE_LINK: int = 0x02  # rover → handhelds/base
 TYPE_RTCM_CHUNK: int = 0x10  # base → rover
-TYPE_DISPLAY: int = 0x20     # base → handhelds (rover ignores)
+TYPE_DISPLAY: int = 0x20  # base → handhelds (rover ignores)
 TYPE_DEBUG_TEXT: int = 0x7F  # any direction
 
 _HEADER_FMT = "<BBHH"  # version, type, seq LE, len LE
@@ -92,14 +91,13 @@ def encode_frame(packet_type: int, sequence: int, payload: bytes) -> bytes:
     if len(payload) > 0xFFFF:
         raise ValueError(f"payload too large: {len(payload)} bytes")
 
-    header = struct.pack(_HEADER_FMT, FRAME_VERSION, packet_type,
-                         sequence & 0xFFFF, len(payload))
+    header = struct.pack(_HEADER_FMT, FRAME_VERSION, packet_type, sequence & 0xFFFF, len(payload))
     body = header + payload
     crc = crc16_ccitt(body)
     return body + struct.pack("<H", crc)
 
 
-def decode_frame(frame: bytes) -> Tuple[int, int, bytes]:
+def decode_frame(frame: bytes) -> tuple[int, int, bytes]:
     """Decode and CRC-verify a LoRa frame v2.
 
     Returns:
@@ -112,29 +110,22 @@ def decode_frame(frame: bytes) -> Tuple[int, int, bytes]:
     if len(frame) < _FRAME_MIN_SIZE:
         raise FrameError(f"frame too short: {len(frame)} < {_FRAME_MIN_SIZE}")
 
-    version, packet_type, seq, length = struct.unpack(
-        _HEADER_FMT, frame[:_HEADER_SIZE]
-    )
+    version, packet_type, seq, length = struct.unpack(_HEADER_FMT, frame[:_HEADER_SIZE])
     if version != FRAME_VERSION:
         # Receivers MUST drop unknown versions (see Heltec/T-Deck firmware).
-        raise FrameError(
-            f"unsupported version: 0x{version:02x} (expected 0x{FRAME_VERSION:02x})"
-        )
+        raise FrameError(f"unsupported version: 0x{version:02x} (expected 0x{FRAME_VERSION:02x})")
 
     expected_total = _HEADER_SIZE + length + _CRC_SIZE
     if len(frame) != expected_total:
         raise FrameError(
-            f"length mismatch: frame={len(frame)}, expected={expected_total} "
-            f"(payload={length})"
+            f"length mismatch: frame={len(frame)}, expected={expected_total} (payload={length})"
         )
 
-    payload = frame[_HEADER_SIZE:_HEADER_SIZE + length]
+    payload = frame[_HEADER_SIZE : _HEADER_SIZE + length]
     received_crc = struct.unpack("<H", frame[-_CRC_SIZE:])[0]
     computed_crc = crc16_ccitt(frame[:-_CRC_SIZE])
     if received_crc != computed_crc:
-        raise FrameError(
-            f"CRC mismatch: got 0x{received_crc:04x}, computed 0x{computed_crc:04x}"
-        )
+        raise FrameError(f"CRC mismatch: got 0x{received_crc:04x}, computed 0x{computed_crc:04x}")
 
     return packet_type, seq, payload
 
@@ -187,16 +178,15 @@ def encode_status_payload(
     hdop_x100 = max(0, min(0xFFFF, int(round(hdop * 100))))
     battery = max(0, min(0xFFFF, int(battery_mv)))
 
-    return struct.pack(_STATUS_FMT, fix_type, sat_count, hdop_x100,
-                       battery, scan_state, b"\x00\x00\x00")
+    return struct.pack(
+        _STATUS_FMT, fix_type, sat_count, hdop_x100, battery, scan_state, b"\x00\x00\x00"
+    )
 
 
 def decode_status_payload(payload: bytes) -> dict:
     """Decode a STATUS payload back to a dict (for tests + monitor firmware parity)."""
     if len(payload) != STATUS_PAYLOAD_SIZE:
-        raise FrameError(
-            f"STATUS payload wrong size: {len(payload)} != {STATUS_PAYLOAD_SIZE}"
-        )
+        raise FrameError(f"STATUS payload wrong size: {len(payload)} != {STATUS_PAYLOAD_SIZE}")
     fix_type, sat_count, hdop_x100, battery_mv, scan_state, _reserved = struct.unpack(
         _STATUS_FMT, payload
     )
@@ -245,12 +235,8 @@ def encode_link_payload(
 def decode_link_payload(payload: bytes) -> dict:
     """Decode a LINK payload back to a dict."""
     if len(payload) != LINK_PAYLOAD_SIZE:
-        raise FrameError(
-            f"LINK payload wrong size: {len(payload)} != {LINK_PAYLOAD_SIZE}"
-        )
-    rssi_enc, snr_enc, rx_count, tx_count, err_count, _reserved = struct.unpack(
-        _LINK_FMT, payload
-    )
+        raise FrameError(f"LINK payload wrong size: {len(payload)} != {LINK_PAYLOAD_SIZE}")
+    rssi_enc, snr_enc, rx_count, tx_count, err_count, _reserved = struct.unpack(_LINK_FMT, payload)
     return {
         "rssi_dbm": rssi_enc - 128,
         "snr_db": snr_enc - 128,

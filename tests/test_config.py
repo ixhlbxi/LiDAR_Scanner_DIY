@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from rover.config import (
-    CalibrationConfig,
     RoverConfig,
     load_config,
 )

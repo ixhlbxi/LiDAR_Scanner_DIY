@@ -83,7 +83,7 @@ class TestCRC8:
 
     def test_known_value(self):
         # CRC is deterministic — same input always produces same output
-        val = crc8(b"\x54\x2C")
+        val = crc8(b"\x54\x2c")
         assert isinstance(val, int)
         assert 0 <= val <= 255
 
@@ -270,9 +270,7 @@ class TestScannerWithMockSerial:
         assert result is None
 
     @patch("rover.lidar.time")
-    def test_read_scan_assembles_full_revolution(
-        self, mock_time, lidar_config, mock_serial
-    ):
+    def test_read_scan_assembles_full_revolution(self, mock_time, lidar_config, mock_serial):
         # Simulate a full 360° scan: 45 packets at 8° intervals, then
         # one packet wrapping back to 0° to trigger scan completion
         packets = bytearray()

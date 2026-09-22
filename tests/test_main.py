@@ -11,8 +11,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 from rover import main as main_mod
 
 
@@ -83,7 +81,7 @@ jpeg_quality = 85
 output_folder = "images"
 
 [logging]
-output_dir = "{(tmp_path / 'data').as_posix()}"
+output_dir = "{(tmp_path / "data").as_posix()}"
 session_prefix = "test"
 format = "jsonl"
 flush_interval_sec = 1.0
@@ -136,9 +134,7 @@ def test_external_stop_event_aborts_promptly(tmp_path: Path) -> None:
 
     start = time.monotonic()
     # Pass a generous duration; the external stop should win.
-    exit_code = main_mod.run(
-        config_path=config_path, duration_sec=10.0, stop_event=stop
-    )
+    exit_code = main_mod.run(config_path=config_path, duration_sec=10.0, stop_event=stop)
     elapsed = time.monotonic() - start
 
     assert exit_code == 0
@@ -195,7 +191,7 @@ http_enabled = false
 enabled = false
 
 [logging]
-output_dir = "{(tmp_path / 'data').as_posix()}"
+output_dir = "{(tmp_path / "data").as_posix()}"
 session_prefix = "boomtest"
 
 [power]

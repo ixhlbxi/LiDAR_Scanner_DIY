@@ -20,14 +20,14 @@ np = pytest.importorskip("numpy")
 
 from scripts import georef  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Synthetic-session helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_session(tmp_path: Path, with_gnss: bool = True,
-                  profile: str = "personal", target_crs: int = 0) -> Path:
+def _make_session(
+    tmp_path: Path, with_gnss: bool = True, profile: str = "personal", target_crs: int = 0
+) -> Path:
     """Create a minimal but valid session directory and return its path."""
     sess = tmp_path / "scan_20260523_120000"
     sess.mkdir()
@@ -48,31 +48,62 @@ def _make_session(tmp_path: Path, with_gnss: bool = True,
 
     # scan.jsonl — 2 IMU samples, 1 lidar scan, optionally 1 gnss fix
     lines = []
-    lines.append(json.dumps({
-        "type": "imu", "timestamp": 100.0,
-        "accel": [0, 0, 9.81], "gyro": [0, 0, 0],
-        "mag": None, "orientation": [1.0, 0.0, 0.0, 0.0],
-    }))
-    lines.append(json.dumps({
-        "type": "imu", "timestamp": 100.1,
-        "accel": [0, 0, 9.81], "gyro": [0, 0, 0],
-        "mag": None, "orientation": [1.0, 0.0, 0.0, 0.0],
-    }))
+    lines.append(
+        json.dumps(
+            {
+                "type": "imu",
+                "timestamp": 100.0,
+                "accel": [0, 0, 9.81],
+                "gyro": [0, 0, 0],
+                "mag": None,
+                "orientation": [1.0, 0.0, 0.0, 0.0],
+            }
+        )
+    )
+    lines.append(
+        json.dumps(
+            {
+                "type": "imu",
+                "timestamp": 100.1,
+                "accel": [0, 0, 9.81],
+                "gyro": [0, 0, 0],
+                "mag": None,
+                "orientation": [1.0, 0.0, 0.0, 0.0],
+            }
+        )
+    )
     if with_gnss:
-        lines.append(json.dumps({
-            "type": "gnss", "timestamp": 100.05,
-            "fix_type": 5, "lat": 40.7128, "lon": -74.0060, "alt": 10.0,
-            "hdop": 0.85, "vdop": 1.2, "sat_count": 18, "rtk_age": 1.2,
-        }))
-    lines.append(json.dumps({
-        "type": "lidar", "timestamp": 100.05, "step_index": 0,
-        "points": [
-            {"angle": 0.0, "distance": 1.0, "intensity": 128},
-            {"angle": 90.0, "distance": 2.0, "intensity": 200},
-            {"angle": 180.0, "distance": 1.5, "intensity": 50},
-            {"angle": 270.0, "distance": 0.5, "intensity": 100},
-        ],
-    }))
+        lines.append(
+            json.dumps(
+                {
+                    "type": "gnss",
+                    "timestamp": 100.05,
+                    "fix_type": 5,
+                    "lat": 40.7128,
+                    "lon": -74.0060,
+                    "alt": 10.0,
+                    "hdop": 0.85,
+                    "vdop": 1.2,
+                    "sat_count": 18,
+                    "rtk_age": 1.2,
+                }
+            )
+        )
+    lines.append(
+        json.dumps(
+            {
+                "type": "lidar",
+                "timestamp": 100.05,
+                "step_index": 0,
+                "points": [
+                    {"angle": 0.0, "distance": 1.0, "intensity": 128},
+                    {"angle": 90.0, "distance": 2.0, "intensity": 200},
+                    {"angle": 180.0, "distance": 1.5, "intensity": 50},
+                    {"angle": 270.0, "distance": 0.5, "intensity": 100},
+                ],
+            }
+        )
+    )
     (sess / "scan.jsonl").write_text("\n".join(lines) + "\n")
     return sess
 
@@ -159,6 +190,7 @@ class TestPipelinePly:
         # Without pyproj, target_epsg != 0 should fail fast
         try:
             import pyproj  # noqa: F401
+
             has_pyproj = True
         except ImportError:
             has_pyproj = False

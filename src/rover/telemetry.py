@@ -58,7 +58,6 @@ import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
 
 from rover._io import atomic_write_json
 from rover.config import RoverConfig
@@ -211,17 +210,15 @@ class LocalHttpPublisher(_Publisher):
         self._lock = threading.Lock()
         self._latest_payload: dict = {}
         self._started_monotonic = time.monotonic()
-        self._server: Optional[ThreadingHTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
         # The same payload-shaping logic StatusJsonPublisher uses, so both channels
         # return identical JSON on the wire.
         self._json_builder = StatusJsonPublisher(config)
 
     def start(self) -> None:
         handler_class = _make_http_handler(self)
-        self._server = ThreadingHTTPServer(
-            (self._tm.http_bind, self._tm.http_port), handler_class
-        )
+        self._server = ThreadingHTTPServer((self._tm.http_bind, self._tm.http_port), handler_class)
         self._thread = threading.Thread(
             target=self._server.serve_forever,
             name="rover-http-telemetry",
@@ -230,7 +227,8 @@ class LocalHttpPublisher(_Publisher):
         self._thread.start()
         logger.info(
             "LocalHttpPublisher listening on http://%s:%d",
-            self._tm.http_bind, self._tm.http_port,
+            self._tm.http_bind,
+            self._tm.http_port,
         )
 
     def publish(self, status: RoverStatus) -> None:
@@ -297,22 +295,18 @@ class LoRaPublisher(_Publisher):
         try:
             import serial  # type: ignore[import-not-found]
         except ImportError:
-            logger.warning(
-                "LoRaPublisher: pyserial not available; channel C disabled this run"
-            )
+            logger.warning("LoRaPublisher: pyserial not available; channel C disabled this run")
             self._serial = None
             return
 
         try:
-            self._serial = serial.Serial(
-                self._lora.port, self._lora.baud, timeout=0.5
-            )
-            logger.info("LoRaPublisher serial open: %s @ %d",
-                        self._lora.port, self._lora.baud)
+            self._serial = serial.Serial(self._lora.port, self._lora.baud, timeout=0.5)
+            logger.info("LoRaPublisher serial open: %s @ %d", self._lora.port, self._lora.baud)
         except OSError as e:
             logger.warning(
                 "LoRaPublisher: cannot open %s: %s — channel C disabled this run",
-                self._lora.port, e,
+                self._lora.port,
+                e,
             )
             self._serial = None
 

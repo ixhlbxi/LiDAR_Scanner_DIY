@@ -116,11 +116,25 @@ class TestStatusJsonPublisher:
         )
         payload = pub.build_payload(st)
         required = {
-            "schema_version", "timestamp_epoch", "device", "profile",
-            "mission", "project_code", "scan_state", "fix_type",
-            "sat_count", "hdop", "lat", "lon", "alt_m", "rtk_age_s",
-            "battery_mv", "lora_link_rssi", "lora_link_snr",
-            "ntrip_connected", "ntrip_bytes_per_sec",
+            "schema_version",
+            "timestamp_epoch",
+            "device",
+            "profile",
+            "mission",
+            "project_code",
+            "scan_state",
+            "fix_type",
+            "sat_count",
+            "hdop",
+            "lat",
+            "lon",
+            "alt_m",
+            "rtk_age_s",
+            "battery_mv",
+            "lora_link_rssi",
+            "lora_link_snr",
+            "ntrip_connected",
+            "ntrip_bytes_per_sec",
         }
         assert required.issubset(set(payload.keys()))
 
@@ -272,7 +286,7 @@ class TestTelemetryRouter:
 
                 [base_station_integration]
                 enabled = true
-                status_json_path = "{(tmp_path / 'status.json').as_posix()}"
+                status_json_path = "{(tmp_path / "status.json").as_posix()}"
                 """
             )
         )
@@ -297,11 +311,12 @@ class TestTelemetryRouter:
 
                 [base_station_integration]
                 enabled = true
-                status_json_path = "{(tmp_path / 'status.json').as_posix()}"
+                status_json_path = "{(tmp_path / "status.json").as_posix()}"
                 """
             )
         )
         router = TelemetryRouter(cfg)
+
         # Inject a publisher that always raises
         class _Bomb:
             name = "bomb"

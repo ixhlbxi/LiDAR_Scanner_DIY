@@ -54,7 +54,6 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger("georef")
 
@@ -77,18 +76,18 @@ logger = logging.getLogger("georef")
 # in a HARN-native workflow), pass --crs directly with the EPSG code; this dict
 # is only consulted for the friendly-name lookup in CLI logs.
 ZONE_EPSG: dict[str, int] = {
-    "PA_NORTH":   6346,   # NAD83(2011) / Pennsylvania North (ftUS)
-    "PA_SOUTH":   6347,   # NAD83(2011) / Pennsylvania South (ftUS)
-    "NJ":         6527,   # NAD83(2011) / New Jersey (ftUS)
-    "MD":         6487,   # NAD83(2011) / Maryland (ftUS)
-    "DE":         6446,   # NAD83(2011) / Delaware (ftUS)
-    "NY_EAST":    6535,   # NAD83(2011) / New York East (ftUS)
-    "NY_CENTRAL": 6536,   # NAD83(2011) / New York Central (ftUS)
-    "NY_WEST":    6537,   # NAD83(2011) / New York West (ftUS)
-    "VA_NORTH":   6592,   # NAD83(2011) / Virginia North (ftUS)
-    "VA_SOUTH":   6593,   # NAD83(2011) / Virginia South (ftUS)
-    "WV_NORTH":   6601,   # NAD83(2011) / West Virginia North (ftUS)
-    "WV_SOUTH":   6602,   # NAD83(2011) / West Virginia South (ftUS)
+    "PA_NORTH": 6346,  # NAD83(2011) / Pennsylvania North (ftUS)
+    "PA_SOUTH": 6347,  # NAD83(2011) / Pennsylvania South (ftUS)
+    "NJ": 6527,  # NAD83(2011) / New Jersey (ftUS)
+    "MD": 6487,  # NAD83(2011) / Maryland (ftUS)
+    "DE": 6446,  # NAD83(2011) / Delaware (ftUS)
+    "NY_EAST": 6535,  # NAD83(2011) / New York East (ftUS)
+    "NY_CENTRAL": 6536,  # NAD83(2011) / New York Central (ftUS)
+    "NY_WEST": 6537,  # NAD83(2011) / New York West (ftUS)
+    "VA_NORTH": 6592,  # NAD83(2011) / Virginia North (ftUS)
+    "VA_SOUTH": 6593,  # NAD83(2011) / Virginia South (ftUS)
+    "WV_NORTH": 6601,  # NAD83(2011) / West Virginia North (ftUS)
+    "WV_SOUTH": 6602,  # NAD83(2011) / West Virginia South (ftUS)
 }
 
 
@@ -109,17 +108,18 @@ def zone_name_for(epsg: int) -> str:
 def _require_numpy():
     try:
         import numpy as np  # noqa: F401 — caller imports
+
         return np
     except ImportError as e:
         raise SystemExit(
-            "numpy is required for scripts/georef.py — install via "
-            "`pip install -e \".[post]\"`"
+            'numpy is required for scripts/georef.py — install via `pip install -e ".[post]"`'
         ) from e
 
 
 def _try_import_laspy():
     try:
         import laspy
+
         return laspy
     except ImportError:
         return None
@@ -128,6 +128,7 @@ def _try_import_laspy():
 def _try_import_pyproj():
     try:
         import pyproj
+
         return pyproj
     except ImportError:
         return None
@@ -198,10 +199,11 @@ def load_session(session_dir: Path) -> SessionData:
 
     logger.info(
         "Loaded session: %d lidar, %d imu, %d gnss records",
-        len(lidar), len(imu), len(gnss),
+        len(lidar),
+        len(imu),
+        len(gnss),
     )
-    return SessionData(metadata=metadata, lidar_records=lidar,
-                       imu_records=imu, gnss_records=gnss)
+    return SessionData(metadata=metadata, lidar_records=lidar, imu_records=imu, gnss_records=gnss)
 
 
 # ---------------------------------------------------------------------------
@@ -245,11 +247,13 @@ def _quat_to_rotmat(q):
     """Convert scalar-first quaternion [w, x, y, z] to a 3x3 rotation matrix."""
     np = _require_numpy()
     w, x, y, z = q
-    return np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
-        [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-        [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
-    ])
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
 
 
 def orientation_at(t_scan: float, imu_records: list[dict]):
@@ -343,7 +347,9 @@ def session_to_pointcloud(session: SessionData):
         origin_alt = origin.get("alt", 0.0)
         logger.info(
             "Session origin (local ENU): lat=%.7f lon=%.7f alt=%.2f",
-            origin_lat, origin_lon, origin_alt,
+            origin_lat,
+            origin_lon,
+            origin_alt,
         )
 
     chunks_xyz = []
@@ -361,8 +367,12 @@ def session_to_pointcloud(session: SessionData):
             scan_fix = _nearest_gnss(rec["timestamp"], gnss_sorted)
             if scan_fix is not None:
                 dE, dN, dU = _gnss_offset_meters(
-                    scan_fix["lat"], scan_fix["lon"], scan_fix.get("alt", 0.0),
-                    origin_lat, origin_lon, origin_alt,
+                    scan_fix["lat"],
+                    scan_fix["lon"],
+                    scan_fix.get("alt", 0.0),
+                    origin_lat,
+                    origin_lon,
+                    origin_alt,
                 )
                 pts_local = pts_local + np.array([dE, dN, dU])
 
@@ -376,12 +386,11 @@ def session_to_pointcloud(session: SessionData):
 
     xyz = np.vstack(chunks_xyz)
     intensity = np.concatenate(chunks_int)
-    logger.info("Assembled %d points across %d scans",
-                total_points, len(session.lidar_records))
+    logger.info("Assembled %d points across %d scans", total_points, len(session.lidar_records))
     return xyz, intensity, (origin_lat, origin_lon, origin_alt)
 
 
-def _nearest_gnss(t_scan: float, gnss_sorted: list[dict]) -> Optional[dict]:
+def _nearest_gnss(t_scan: float, gnss_sorted: list[dict]) -> dict | None:
     if not gnss_sorted:
         return None
     # Linear walk is fine for typical session sizes (<10k fixes); upgrade to
@@ -395,8 +404,9 @@ def _nearest_gnss(t_scan: float, gnss_sorted: list[dict]) -> Optional[dict]:
     return best
 
 
-def _gnss_offset_meters(lat: float, lon: float, alt: float,
-                        origin_lat: float, origin_lon: float, origin_alt: float):
+def _gnss_offset_meters(
+    lat: float, lon: float, alt: float, origin_lat: float, origin_lon: float, origin_alt: float
+):
     """Small-baseline ENU offset (meters) from origin (lat0, lon0, alt0).
 
     Uses the equirectangular approximation — adequate for the rover's typical
@@ -440,8 +450,7 @@ def project_to_crs(xyz, origin_lat_lon_alt, target_epsg: int, units: str):
     pyproj = _try_import_pyproj()
     if pyproj is None:
         raise SystemExit(
-            "pyproj is required when target_crs_epsg != 0 — install via "
-            "`pip install -e \".[post]\"`"
+            'pyproj is required when target_crs_epsg != 0 — install via `pip install -e ".[post]"`'
         )
 
     origin_lat, origin_lon, origin_alt = origin_lat_lon_alt
@@ -455,9 +464,7 @@ def project_to_crs(xyz, origin_lat_lon_alt, target_epsg: int, units: str):
     lons = origin_lon + np.degrees(east / (R_EARTH * math.cos(lat0_rad)))
     alts = origin_alt + up
 
-    transformer = pyproj.Transformer.from_crs(
-        "EPSG:4326", f"EPSG:{target_epsg}", always_xy=True
-    )
+    transformer = pyproj.Transformer.from_crs("EPSG:4326", f"EPSG:{target_epsg}", always_xy=True)
     # always_xy=True → x = lon, y = lat
     xs, ys = transformer.transform(lons, lats)
     zs = alts
@@ -491,8 +498,7 @@ def export_ply(out_path: Path, xyz, intensity) -> None:
     with open(out_path, "wb") as f:
         f.write(header.encode("ascii"))
         # Pack vertex bytes: 3 float32 + 3 uint8 = 15 bytes per point
-        vtx = np.zeros(n, dtype=[("xyz", "<f4", 3),
-                                  ("rgb", "u1", 3)])
+        vtx = np.zeros(n, dtype=[("xyz", "<f4", 3), ("rgb", "u1", 3)])
         vtx["xyz"] = xyz.astype(np.float32)
         gray = intensity.astype(np.uint8)
         vtx["rgb"][:, 0] = gray
@@ -524,12 +530,11 @@ def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
     las.y = xyz[:, 1]
     las.z = xyz[:, 2]
     # Intensity in LAS is uint16; scale our 0..255 up so renderers don't darken.
-    las.intensity = (intensity.astype(np.uint16) << 8)
+    las.intensity = intensity.astype(np.uint16) << 8
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     las.write(str(out_path))
-    logger.info("LAS written: %s (%d points, EPSG:%d)",
-                out_path, len(xyz), target_epsg)
+    logger.info("LAS written: %s (%d points, EPSG:%d)", out_path, len(xyz), target_epsg)
     return True
 
 
@@ -538,20 +543,34 @@ def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Post-process a rover session: JSONL -> georeferenced PLY/LAS.",
     )
-    parser.add_argument("session_dir", type=Path,
-                        help="Path to the rover session directory (contains scan.jsonl)")
-    parser.add_argument("--crs", type=int, default=None,
-                        help="Override target EPSG (default: metadata.json.session.target_crs_epsg)")
-    parser.add_argument("--units", choices=["m", "ft"], default=None,
-                        help="Override output units (default: metadata.json.session.units)")
-    parser.add_argument("--out-prefix", type=str, default=None,
-                        help="Output filename prefix (default: session directory name)")
-    parser.add_argument("--no-las", action="store_true",
-                        help="Skip LAS export even if laspy is installed")
+    parser.add_argument(
+        "session_dir", type=Path, help="Path to the rover session directory (contains scan.jsonl)"
+    )
+    parser.add_argument(
+        "--crs",
+        type=int,
+        default=None,
+        help="Override target EPSG (default: metadata.json.session.target_crs_epsg)",
+    )
+    parser.add_argument(
+        "--units",
+        choices=["m", "ft"],
+        default=None,
+        help="Override output units (default: metadata.json.session.units)",
+    )
+    parser.add_argument(
+        "--out-prefix",
+        type=str,
+        default=None,
+        help="Output filename prefix (default: session directory name)",
+    )
+    parser.add_argument(
+        "--no-las", action="store_true", help="Skip LAS export even if laspy is installed"
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -577,7 +596,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     logger.info(
         "Exporting session=%s profile=%s target=%s (EPSG:%d) units=%s",
-        session_dir.name, profile, zone_name_for(target_epsg), target_epsg, units,
+        session_dir.name,
+        profile,
+        zone_name_for(target_epsg),
+        target_epsg,
+        units,
     )
 
     xyz, intensity, origin = session_to_pointcloud(session)

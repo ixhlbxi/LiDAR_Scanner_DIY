@@ -38,7 +38,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 from rover.config import load_config  # noqa: E402
-from rover.gnss import GnssReceiver, GnssFix  # noqa: E402
+from rover.gnss import GnssFix, GnssReceiver  # noqa: E402
 from rover.ntrip import NtripClient  # noqa: E402
 
 logger = logging.getLogger("rover-test-ntrip")
@@ -46,21 +46,28 @@ logger = logging.getLogger("rover-test-ntrip")
 
 def _fix_type_name(fix_type: int) -> str:
     return {
-        0: "NONE", 1: "2D", 2: "3D", 3: "DGPS", 4: "FLOAT", 5: "FIX",
+        0: "NONE",
+        1: "2D",
+        2: "3D",
+        3: "DGPS",
+        4: "FLOAT",
+        5: "FIX",
     }.get(fix_type, f"?{fix_type}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path,
-                        default=Path("config/default.toml"),
-                        help="Rover TOML config (default: config/default.toml)")
-    parser.add_argument("--caster", type=str, default=None,
-                        help="Override caster as host:port")
-    parser.add_argument("--mountpoint", type=str, default=None,
-                        help="Override caster mountpoint")
-    parser.add_argument("--duration", type=float, default=60.0,
-                        help="Observation window in seconds (default: 60)")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/default.toml"),
+        help="Rover TOML config (default: config/default.toml)",
+    )
+    parser.add_argument("--caster", type=str, default=None, help="Override caster as host:port")
+    parser.add_argument("--mountpoint", type=str, default=None, help="Override caster mountpoint")
+    parser.add_argument(
+        "--duration", type=float, default=60.0, help="Observation window in seconds (default: 60)"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -73,7 +80,8 @@ def main() -> int:
     if not cfg.ntrip.enabled:
         logger.error(
             "[ntrip] enabled = false in %s — set it to true and re-run "
-            "(or pass a config with NTRIP enabled).", args.config,
+            "(or pass a config with NTRIP enabled).",
+            args.config,
         )
         return 1
 
@@ -105,8 +113,10 @@ def main() -> int:
 
     logger.info(
         "Target: %s:%d/%s  (user=%s)",
-        cfg.ntrip.caster_host, cfg.ntrip.caster_port,
-        cfg.ntrip.mountpoint, cfg.ntrip.username,
+        cfg.ntrip.caster_host,
+        cfg.ntrip.caster_port,
+        cfg.ntrip.mountpoint,
+        cfg.ntrip.username,
     )
 
     # --- Bring up the F9P reader ---
@@ -133,7 +143,10 @@ def main() -> int:
                 fix_at[fix.fix_type] = now
                 logger.info(
                     "Fix transition → %s (sats=%d hdop=%.2f rtk_age=%.1f)",
-                    _fix_type_name(fix.fix_type), fix.sat_count, fix.hdop, fix.rtk_age,
+                    _fix_type_name(fix.fix_type),
+                    fix.sat_count,
+                    fix.hdop,
+                    fix.rtk_age,
                 )
             if fix is not None:
                 best_fix_type = max(best_fix_type, fix.fix_type)
