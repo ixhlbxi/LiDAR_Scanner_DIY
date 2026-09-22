@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import socket
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
+from unittest import mock
 
 import pytest
 
+from rover import watchdog as wd_mod
 from rover.config import WatchdogConfig
 from rover.watchdog import Watchdog
 
@@ -76,3 +83,50 @@ def test_stop_is_idempotent(fast_config: WatchdogConfig) -> None:
     wd.start()
     wd.stop()
     wd.stop()  # should not raise
+
+
+def test_default_timeout_exits_process_with_code_2() -> None:
+    """The default callback must end the PROCESS, not just the monitor thread (T1-001)."""
+    script = (
+        "import time\n"
+        "from rover.config import WatchdogConfig\n"
+        "from rover.watchdog import Watchdog\n"
+        "wd = Watchdog(WatchdogConfig(enabled=True, timeout_sec=1, heartbeat_interval_sec=1))\n"
+        "wd.start()\n"
+        "time.sleep(10)\n"  # never heartbeats; must be killed long before this
+        "print('STILL ALIVE')\n"
+    )
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=8,
+        env={**os.environ, "PYTHONPATH": src_dir},
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "STILL ALIVE" not in proc.stdout
+
+
+@pytest.mark.skipif(
+    not hasattr(socket, "AF_UNIX"),
+    reason=(
+        "AF_UNIX not exposed by this Python/OS build (observed on the official "
+        "python.org Windows 3.13/3.14 builds on this machine, which are compiled "
+        "without AF_UNIX support even though Windows itself supports it since "
+        "10 build 17063). Production runs on Raspberry Pi OS (Linux), where "
+        "AF_UNIX is always available."
+    ),
+)
+def test_sd_notify_reuses_one_socket(monkeypatch, tmp_path) -> None:
+    """One connected datagram socket per process, not one per heartbeat."""
+    monkeypatch.setenv("NOTIFY_SOCKET", "@rover-test-notify")
+    wd_mod._reset_notify_socket_for_tests()
+    fake = mock.MagicMock()
+    with mock.patch("rover.watchdog.socket.socket", return_value=fake) as ctor:
+        wd_mod._sd_notify("READY=1\n")
+        wd_mod._sd_notify("WATCHDOG=1\n")
+        wd_mod._sd_notify("WATCHDOG=1\n")
+    assert ctor.call_count == 1
+    assert fake.sendall.call_count == 3
+    wd_mod._reset_notify_socket_for_tests()

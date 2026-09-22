@@ -4,7 +4,7 @@ The main acquisition loop calls ``Watchdog.heartbeat()`` once per iteration.
 A background daemon thread wakes every ``heartbeat_interval_sec`` and checks
 how long it has been since the last heartbeat. If the gap exceeds
 ``timeout_sec``, it fires the configured ``on_timeout`` callback (default:
-``sys.exit(2)``, which lets systemd restart us).
+``os._exit(2)``, which lets systemd restart us).
 
 The thread is a daemon so it never holds the process up; ``stop()`` is the
 clean shutdown path and joins.
@@ -30,7 +30,6 @@ from __future__ import annotations
 import logging
 import os
 import socket
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -45,34 +44,63 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+_notify_sock: socket.socket | None = None
+_notify_lock = threading.Lock()
+
+
+def _reset_notify_socket_for_tests() -> None:
+    """Close and forget the cached notify socket (tests only)."""
+    global _notify_sock
+    with _notify_lock:
+        if _notify_sock is not None:
+            try:
+                _notify_sock.close()
+            except OSError:
+                pass
+        _notify_sock = None
+
+
 def _sd_notify(message: str) -> None:
     """Send a notification message to systemd via $NOTIFY_SOCKET.
 
-    Silent no-op if NOTIFY_SOCKET is unset (e.g. running under a dev shell
-    instead of systemd). Mirrors the minimal helper in
-    arm-drone-lidar-workflow/base-station/rtk_base_manager.py.
+    Silent no-op if NOTIFY_SOCKET is unset (dev shell instead of systemd).
+    One datagram socket is connected on first use and reused for the life of
+    the process; a send failure drops it so the next call reconnects.
+    Mirrors the helper in arm-drone-lidar-workflow/base-station/rtk_base_manager.py.
     """
+    global _notify_sock
     addr = os.environ.get("NOTIFY_SOCKET")
     if not addr:
         return
-    # Linux abstract namespace: leading '@' is replaced with NUL byte.
     if addr.startswith("@"):
         addr = "\0" + addr[1:]
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
-            sock.connect(addr)
-            sock.sendall(message.encode("utf-8"))
-    except OSError as e:
-        # Don't let a notify failure kill the heartbeat path.
-        logger.debug("sd_notify(%r) failed: %s", message, e)
+    with _notify_lock:
+        try:
+            if _notify_sock is None:
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+                sock.connect(addr)
+                _notify_sock = sock
+            _notify_sock.sendall(message.encode("utf-8"))
+        except OSError as e:
+            logger.debug("sd_notify(%r) failed: %s", message, e)
+            if _notify_sock is not None:
+                try:
+                    _notify_sock.close()
+                except OSError:
+                    pass
+            _notify_sock = None
 
 
-# Default callback: process exit with a distinguishable code. Systemd's
-# Restart=on-failure brings us back; standalone runs surface the failure
-# to whoever launched us.
-def _default_on_timeout() -> None:  # pragma: no cover — process-killing
+def _default_on_timeout() -> None:
+    """Default timeout action: end the whole process so systemd restarts it.
+
+    ``sys.exit`` would only end the monitor thread (SystemExit is swallowed by
+    threading); ``os._exit`` bypasses the hung main thread. Logging handlers are
+    flushed first so the ERROR line above reaches the journal.
+    """
     logger.error("Watchdog timeout — exiting with code 2")
-    sys.exit(2)
+    logging.shutdown()
+    os._exit(2)
 
 
 class Watchdog:
