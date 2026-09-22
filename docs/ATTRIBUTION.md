@@ -77,7 +77,7 @@ Record dates and outcomes here as items above are closed.
 | Date | Item | Outcome |
 |---|---|---|
 | September 14, 2026 | Commercial-use question | Closed by decision: personal educational project, not an ARM Group tool. ARM involvement is a novelty (shared base station), not a business use. Reopen this file if that changes. |
-| September 22, 2026 | LICENSE + README credit | Relicensed to CC BY-NC-SA 4.0 (commit <sha, fill after commit>); Acknowledgements and Licence sections added to README; pyproject `license` set. Remaining checklist items (upstream notices in derived files, upstream issue, PR of fixes) stay open. |
+| September 22, 2026 | LICENSE + README credit | Relicensed to CC BY-NC-SA 4.0 (commit a4688af); Acknowledgements and Licence sections added to README; pyproject `license` set. Remaining checklist items (upstream notices in derived files, upstream issue, PR of fixes) stay open. |
 
 ---
 
