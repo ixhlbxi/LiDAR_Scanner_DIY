@@ -201,3 +201,15 @@ monitor_battery = false
 
     exit_code = main_to_patch.run(config_path=cfg, duration_sec=1.0)
     assert exit_code == 0
+
+
+def test_ready_notified_even_when_watchdog_disabled(tmp_path: Path, monkeypatch) -> None:
+    """Type=notify units need READY=1 regardless of [watchdog].enabled (T1-002)."""
+    from rover import watchdog as wd_mod
+
+    sent: list[str] = []
+    monkeypatch.setattr(wd_mod, "_sd_notify", sent.append)
+    config_path = _write_all_disabled_config(tmp_path)  # has [watchdog] enabled = false
+    assert main_mod.run(config_path=config_path, duration_sec=0.5) == 0
+    assert "READY=1\n" in sent
+    assert any(m == "WATCHDOG=1\n" for m in sent), "heartbeats must flow when disabled too"

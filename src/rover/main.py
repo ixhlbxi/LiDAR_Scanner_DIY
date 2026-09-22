@@ -482,14 +482,15 @@ def run(
             ntrip_client = None
 
     # --- Watchdog ---
+    # Always constructed: start() sends READY=1 and, when enabled, runs the
+    # monitor thread; heartbeat() always pings systemd's WatchdogSec.
     watchdog: Watchdog | None = None
-    if config.watchdog.enabled:
-        try:
-            watchdog = Watchdog(config.watchdog)
-            watchdog.start()
-        except Exception as e:
-            logger.warning("Watchdog start failed: %s — running without health monitor", e)
-            watchdog = None
+    try:
+        watchdog = Watchdog(config.watchdog)
+        watchdog.start()
+    except Exception as e:
+        logger.warning("Watchdog start failed: %s — running without health monitor", e)
+        watchdog = None
 
     # --- Acquisition loop ---
     exit_code = 0
