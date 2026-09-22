@@ -1,6 +1,6 @@
 # Attribution and Upstream Obligations
 
-**Status: OPEN. Read this before any public release, before changing LICENSE, and before the device's use category ever changes.**
+**Status: License conflict RESOLVED 2026-09-22 (see below). Read this before any public release, before changing LICENSE, and before the device's use category ever changes.**
 
 Created September 14, 2026. This file exists because the rover is derived from someone else's work and the obligations that come with that are easy to forget once the hardware finally works.
 
@@ -34,11 +34,11 @@ This is squarely non-commercial under CC BY-NC-SA. To keep it that way: no real 
 
 ---
 
-## The one problem that still must be resolved
+## The one problem that has now been resolved
 
-### License conflict: this repo says GPL-3.0, upstream requires CC BY-NC-SA
+### License conflict — RESOLVED 2026-09-22
 
-The LICENSE file in this repo is GPL-3.0. CC BY-NC-SA 4.0 is ShareAlike: derivative works must be distributed under the same license (or a CC-designated compatible one). GPL-3.0 is not on that list. As of the creation date, this repo is out of compliance with its upstream license the moment it is shared publicly. The personal-use decision does not fix this; it only closes the NonCommercial question.
+The LICENSE file in this repo was GPL-3.0 until commit a4688af. CC BY-NC-SA 4.0 is ShareAlike: derivative works must be distributed under the same license (or a CC-designated compatible one), and GPL-3.0 was not on that list — as of the creation date, this repo was out of compliance with its upstream license the moment it was shared publicly. The personal-use decision did not fix this; it only closed the NonCommercial question. The repo now carries CC BY-NC-SA 4.0, see the resolution log below.
 
 Fix options, in order of preference:
 
