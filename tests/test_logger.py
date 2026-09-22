@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+import rover
 from rover.config import load_config
 from rover.logger import SessionLogger
 
@@ -354,7 +355,7 @@ class TestMetadata:
         assert meta_path.exists()
         meta = json.loads(meta_path.read_text())
         assert meta["device_name"] == "rover-01"
-        assert meta["firmware_version"] == "0.10.0"
+        assert meta["firmware_version"] == rover.__version__
         assert "session_id" in meta
         assert "start_time" in meta
         assert "end_time" in meta

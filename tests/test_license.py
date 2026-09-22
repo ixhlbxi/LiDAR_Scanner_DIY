@@ -9,8 +9,10 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def test_license_file_is_cc_by_nc_sa_legal_code() -> None:
-    first = (REPO / "LICENSE").read_text(encoding="utf-8").lstrip().splitlines()[0]
+    text = (REPO / "LICENSE").read_text(encoding="utf-8")
+    first = text.lstrip().splitlines()[0]
     assert "Attribution-NonCommercial-ShareAlike 4.0 International" in first, first
+    assert "Section 8 -- Interpretation." in text
 
 
 def test_pyproject_declares_license() -> None:

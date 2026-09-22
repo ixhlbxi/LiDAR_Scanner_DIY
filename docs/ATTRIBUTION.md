@@ -40,7 +40,7 @@ This is squarely non-commercial under CC BY-NC-SA. To keep it that way: no real 
 
 The LICENSE file in this repo was GPL-3.0 until commit a4688af. CC BY-NC-SA 4.0 is ShareAlike: derivative works must be distributed under the same license (or a CC-designated compatible one), and GPL-3.0 was not on that list — as of the creation date, this repo was out of compliance with its upstream license the moment it was shared publicly. The personal-use decision did not fix this; it only closed the NonCommercial question. The repo now carries CC BY-NC-SA 4.0, see the resolution log below.
 
-Fix options, in order of preference:
+Fix options that were considered (the first was taken in commit a4688af):
 
 - Change LICENSE to CC BY-NC-SA 4.0 to match upstream. Simplest, honest, and the only option that requires no permission.
 - Ask Philip Gutjahr for written permission to relicense the derivative. Unlikely to be needed unless the other option is unworkable.

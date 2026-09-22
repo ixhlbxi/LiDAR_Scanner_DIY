@@ -98,6 +98,9 @@ LiDAR_Scanner_DIY/
 - Python 3.11+, type hints on public APIs. Format and lint with `ruff` (config in
   `pyproject.toml`): `python -m ruff format src scripts tests` then
   `python -m ruff check src scripts tests`. Both must be clean before a merge.
+  The format-only commit is listed in `.git-blame-ignore-revs`; run
+  `git config blame.ignoreRevsFile .git-blame-ignore-revs` once per clone so
+  `git blame` skips it.
 - **Testing:** `pytest`. Unit tests off-Pi (mock hardware). Hardware tests in
   `tests/hardware/` require the device.
 - **Logging:** stdlib `logging`; level from `[general] log_level`.

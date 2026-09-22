@@ -23,7 +23,7 @@ pi = [
 ]
 dev = [
     "pytest",
-    "ruff",
+    "ruff>=0.16,<0.17",
 ]
 # Post-processing / CRS-aware export (DEC-034, Phase E)
 post = [

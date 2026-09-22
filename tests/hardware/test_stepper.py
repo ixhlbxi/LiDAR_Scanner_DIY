@@ -138,7 +138,7 @@ def main() -> None:
             jitter_us: list[float] = []
             start_time = time.monotonic()
 
-            for step in range(steps_needed):
+            for step in range(steps_needed):  # noqa: B007 — `step` is read after the loop
                 if stop_event:
                     break
 

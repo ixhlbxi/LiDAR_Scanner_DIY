@@ -475,7 +475,7 @@ def _validate(raw: dict) -> None:
         try:
             im["address"] = int(addr, 0)
         except (ValueError, TypeError):
-            raise ValueError(f"[imu] address: cannot parse {addr!r} as integer")
+            raise ValueError(f"[imu] address: cannot parse {addr!r} as integer")  # noqa: B904 — keep implicit exception chaining; revisited in stage 4
     _require_type("imu", "address", im["address"], int)
     _require_type("imu", "sample_rate_hz", im["sample_rate_hz"], int)
     _require_positive("imu", "sample_rate_hz", im["sample_rate_hz"])

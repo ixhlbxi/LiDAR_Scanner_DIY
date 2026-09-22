@@ -170,7 +170,7 @@ def parse_response_status(header_bytes: bytes) -> tuple[int, str]:
     try:
         code = int(code_str)
     except ValueError:
-        raise NtripError(f"non-numeric status code: {code_str!r}")
+        raise NtripError(f"non-numeric status code: {code_str!r}")  # noqa: B904 — keep implicit exception chaining; revisited in stage 4
 
     return code, reason
 
