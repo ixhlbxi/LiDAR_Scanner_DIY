@@ -84,6 +84,11 @@ def test_run_all_disabled_clean_exit(tmp_path: Path) -> None:
     assert (session / "metadata.json").exists()
     assert (session / "config.toml").exists()
 
+    import json
+
+    meta = json.loads((session / "metadata.json").read_text())
+    assert "lora_rtcm_used" not in meta
+
 
 def test_external_stop_event_aborts_promptly(tmp_path: Path) -> None:
     """A stop event set from another thread should end the run quickly."""

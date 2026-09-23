@@ -736,7 +736,6 @@ def run(
         metadata: dict = {}
         if ntrip_client is not None:
             metadata["ntrip_stats"] = asdict(ntrip_client.stats)
-        metadata["lora_rtcm_used"] = config.lora.enabled and config.lora.role == "rtcm_rx+status_tx"
 
         try:
             session_logger.stop(metadata=metadata)

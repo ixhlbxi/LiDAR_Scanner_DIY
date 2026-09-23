@@ -139,7 +139,7 @@ class LoraConfig:
     coding_rate: str
     telemetry_interval_sec: float
     sync_word: int = 0x12
-    role: str = "rtcm_rx+status_tx"
+    role: str = "status_tx_only"
 
 
 @dataclass(frozen=True)
@@ -269,9 +269,9 @@ _DEFAULTS: dict = {
         "spreading_factor": 7,
         "bandwidth_khz": 125,
         "coding_rate": "4/5",
-        "telemetry_interval_sec": 1.0,
+        "telemetry_interval_sec": 10.0,
         "sync_word": 0x12,
-        "role": "rtcm_rx+status_tx",
+        "role": "status_tx_only",
     },
     "base_station_integration": {
         "enabled": False,
@@ -532,7 +532,7 @@ def _validate(raw: dict) -> None:
     _require_type("lora", "sync_word", lo["sync_word"], int)
     _require_range("lora", "sync_word", lo["sync_word"], 0, 0xFF)
     _require_type("lora", "role", lo["role"], str)
-    _require_in("lora", "role", lo["role"], {"rtcm_rx+status_tx", "status_tx_only", "disabled"})
+    _require_in("lora", "role", lo["role"], {"status_tx_only", "disabled"})
 
     # -- base_station_integration (DEC-033 channel A) --
     bsi = raw["base_station_integration"]
