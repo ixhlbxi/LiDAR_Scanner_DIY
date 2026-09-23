@@ -94,7 +94,7 @@ jpeg_quality = 85                 # JPEG compression (1–100)
 output_folder = "images"          # Relative to session folder
 
 [logging]
-output_dir = "/home/pi/rover/data"
+output_dir = "/var/lib/rover/data"  # systemd StateDirectory (see deploy/systemd/rover.service); override per project
 session_prefix = "scan"           # Session folder prefix
 format = "jsonl"                  # "jsonl" or "csv"
 flush_interval_sec = 5.0          # Force flush interval

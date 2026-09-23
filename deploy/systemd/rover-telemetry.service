@@ -22,6 +22,14 @@ ProtectSystem=strict
 ProtectHome=true
 NoNewPrivileges=true
 ReadWritePaths=/run/rover /var/log/rover /etc/rover
+# systemd creates and owns these; StateDirectory is where sessions land by
+# default (config/default.toml output_dir). To write somewhere else, add a
+# drop-in: `systemctl edit rover` → [Service] ReadWritePaths=/path/to/projects
+StateDirectory=rover
+RuntimeDirectory=rover
+# rpi-lgpio writes its working files to $LG_WD; ProtectSystem=strict makes the
+# real /tmp read-only, so give the service a private one.
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

@@ -20,10 +20,15 @@
 #      silently never fire, masking the real misconfiguration).
 #   2. Copies systemd unit files to /etc/systemd/system/.
 #   3. Copies udev rules to /etc/udev/rules.d/.
-#   4. Creates /run/rover, /var/log/rover, /etc/rover directory tree.
-#   5. Ensures /etc/rover/secret exists with mode 0600 (placeholder if absent).
-#   6. systemctl daemon-reload + udevadm control --reload-rules + udevadm trigger.
-#   7. Restarts the rover.service if it was already running.
+#   4. Creates /var/log/rover and /etc/rover (systemd owns /run/rover and
+#      /var/lib/rover via RuntimeDirectory= / StateDirectory=).
+#   5. Installs config/default.toml → /etc/rover/config.toml and
+#      config/telemetry-only.toml → /etc/rover/telemetry-only.toml, never
+#      overwriting an existing file.
+#   6. Syncs src/rover → /opt/rover/src/rover (the units' PYTHONPATH).
+#   7. Ensures /etc/rover/secret exists with mode 0600.
+#   8. systemctl daemon-reload + udev reload + trigger.
+#   9. Restarts rover.service and rover-telemetry.service if running.
 
 set -euo pipefail
 
@@ -31,8 +36,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYSTEMD_DIR="/etc/systemd/system"
 UDEV_DIR="/etc/udev/rules.d"
 ETC_DIR="/etc/rover"
-RUN_DIR="/run/rover"
 LOG_DIR="/var/log/rover"
+OPT_DIR="/opt/rover"
+CONFIG_DIR="$SCRIPT_DIR/../config"
+SRC_DIR="$SCRIPT_DIR/../src"
 
 DRY_RUN=false
 RESTART=true
@@ -105,6 +112,24 @@ for f in "${UDEV_FILES[@]}"; do
         changed=$((changed + 1))
     fi
 done
+if [[ ! -f "$ETC_DIR/config.toml" ]]; then
+    echo "  NEW:     (config) config.toml"
+    changed=$((changed + 1))
+elif ! diff -q "$ETC_DIR/config.toml" "$CONFIG_DIR/default.toml" >/dev/null 2>&1; then
+    echo "  DIFFERS: (config) config.toml (existing file kept; not overwritten)"
+fi
+if [[ ! -f "$ETC_DIR/telemetry-only.toml" ]]; then
+    echo "  NEW:     (config) telemetry-only.toml"
+    changed=$((changed + 1))
+elif ! diff -q "$ETC_DIR/telemetry-only.toml" "$CONFIG_DIR/telemetry-only.toml" >/dev/null 2>&1; then
+    echo "  DIFFERS: (config) telemetry-only.toml (existing file kept; not overwritten)"
+fi
+if command -v rsync >/dev/null 2>&1; then
+    rsync_n=$(rsync -a --delete -n --exclude '__pycache__' "$SRC_DIR/rover/" "$OPT_DIR/src/rover/" 2>/dev/null | grep -vc '^$' || true)
+    echo "  rsync --dry-run: $rsync_n line(s) of change under $OPT_DIR/src/rover/"
+else
+    echo "  rsync --dry-run: rsync not found (would fail at install time — apt install rsync)"
+fi
 if [[ $changed -eq 0 ]]; then
     echo "  No changes detected."
 fi
@@ -120,7 +145,6 @@ fi
 echo
 echo "=== Install ==="
 install -d -m 0755 "$ETC_DIR"
-install -d -m 0755 "$RUN_DIR"
 install -d -m 0755 "$LOG_DIR"
 
 echo "  copying systemd units..."
@@ -132,6 +156,25 @@ echo "  copying udev rules..."
 for f in "${UDEV_FILES[@]}"; do
     install -m 0644 "$SCRIPT_DIR/udev/$f" "$UDEV_DIR/$f"
 done
+
+echo "  installing configs (existing files kept)..."
+if [[ ! -f "$ETC_DIR/config.toml" ]]; then
+    install -m 0644 "$CONFIG_DIR/default.toml" "$ETC_DIR/config.toml"
+    echo "    created $ETC_DIR/config.toml"
+else
+    echo "    kept $ETC_DIR/config.toml"
+fi
+if [[ ! -f "$ETC_DIR/telemetry-only.toml" ]]; then
+    install -m 0644 "$CONFIG_DIR/telemetry-only.toml" "$ETC_DIR/telemetry-only.toml"
+    echo "    created $ETC_DIR/telemetry-only.toml"
+else
+    echo "    kept $ETC_DIR/telemetry-only.toml"
+fi
+
+echo "  syncing rover package to $OPT_DIR/src/rover ..."
+command -v rsync >/dev/null || { echo "install.sh: rsync missing — apt install rsync" >&2; exit 1; }
+install -d -m 0755 "$OPT_DIR/src"
+rsync -a --delete --exclude '__pycache__' "$SRC_DIR/rover/" "$OPT_DIR/src/rover/"
 
 # Secret file: create as empty placeholder if not present so EnvironmentFile=
 # doesn't even need the leading `-` to tolerate absence. Permissions tight
@@ -151,13 +194,20 @@ systemctl daemon-reload
 udevadm control --reload-rules
 udevadm trigger
 
-if [[ "$RESTART" == true ]] && systemctl is-active --quiet rover.service; then
-    echo "  restarting rover.service..."
-    systemctl restart rover.service
-fi
+for unit in rover.service rover-telemetry.service; do
+    if [[ "$RESTART" == true ]] && systemctl is-active --quiet "$unit"; then
+        echo "  restarting $unit..."
+        systemctl restart "$unit"
+    fi
+done
 
 echo
 echo "Done. Inspect with:"
 echo "  systemctl status rover"
 echo "  ls -la /dev/rover-*"
 echo "  cat /run/rover/status.json   # once rover has published"
+echo
+echo "Sessions are written to /var/lib/rover/data. To log elsewhere (e.g. a"
+echo "project folder), set [logging].output_dir in /etc/rover/config.toml AND"
+echo "grant the path: systemctl edit rover  →  [Service]"
+echo "                                          ReadWritePaths=/your/path"
