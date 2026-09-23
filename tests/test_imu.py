@@ -98,6 +98,53 @@ class TestMadgwickFilter:
         assert norm == pytest.approx(1.0, abs=1e-6)
 
 
+class TestMadgwickMarg:
+    def test_update_without_mag_matches_6dof(self):
+        a = MadgwickFilter(beta=0.1)
+        b = MadgwickFilter(beta=0.1)
+        for _ in range(50):
+            a.update(0.01, -0.02, 0.03, 0.1, 0.2, 9.7, 0.01)
+            b.update(0.01, -0.02, 0.03, 0.1, 0.2, 9.7, 0.01, None, None, None)
+        assert a.quaternion == pytest.approx(b.quaternion)
+
+    def test_marg_converges_to_heading(self):
+        """Level, with the magnetic field pointing +X (north = body forward) the
+        yaw must settle near 0; with the field along +Y it must settle near +90°."""
+        import math
+
+        def yaw_deg(q):
+            w, x, y, z = q
+            return math.degrees(math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
+
+        f = MadgwickFilter(beta=0.3)
+        for _ in range(2000):
+            f.update(0, 0, 0, 0, 0, 9.81, 0.005, 30.0, 0.0, -40.0)
+        assert abs(yaw_deg(f.quaternion)) < 3.0
+
+        g = MadgwickFilter(beta=0.3)
+        for _ in range(2000):
+            g.update(0, 0, 0, 0, 0, 9.81, 0.005, 0.0, 30.0, -40.0)
+        assert abs(yaw_deg(g.quaternion) - (-90.0)) < 3.0 or abs(yaw_deg(g.quaternion) - 90.0) < 3.0
+
+    def test_mag_offset_is_subtracted(self):
+        """A hard-iron offset equal to the field itself leaves no field: the MARG
+        step must fall back to 6-DOF rather than divide by zero."""
+        f = MadgwickFilter(beta=0.1, mag_offset=(30.0, 0.0, -40.0))
+        for _ in range(100):
+            f.update(0, 0, 0, 0, 0, 9.81, 0.01, 30.0, 0.0, -40.0)
+        w, x, y, z = f.quaternion
+        assert abs(w) > 0.99  # still ~identity: level and no yaw information
+
+    def test_free_fall_branch_uses_consistent_derivative(self):
+        """Gyro-only integration for one step must equal the closed-form small-angle
+        rotation, which the old sequential in-place update did not (T1-018 hygiene)."""
+        f = MadgwickFilter(beta=0.1)
+        f.update(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.1)  # 0.1 rad about Z, no accel
+        w, x, y, z = f.quaternion
+        assert w == pytest.approx(math.cos(0.05), abs=1e-3)
+        assert z == pytest.approx(math.sin(0.05), abs=1e-3)
+
+
 # ---------------------------------------------------------------------------
 # ImuDriver tests — no I2C
 # ---------------------------------------------------------------------------

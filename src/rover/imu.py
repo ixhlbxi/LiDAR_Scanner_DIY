@@ -87,17 +87,26 @@ class ImuSample:
 class MadgwickFilter:
     """Madgwick AHRS filter for quaternion orientation estimation.
 
-    Simplified 6-DOF (accel + gyro) implementation. When magnetometer
-    data is available, it is used for yaw correction.
+    6-DOF (accel + gyro) when no magnetometer sample is supplied; MARG (9-DOF)
+    when ``mx, my, mz`` are all given. A hard-iron ``mag_offset`` (µT, body
+    frame) is subtracted from every magnetometer sample before use; it comes
+    from ``[calibration].mag_offset`` and defaults to none.
+
+    Reference: S. Madgwick, "An efficient orientation filter for inertial and
+    inertial/magnetic sensor arrays", 2010 — the standard MARG update, with the
+    gyro-derivative term written once and shared by both branches.
 
     Args:
-        beta: Filter gain parameter (0..1). Higher = more accel trust.
+        beta: Filter gain (0..1). Higher = more accel/mag trust.
+        mag_offset: Hard-iron offset (x, y, z) in µT, or None.
     """
 
-    def __init__(self, beta: float = 0.1) -> None:
+    def __init__(
+        self, beta: float = 0.1, mag_offset: tuple[float, float, float] | None = None
+    ) -> None:
         self._beta = beta
-        # Quaternion [w, x, y, z], initialized to identity
-        self._q = [1.0, 0.0, 0.0, 0.0]
+        self._mag_offset = mag_offset
+        self._q = [1.0, 0.0, 0.0, 0.0]  # [w, x, y, z]
 
     @property
     def quaternion(self) -> tuple[float, float, float, float]:
@@ -112,55 +121,126 @@ class MadgwickFilter:
         ay: float,
         az: float,
         dt: float,
+        mx: float | None = None,
+        my: float | None = None,
+        mz: float | None = None,
     ) -> None:
-        """Update orientation from gyro (rad/s) and accel (m/s²)."""
+        """Advance the orientation by one sample.
+
+        gyro in rad/s, accel in m/s² (any scale; normalised), mag in µT (any
+        scale; normalised). With any of mx/my/mz None the 6-DOF step runs.
+        """
         q0, q1, q2, q3 = self._q
 
-        # Normalize accelerometer
-        norm = math.sqrt(ax * ax + ay * ay + az * az)
-        if norm < 1e-10:
-            # Free-fall or invalid — skip correction, gyro only
-            q0 += 0.5 * dt * (-q1 * gx - q2 * gy - q3 * gz)
-            q1 += 0.5 * dt * (q0 * gx + q2 * gz - q3 * gy)
-            q2 += 0.5 * dt * (q0 * gy - q1 * gz + q3 * gx)
-            q3 += 0.5 * dt * (q0 * gz + q1 * gy - q2 * gx)
-            self._q = [q0, q1, q2, q3]
-            self._normalize()
-            return
-
-        ax /= norm
-        ay /= norm
-        az /= norm
-
-        # Gradient descent corrective step
-        f1 = 2.0 * (q1 * q3 - q0 * q2) - ax
-        f2 = 2.0 * (q0 * q1 + q2 * q3) - ay
-        f3 = 2.0 * (0.5 - q1 * q1 - q2 * q2) - az
-
-        j_t_f0 = -2.0 * q2 * f1 + 2.0 * q1 * f2
-        j_t_f1 = 2.0 * q3 * f1 + 2.0 * q0 * f2 - 4.0 * q1 * f3
-        j_t_f2 = -2.0 * q0 * f1 + 2.0 * q3 * f2 - 4.0 * q2 * f3
-        j_t_f3 = 2.0 * q1 * f1 + 2.0 * q2 * f2
-
-        grad_norm = math.sqrt(j_t_f0 * j_t_f0 + j_t_f1 * j_t_f1 + j_t_f2 * j_t_f2 + j_t_f3 * j_t_f3)
-        if grad_norm > 1e-10:
-            j_t_f0 /= grad_norm
-            j_t_f1 /= grad_norm
-            j_t_f2 /= grad_norm
-            j_t_f3 /= grad_norm
-
-        # Quaternion derivative from gyro
+        # Rate of change of quaternion from gyroscope — shared by every branch.
         qd0 = 0.5 * (-q1 * gx - q2 * gy - q3 * gz)
         qd1 = 0.5 * (q0 * gx + q2 * gz - q3 * gy)
         qd2 = 0.5 * (q0 * gy - q1 * gz + q3 * gx)
         qd3 = 0.5 * (q0 * gz + q1 * gy - q2 * gx)
 
-        # Apply correction
-        q0 += (qd0 - self._beta * j_t_f0) * dt
-        q1 += (qd1 - self._beta * j_t_f1) * dt
-        q2 += (qd2 - self._beta * j_t_f2) * dt
-        q3 += (qd3 - self._beta * j_t_f3) * dt
+        s0 = s1 = s2 = s3 = 0.0
+        a_norm = math.sqrt(ax * ax + ay * ay + az * az)
+        if a_norm > 1e-10:
+            ax, ay, az = ax / a_norm, ay / a_norm, az / a_norm
+            use_mag = mx is not None and my is not None and mz is not None
+            if use_mag:
+                if self._mag_offset is not None:
+                    mx -= self._mag_offset[0]
+                    my -= self._mag_offset[1]
+                    mz -= self._mag_offset[2]
+                m_norm = math.sqrt(mx * mx + my * my + mz * mz)
+                use_mag = m_norm > 1e-10
+            if use_mag:
+                mx, my, mz = mx / m_norm, my / m_norm, mz / m_norm
+                # Reference direction of Earth's magnetic field in the earth frame
+                hx = (
+                    mx * q0 * q0
+                    - 2 * q0 * my * q3
+                    + 2 * q0 * mz * q2
+                    + mx * q1 * q1
+                    + 2 * q1 * my * q2
+                    + 2 * q1 * mz * q3
+                    - mx * q2 * q2
+                    - mx * q3 * q3
+                )
+                hy = (
+                    2 * q0 * mx * q3
+                    + my * q0 * q0
+                    - 2 * q0 * mz * q1
+                    + 2 * q1 * mx * q2
+                    - my * q1 * q1
+                    + my * q2 * q2
+                    + 2 * q2 * mz * q3
+                    - my * q3 * q3
+                )
+                bx = math.sqrt(hx * hx + hy * hy)
+                bz = (
+                    -2 * q0 * mx * q2
+                    + 2 * q0 * my * q1
+                    + mz * q0 * q0
+                    + 2 * q1 * mx * q3
+                    - mz * q1 * q1
+                    + 2 * q2 * my * q3
+                    - mz * q2 * q2
+                    + mz * q3 * q3
+                )
+                # Gradient descent corrective step (MARG)
+                f1 = 2 * (q1 * q3 - q0 * q2) - ax
+                f2 = 2 * (q0 * q1 + q2 * q3) - ay
+                f3 = 2 * (0.5 - q1 * q1 - q2 * q2) - az
+                f4 = 2 * bx * (0.5 - q2 * q2 - q3 * q3) + 2 * bz * (q1 * q3 - q0 * q2) - mx
+                f5 = 2 * bx * (q1 * q2 - q0 * q3) + 2 * bz * (q0 * q1 + q2 * q3) - my
+                f6 = 2 * bx * (q0 * q2 + q1 * q3) + 2 * bz * (0.5 - q1 * q1 - q2 * q2) - mz
+                s0 = (
+                    -2 * q2 * f1
+                    + 2 * q1 * f2
+                    - 2 * bz * q2 * f4
+                    + (-2 * bx * q3 + 2 * bz * q1) * f5
+                    + 2 * bx * q2 * f6
+                )
+                s1 = (
+                    2 * q3 * f1
+                    + 2 * q0 * f2
+                    - 4 * q1 * f3
+                    + 2 * bz * q3 * f4
+                    + (2 * bx * q2 + 2 * bz * q0) * f5
+                    + (2 * bx * q3 - 4 * bz * q1) * f6
+                )
+                s2 = (
+                    -2 * q0 * f1
+                    + 2 * q3 * f2
+                    - 4 * q2 * f3
+                    + (-4 * bx * q2 - 2 * bz * q0) * f4
+                    + (2 * bx * q1 + 2 * bz * q3) * f5
+                    + (2 * bx * q0 - 4 * bz * q2) * f6
+                )
+                s3 = (
+                    2 * q1 * f1
+                    + 2 * q2 * f2
+                    + (-4 * bx * q3 + 2 * bz * q1) * f4
+                    + (-2 * bx * q0 + 2 * bz * q2) * f5
+                    + 2 * bx * q1 * f6
+                )
+            else:
+                # Gradient descent corrective step (accel only)
+                f1 = 2 * (q1 * q3 - q0 * q2) - ax
+                f2 = 2 * (q0 * q1 + q2 * q3) - ay
+                f3 = 2 * (0.5 - q1 * q1 - q2 * q2) - az
+                s0 = -2 * q2 * f1 + 2 * q1 * f2
+                s1 = 2 * q3 * f1 + 2 * q0 * f2 - 4 * q1 * f3
+                s2 = -2 * q0 * f1 + 2 * q3 * f2 - 4 * q2 * f3
+                s3 = 2 * q1 * f1 + 2 * q2 * f2
+            s_norm = math.sqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3)
+            if s_norm > 1e-10:
+                s0, s1, s2, s3 = s0 / s_norm, s1 / s_norm, s2 / s_norm, s3 / s_norm
+            else:
+                s0 = s1 = s2 = s3 = 0.0
+        # else: free-fall / invalid accel — gyro integration only (s = 0)
 
+        q0 += (qd0 - self._beta * s0) * dt
+        q1 += (qd1 - self._beta * s1) * dt
+        q2 += (qd2 - self._beta * s2) * dt
+        q3 += (qd3 - self._beta * s3) * dt
         self._q = [q0, q1, q2, q3]
         self._normalize()
 
