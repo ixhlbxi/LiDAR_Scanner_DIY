@@ -30,10 +30,35 @@ def disabled_config():
     )
 
 
+class _Picamera2Stub:
+    """Mirrors the picamera2 0.3.x surface this driver touches. Autospec'd so a
+    kwarg picamera2 does not accept (e.g. quality=) fails the test (T1-005)."""
+
+    def __init__(self) -> None:
+        self.options: dict = {}
+
+    def create_still_configuration(self, main=None, lores=None, raw=None, **kw):
+        return {"main": main}
+
+    def configure(self, config) -> None: ...
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def close(self) -> None: ...
+
+    def capture_file(self, file_output, name="main", format=None, wait=None, signal_function=None):
+        return {}
+
+
 @pytest.fixture
 def mock_picamera2():
-    """Patch picamera2 and availability flag for off-Pi testing."""
-    mock_cam = MagicMock()
+    """Patch picamera2 with an autospec'd stub for off-Pi testing."""
+    from unittest.mock import create_autospec
+
+    mock_cam = create_autospec(_Picamera2Stub, instance=True)
+    mock_cam.options = {}
     mock_cam_class = MagicMock(return_value=mock_cam)
     with (
         patch("rover.camera._CAMERA_AVAILABLE", True),
@@ -87,6 +112,19 @@ class TestCameraWithMock:
         mock_picamera2.create_still_configuration.assert_called_once()
         mock_picamera2.configure.assert_called_once()
         mock_picamera2.start.assert_called_once()
+
+    def test_start_sets_jpeg_quality_option(self, camera_config, mock_picamera2):
+        cam = Camera(camera_config)
+        cam.start()
+        assert mock_picamera2.options["quality"] == 85
+
+    def test_capture_does_not_pass_quality_kwarg(self, camera_config, mock_picamera2, tmp_path):
+        cam = Camera(camera_config)
+        cam.start()
+        cam.capture(tmp_path, 3)
+        _args, kwargs = mock_picamera2.capture_file.call_args
+        assert "quality" not in kwargs
+        assert kwargs.get("format") == "jpeg"
 
     def test_double_start_ignored(self, camera_config, mock_picamera2):
         cam = Camera(camera_config)

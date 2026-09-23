@@ -93,6 +93,8 @@ class Camera:
                 main={"size": (w, h), "format": "RGB888"}
             )
             self._cam.configure(still_config)
+            # JPEG quality is a Picamera2 option, not a capture_file kwarg.
+            self._cam.options["quality"] = self._config.jpeg_quality
             self._cam.start()
             # Allow auto-exposure to settle
             time.sleep(1.0)
@@ -163,11 +165,7 @@ class Camera:
         relative_path = f"{self._config.output_folder}/{filename}"
         full_path = images_dir / filename
 
-        self._cam.capture_file(
-            str(full_path),
-            format="jpeg",
-            quality=self._config.jpeg_quality,
-        )
+        self._cam.capture_file(str(full_path), format="jpeg")
         self._capture_count += 1
 
         logger.debug("Captured %s", relative_path)
