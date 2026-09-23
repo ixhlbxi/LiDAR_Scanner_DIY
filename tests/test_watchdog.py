@@ -142,6 +142,31 @@ def test_default_timeout_path_does_not_use_logging(monkeypatch, capsys) -> None:
     assert "heartbeat timeout" in capsys.readouterr().err
 
 
+def test_run_loop_timeout_notice_is_lock_free(
+    fast_config: WatchdogConfig, monkeypatch, capsys
+) -> None:
+    """_run_loop's own timeout notice must also be lock-free (T1-001 fix round 2):
+    it fires before the on_timeout callback runs, so — like _default_on_timeout —
+    it must not touch logging. logger.error is only used afterward, and only if
+    the callback returns instead of ending the process."""
+    fired = threading.Event()
+    logger_mock = mock.MagicMock()
+    monkeypatch.setattr(wd_mod.logger, "error", logger_mock)
+
+    def _on_timeout() -> None:
+        assert logger_mock.call_count == 0, "logger.error was called before the callback ran"
+        fired.set()
+
+    wd = Watchdog(fast_config, on_timeout=_on_timeout)
+    wd.start()
+    try:
+        assert fired.wait(timeout=4.0), "watchdog did not fire on missing heartbeat"
+    finally:
+        wd.stop()
+
+    assert "heartbeat timeout" in capsys.readouterr().err
+
+
 def test_sd_notify_reconnects_after_send_failure(monkeypatch) -> None:
     """A send failure drops the cached socket so the next call reconnects."""
     monkeypatch.setenv("NOTIFY_SOCKET", "@rover-test-notify")

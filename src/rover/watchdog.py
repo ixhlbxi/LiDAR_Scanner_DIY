@@ -92,22 +92,28 @@ def _sd_notify(message: str) -> None:
             _notify_sock = None
 
 
+def _emergency_write(message: str) -> None:
+    """Write straight to stderr, bypassing logging.
+
+    Used on the timeout path only: the hung main thread may hold a logging
+    handler lock, and nothing here may block. Under systemd stderr is the journal.
+    """
+    try:
+        sys.stderr.write(f"rover.watchdog: {message}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def _default_on_timeout() -> None:
     """Default timeout action: end the whole process so systemd restarts it.
 
     ``sys.exit`` would only end the monitor thread (SystemExit is swallowed by
     threading); ``os._exit`` bypasses the hung main thread. The message is
-    written directly to stderr, not via ``logging``, so this path cannot block
-    on a logging handler lock.
+    written directly to stderr via ``_emergency_write``, not via ``logging``,
+    so this path cannot block on a logging handler lock.
     """
-    # Deliberately NOT via logging: the hung main thread may hold a logging
-    # handler lock, and this path must never block. Under systemd, stderr goes
-    # to the journal.
-    try:
-        sys.stderr.write("rover.watchdog: heartbeat timeout — exiting with code 2\n")
-        sys.stderr.flush()
-    except Exception:
-        pass
+    _emergency_write("heartbeat timeout — exiting with code 2")
     os._exit(2)
 
 
@@ -195,10 +201,10 @@ class Watchdog:
             age = self._last_beat_age()
             if age > timeout and not self._fired:
                 self._fired = True
-                logger.error(
-                    "Watchdog timeout: last heartbeat %.1fs ago (limit %.1fs)",
-                    age,
-                    timeout,
+                # Lock-free: the main thread we're about to interrupt may be
+                # hung while holding the logging handler lock.
+                _emergency_write(
+                    f"heartbeat timeout: last heartbeat {age:.1f}s ago (limit {timeout:.1f}s)"
                 )
                 try:
                     self._on_timeout()
@@ -206,6 +212,11 @@ class Watchdog:
                     raise
                 except Exception as e:  # pragma: no cover — defensive
                     logger.exception("Watchdog on_timeout callback raised: %s", e)
+                else:
+                    # Only reached if a custom on_timeout callback returned
+                    # normally instead of ending the process — the process is
+                    # still alive at this point, so logging is safe again.
+                    logger.error("Watchdog fired (callback returned)")
 
 
 __all__ = ["Watchdog"]
