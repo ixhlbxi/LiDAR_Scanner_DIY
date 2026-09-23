@@ -48,14 +48,19 @@ Changelog:
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import logging
 import math
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger("georef")
+
+R_EARTH_M = 6378137.0  # WGS84 semi-major axis
+US_SURVEY_FOOT_M = 0.3048006096012192
 
 
 # ---------------------------------------------------------------------------
@@ -105,15 +110,20 @@ def zone_name_for(epsg: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _require_numpy():
-    try:
-        import numpy as np  # noqa: F401 — caller imports
+_NP = None
 
-        return np
-    except ImportError as e:
-        raise SystemExit(
-            'numpy is required for scripts/georef.py — install via `pip install -e ".[post]"`'
-        ) from e
+
+def _require_numpy():
+    global _NP
+    if _NP is None:
+        try:
+            import numpy as np
+        except ImportError as e:
+            raise SystemExit(
+                'numpy is required for scripts/georef.py — install via `pip install -e ".[post]"`'
+            ) from e
+        _NP = np
+    return _NP
 
 
 def _try_import_laspy():
@@ -149,59 +159,83 @@ class SessionData:
     gnss_records: list[dict]
 
 
-def load_session(session_dir: Path) -> SessionData:
-    """Load metadata.json + all relevant JSONL records.
+_SEGMENT_RE = re.compile(r"^(scan|gnss)(?:_(\d{3}))?\.jsonl$")
 
-    Reads `scan.jsonl` (mixed lidar/imu/camera/event records) and `gnss.jsonl`
-    if present (otherwise falls back to gnss records in scan.jsonl).
-    """
+
+def _segment_files(session_dir: Path, stem: str) -> list[Path]:
+    """`<stem>.jsonl, <stem>_001.jsonl, …` in numeric order (SessionLogger rotation)."""
+    found: list[tuple[int, Path]] = []
+    for p in session_dir.glob(f"{stem}*.jsonl"):
+        m = _SEGMENT_RE.match(p.name)
+        if m and m.group(1) == stem:
+            found.append((int(m.group(2) or 0), p))
+    return [p for _, p in sorted(found)]
+
+
+def _iter_jsonl(paths: list[Path]):
+    for p in paths:
+        for line in p.read_text().splitlines():
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("skipping malformed line in %s", p.name)
+
+
+def _flatten_imu_batch(rec: dict) -> list[dict]:
+    """One batched IMU record → one dict per sample."""
+    ts = rec["t"]
+    return [
+        {
+            "timestamp": ts[i],
+            "accel": rec["accel"][i],
+            "gyro": rec["gyro"][i],
+            "mag": rec["mag"][i],
+            "orientation": rec["orientation"][i],
+        }
+        for i in range(len(ts))
+    ]
+
+
+def load_session(session_dir: Path) -> SessionData:
+    """Load metadata.json + every scan*/gnss* segment (rotation-aware)."""
     metadata_path = session_dir / "metadata.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"No metadata.json in {session_dir}")
     metadata = json.loads(metadata_path.read_text())
 
-    scan_path = session_dir / "scan.jsonl"
-    if not scan_path.exists():
+    scan_files = _segment_files(session_dir, "scan")
+    if not scan_files:
         raise FileNotFoundError(f"No scan.jsonl in {session_dir}")
 
     lidar: list[dict] = []
     imu: list[dict] = []
     gnss: list[dict] = []
-
-    for line in scan_path.read_text().splitlines():
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            logger.warning("skipping malformed scan.jsonl line")
-            continue
+    for rec in _iter_jsonl(scan_files):
         t = rec.get("type")
         if t == "lidar":
             lidar.append(rec)
         elif t == "imu":
-            imu.append(rec)
+            imu.extend(_flatten_imu_batch(rec))
         elif t == "gnss":
             gnss.append(rec)
 
-    # Prefer a dedicated gnss.jsonl if present (Appendix B says it's optional).
-    gnss_path = session_dir / "gnss.jsonl"
-    if gnss_path.exists() and not gnss:
-        for line in gnss_path.read_text().splitlines():
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if rec.get("type") == "gnss":
-                gnss.append(rec)
+    # gnss records are mirrored into scan.jsonl by the logger; dedicated gnss*
+    # segments are supplemental (e.g. a rotated segment whose mirror in
+    # scan.jsonl was itself rotated away) rather than a strict either/or —
+    # de-duplication across the two sources is deferred (stage 4).
+    gnss_files = _segment_files(session_dir, "gnss")
+    if gnss_files:
+        extra = [r for r in _iter_jsonl(gnss_files) if r.get("type") == "gnss"]
+        gnss = gnss + extra if gnss else extra
 
     logger.info(
-        "Loaded session: %d lidar, %d imu, %d gnss records",
+        "Loaded session: %d lidar, %d imu, %d gnss records across %d scan segment(s)",
         len(lidar),
         len(imu),
         len(gnss),
+        len(scan_files),
     )
     return SessionData(metadata=metadata, lidar_records=lidar, imu_records=imu, gnss_records=gnss)
 
@@ -266,14 +300,8 @@ def orientation_at(t_scan: float, imu_records: list[dict]):
     if not imu_records:
         return np.array([1.0, 0.0, 0.0, 0.0])
 
-    # Binary search; imu_records assumed sorted by timestamp.
-    lo, hi = 0, len(imu_records) - 1
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if imu_records[mid]["timestamp"] < t_scan:
-            lo = mid + 1
-        else:
-            hi = mid
+    # imu_records assumed sorted by timestamp.
+    lo = bisect.bisect_left(imu_records, t_scan, key=lambda r: r["timestamp"])
 
     if lo == 0:
         return np.asarray(imu_records[0]["orientation"], dtype=float)
@@ -291,33 +319,59 @@ def orientation_at(t_scan: float, imu_records: list[dict]):
 
 
 # ---------------------------------------------------------------------------
+# Geometry helpers — mount/mast rotation and local ENU
+# ---------------------------------------------------------------------------
+
+
+def _rot_z(theta_deg: float):
+    np = _require_numpy()
+    c, s = math.cos(math.radians(theta_deg)), math.sin(math.radians(theta_deg))
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def enu_offset_m(lat, lon, alt, lat0, lon0, alt0) -> tuple[float, float, float]:
+    """Small-baseline ENU offset (m) of (lat, lon, alt) from the origin. Equirectangular;
+    adequate well under 1 km."""
+    lat0_rad = math.radians(lat0)
+    e = math.radians(lon - lon0) * R_EARTH_M * math.cos(lat0_rad)
+    n = math.radians(lat - lat0) * R_EARTH_M
+    return e, n, alt - alt0
+
+
+def geodetic_from_enu(east, north, up, lat0: float, lon0: float, alt0: float):
+    """Vectorised inverse of enu_offset_m (arrays in, arrays out)."""
+    np = _require_numpy()
+    lat0_rad = math.radians(lat0)
+    lats = lat0 + np.degrees(north / R_EARTH_M)
+    lons = lon0 + np.degrees(east / (R_EARTH_M * math.cos(lat0_rad)))
+    return lats, lons, alt0 + up
+
+
+# ---------------------------------------------------------------------------
 # Point cloud assembly
 # ---------------------------------------------------------------------------
 
 
 def lidar_points_to_local(lidar_record: dict, quat):
-    """Convert one lidar scan record to Nx3 points in IMU-aligned local frame.
+    """One columnar lidar record → (N×3 body-ENU-aligned points, N intensities).
 
-    LiDAR convention (CLAUDE.md §9): X forward, Y left, Z up. Angle 0° = X-axis,
-    increasing CCW. Distance in meters.
+    Chain (spec §5): scan plane (LiDAR x forward, y left) is mounted as the body
+    X-Z plane → rotate about body Z by the commanded mast angle → rotate by the
+    IMU quaternion. Always returns a tuple, even for an empty record.
     """
     np = _require_numpy()
-    pts = lidar_record["points"]
-    if not pts:
-        return np.zeros((0, 3))
-    angles_deg = np.array([p["angle"] for p in pts], dtype=float)
-    distances = np.array([p["distance"] for p in pts], dtype=float)
-    intensities = np.array([p.get("intensity", 0) for p in pts], dtype=np.uint8)
-
-    a_rad = np.deg2rad(angles_deg)
-    x = distances * np.cos(a_rad)
-    y = distances * np.sin(a_rad)
-    z = np.zeros_like(x)
-    local = np.column_stack([x, y, z])
-
-    R = _quat_to_rotmat(quat)
-    rotated = local @ R.T
-    return rotated, intensities
+    angles = np.asarray(lidar_record.get("angle", []), dtype=float)
+    dists = np.asarray(lidar_record.get("distance", []), dtype=float)
+    inten = np.asarray(lidar_record.get("intensity", []), dtype=np.uint8)
+    if angles.size == 0:
+        return np.zeros((0, 3)), np.zeros(0, dtype=np.uint8)
+    a = np.deg2rad(angles)
+    x_l = dists * np.cos(a)
+    y_l = dists * np.sin(a)
+    body = np.column_stack([x_l, np.zeros_like(x_l), y_l])  # mount: LiDAR y → body up
+    body = body @ _rot_z(float(lidar_record.get("mast_angle_deg", 0.0))).T
+    world = body @ _quat_to_rotmat(quat).T
+    return world, inten
 
 
 def session_to_pointcloud(session: SessionData):
@@ -354,7 +408,6 @@ def session_to_pointcloud(session: SessionData):
 
     chunks_xyz = []
     chunks_int = []
-    total_points = 0
     for rec in session.lidar_records:
         quat = orientation_at(rec["timestamp"], imu_sorted)
         pts_local, intens = lidar_points_to_local(rec, quat)
@@ -366,7 +419,7 @@ def session_to_pointcloud(session: SessionData):
             # Find nearest GNSS fix for this scan
             scan_fix = _nearest_gnss(rec["timestamp"], gnss_sorted)
             if scan_fix is not None:
-                dE, dN, dU = _gnss_offset_meters(
+                dE, dN, dU = enu_offset_m(
                     scan_fix["lat"],
                     scan_fix["lon"],
                     scan_fix.get("alt", 0.0),
@@ -378,7 +431,6 @@ def session_to_pointcloud(session: SessionData):
 
         chunks_xyz.append(pts_local)
         chunks_int.append(intens)
-        total_points += len(pts_local)
 
     if not chunks_xyz:
         logger.warning("No lidar points to export")
@@ -386,39 +438,20 @@ def session_to_pointcloud(session: SessionData):
 
     xyz = np.vstack(chunks_xyz)
     intensity = np.concatenate(chunks_int)
-    logger.info("Assembled %d points across %d scans", total_points, len(session.lidar_records))
+    logger.info("Assembled %d points across %d scans", len(xyz), len(session.lidar_records))
     return xyz, intensity, (origin_lat, origin_lon, origin_alt)
 
 
 def _nearest_gnss(t_scan: float, gnss_sorted: list[dict]) -> dict | None:
     if not gnss_sorted:
         return None
-    # Linear walk is fine for typical session sizes (<10k fixes); upgrade to
-    # bisect if profiling says so.
-    best = gnss_sorted[0]
-    best_gap = abs(best["timestamp"] - t_scan)
-    for fix in gnss_sorted[1:]:
-        gap = abs(fix["timestamp"] - t_scan)
-        if gap < best_gap:
-            best, best_gap = fix, gap
-    return best
-
-
-def _gnss_offset_meters(
-    lat: float, lon: float, alt: float, origin_lat: float, origin_lon: float, origin_alt: float
-):
-    """Small-baseline ENU offset (meters) from origin (lat0, lon0, alt0).
-
-    Uses the equirectangular approximation — adequate for the rover's typical
-    operating area (<< 1 km from session origin). For larger baselines,
-    pyproj's pj_geod is more accurate, but for our purposes this is enough.
-    """
-    R_EARTH = 6378137.0  # WGS84 semi-major axis, meters
-    lat0_rad = math.radians(origin_lat)
-    dE = math.radians(lon - origin_lon) * R_EARTH * math.cos(lat0_rad)
-    dN = math.radians(lat - origin_lat) * R_EARTH
-    dU = alt - origin_alt
-    return dE, dN, dU
+    i = bisect.bisect_left(gnss_sorted, t_scan, key=lambda r: r["timestamp"])
+    if i == 0:
+        return gnss_sorted[0]
+    if i >= len(gnss_sorted):
+        return gnss_sorted[-1]
+    before, after = gnss_sorted[i - 1], gnss_sorted[i]
+    return before if t_scan - before["timestamp"] <= after["timestamp"] - t_scan else after
 
 
 # ---------------------------------------------------------------------------
@@ -457,12 +490,8 @@ def project_to_crs(xyz, origin_lat_lon_alt, target_epsg: int, units: str):
 
     # Convert each ENU point back to (lat, lon, alt) WGS84, then forward to target CRS.
     # For typical rover baselines (<1 km) this is precise enough.
-    R_EARTH = 6378137.0
-    lat0_rad = math.radians(origin_lat)
     east, north, up = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-    lats = origin_lat + np.degrees(north / R_EARTH)
-    lons = origin_lon + np.degrees(east / (R_EARTH * math.cos(lat0_rad)))
-    alts = origin_alt + up
+    lats, lons, alts = geodetic_from_enu(east, north, up, origin_lat, origin_lon, origin_alt)
 
     transformer = pyproj.Transformer.from_crs("EPSG:4326", f"EPSG:{target_epsg}", always_xy=True)
     # always_xy=True → x = lon, y = lat

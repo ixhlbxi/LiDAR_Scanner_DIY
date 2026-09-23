@@ -25,13 +25,40 @@ from scripts import georef  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
+def _lidar_record(
+    ts: float, step_index: int, mast_angle_deg: float, angles, distances, intensities
+) -> dict:
+    return {
+        "type": "lidar",
+        "timestamp": ts,
+        "step_index": step_index,
+        "mast_angle_deg": mast_angle_deg,
+        "lidar_ms_start": 1000,
+        "lidar_ms_end": 1090,
+        "angle": list(angles),
+        "distance": list(distances),
+        "intensity": list(intensities),
+    }
+
+
+def _imu_batch(ts: list[float], orientation=(1.0, 0.0, 0.0, 0.0)) -> dict:
+    return {
+        "type": "imu",
+        "timestamp": ts[-1],
+        "t": list(ts),
+        "accel": [[0, 0, 9.81]] * len(ts),
+        "gyro": [[0, 0, 0]] * len(ts),
+        "mag": [None] * len(ts),
+        "orientation": [list(orientation)] * len(ts),
+    }
+
+
 def _make_session(
     tmp_path: Path, with_gnss: bool = True, profile: str = "personal", target_crs: int = 0
 ) -> Path:
     """Create a minimal but valid session directory and return its path."""
     sess = tmp_path / "scan_20260523_120000"
     sess.mkdir()
-    # metadata.json
     meta = {
         "session_id": sess.name,
         "device_name": "rover-01",
@@ -45,33 +72,7 @@ def _make_session(
         },
     }
     (sess / "metadata.json").write_text(json.dumps(meta))
-
-    # scan.jsonl — 2 IMU samples, 1 lidar scan, optionally 1 gnss fix
-    lines = []
-    lines.append(
-        json.dumps(
-            {
-                "type": "imu",
-                "timestamp": 100.0,
-                "accel": [0, 0, 9.81],
-                "gyro": [0, 0, 0],
-                "mag": None,
-                "orientation": [1.0, 0.0, 0.0, 0.0],
-            }
-        )
-    )
-    lines.append(
-        json.dumps(
-            {
-                "type": "imu",
-                "timestamp": 100.1,
-                "accel": [0, 0, 9.81],
-                "gyro": [0, 0, 0],
-                "mag": None,
-                "orientation": [1.0, 0.0, 0.0, 0.0],
-            }
-        )
-    )
+    lines = [json.dumps(_imu_batch([100.0, 100.1]))]
     if with_gnss:
         lines.append(
             json.dumps(
@@ -91,17 +92,9 @@ def _make_session(
         )
     lines.append(
         json.dumps(
-            {
-                "type": "lidar",
-                "timestamp": 100.05,
-                "step_index": 0,
-                "points": [
-                    {"angle": 0.0, "distance": 1.0, "intensity": 128},
-                    {"angle": 90.0, "distance": 2.0, "intensity": 200},
-                    {"angle": 180.0, "distance": 1.5, "intensity": 50},
-                    {"angle": 270.0, "distance": 0.5, "intensity": 100},
-                ],
-            }
+            _lidar_record(
+                100.05, 0, 0.0, [0.0, 90.0, 180.0, 270.0], [1.0, 2.0, 1.5, 0.5], [128, 200, 50, 100]
+            )
         )
     )
     (sess / "scan.jsonl").write_text("\n".join(lines) + "\n")
@@ -128,6 +121,40 @@ class TestLoadSession:
         (sess / "scan.jsonl").write_text("")
         with pytest.raises(FileNotFoundError, match="metadata.json"):
             georef.load_session(sess)
+
+    def test_load_flattens_imu_batches(self, tmp_path):
+        sess = _make_session(tmp_path)
+        data = georef.load_session(sess)
+        assert [r["timestamp"] for r in data.imu_records] == [100.0, 100.1]
+        assert data.imu_records[0]["orientation"] == [1.0, 0.0, 0.0, 0.0]
+
+    def test_load_session_reads_rotated_files_in_order(self, tmp_path):
+        sess = _make_session(tmp_path)
+        # Two rotated segments after the base file, deliberately written out of
+        # lexical order of creation to prove numeric ordering.
+        (sess / "scan_002.jsonl").write_text(
+            json.dumps(_lidar_record(300.0, 2, 3.0, [0.0], [1.0], [1])) + "\n"
+        )
+        (sess / "scan_001.jsonl").write_text(
+            json.dumps(_lidar_record(200.0, 1, 1.5, [0.0], [1.0], [1])) + "\n"
+        )
+        (sess / "gnss.jsonl").write_text("")
+        (sess / "gnss_001.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "gnss",
+                    "timestamp": 250.0,
+                    "fix_type": 5,
+                    "lat": 40.7,
+                    "lon": -74.0,
+                    "alt": 9.0,
+                }
+            )
+            + "\n"
+        )
+        data = georef.load_session(sess)
+        assert [r["step_index"] for r in data.lidar_records] == [0, 1, 2]
+        assert [r["timestamp"] for r in data.gnss_records] == [100.05, 250.0]
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +228,81 @@ class TestPipelinePly:
         else:
             rc = georef.main([str(sess), "--crs", "6346", "--no-las"])
             assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Point assembly geometry (mount rotation, mast rotation, IMU quaternion)
+# ---------------------------------------------------------------------------
+
+
+class TestGeometry:
+    def test_empty_record_returns_tuple(self):
+        pts, inten = georef.lidar_points_to_local(
+            {"angle": [], "distance": [], "intensity": [], "mast_angle_deg": 0.0},
+            np.array([1.0, 0.0, 0.0, 0.0]),
+        )
+        assert pts.shape == (0, 3) and inten.shape == (0,)
+
+    def test_scan_plane_is_body_xz_at_mast_zero(self):
+        rec = {
+            "angle": [0.0, 90.0],
+            "distance": [2.0, 3.0],
+            "intensity": [1, 2],
+            "mast_angle_deg": 0.0,
+        }
+        pts, _ = georef.lidar_points_to_local(rec, np.array([1.0, 0.0, 0.0, 0.0]))
+        np.testing.assert_allclose(pts[0], [2.0, 0.0, 0.0], atol=1e-9)  # forward
+        np.testing.assert_allclose(pts[1], [0.0, 0.0, 3.0], atol=1e-9)  # LiDAR +y → body up
+
+    def test_mast_rotation_sweeps_forward_point_to_left(self):
+        rec = {"angle": [0.0], "distance": [2.0], "intensity": [1], "mast_angle_deg": 90.0}
+        pts, _ = georef.lidar_points_to_local(rec, np.array([1.0, 0.0, 0.0, 0.0]))
+        np.testing.assert_allclose(
+            pts[0], [0.0, 2.0, 0.0], atol=1e-9
+        )  # +90° about Z: forward → left
+
+    def test_imu_quaternion_applied_after_mast(self):
+        # 90° about body Z from the IMU, mast at 0: forward → left
+        q = np.array([np.cos(np.pi / 4), 0.0, 0.0, np.sin(np.pi / 4)])
+        rec = {"angle": [0.0], "distance": [1.0], "intensity": [1], "mast_angle_deg": 0.0}
+        pts, _ = georef.lidar_points_to_local(rec, q)
+        np.testing.assert_allclose(pts[0], [0.0, 1.0, 0.0], atol=1e-9)
+
+    def test_sweep_produces_a_volume(self, tmp_path):
+        """A 2 m ring in the scan plane swept 0..180° about Z must fill a sphere:
+        every axis spans about ±2 m and nothing is flat (T1-007)."""
+        import json
+
+        sess = tmp_path / "sweep"
+        sess.mkdir()
+        (sess / "metadata.json").write_text(
+            json.dumps({"session": {"profile": "personal", "target_crs_epsg": 0, "units": "m"}})
+        )
+        angles = [float(a) for a in range(0, 360, 5)]
+        lines = [json.dumps(_imu_batch([0.0, 1000.0]))]
+        for i, mast in enumerate(range(0, 181, 5)):
+            lines.append(
+                json.dumps(
+                    _lidar_record(
+                        float(i), i, float(mast), angles, [2.0] * len(angles), [1] * len(angles)
+                    )
+                )
+            )
+        (sess / "scan.jsonl").write_text("\n".join(lines) + "\n")
+        data = georef.load_session(sess)
+        xyz, inten, origin = georef.session_to_pointcloud(data)
+        assert xyz.shape[0] == len(angles) * 37
+        for axis in range(3):
+            assert xyz[:, axis].min() == pytest.approx(-2.0, abs=0.05)
+            assert xyz[:, axis].max() == pytest.approx(2.0, abs=0.05)
+        assert xyz[:, 1].std() > 0.5
+
+    def test_nearest_gnss_bisect_matches_linear(self):
+        fixes = [{"timestamp": float(t), "lat": 0, "lon": 0} for t in (1, 4, 9, 16)]
+        assert georef._nearest_gnss(5.0, fixes)["timestamp"] == 4.0
+        assert georef._nearest_gnss(12.6, fixes)["timestamp"] == 16.0
+        assert georef._nearest_gnss(0.0, fixes)["timestamp"] == 1.0
+        assert georef._nearest_gnss(100.0, fixes)["timestamp"] == 16.0
 
 
 # ---------------------------------------------------------------------------
