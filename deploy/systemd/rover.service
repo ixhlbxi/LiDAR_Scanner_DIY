@@ -46,6 +46,7 @@ NoNewPrivileges=true
 # /run/rover/ — atomic status.json (DEC-033 channel A) goes here.
 # /var/log/rover/ — future log destination if file logging is enabled.
 # /etc/rover/ — config + secret + mission tag file (Stage C convention).
+# /run/rover is also granted by RuntimeDirectory= below; kept here for clarity.
 ReadWritePaths=/run/rover /var/log/rover /etc/rover
 # systemd creates and owns these; StateDirectory is where sessions land by
 # default (config/default.toml output_dir). To write somewhere else, add a

@@ -21,6 +21,7 @@ User=root
 ProtectSystem=strict
 ProtectHome=true
 NoNewPrivileges=true
+# /run/rover is also granted by RuntimeDirectory= below; kept here for clarity.
 ReadWritePaths=/run/rover /var/log/rover /etc/rover
 # systemd creates and owns these; StateDirectory is where sessions land by
 # default (config/default.toml output_dir). To write somewhere else, add a

@@ -45,4 +45,7 @@ def test_install_sh_installs_configs_without_overwriting() -> None:
     assert 'if [[ ! -f "$ETC_DIR/telemetry-only.toml" ]]' in sh
     assert "rsync" in sh and "/opt/rover" in sh
     assert 'install -d -m 0755 "$RUN_DIR"' not in sh, "/run is tmpfs; RuntimeDirectory= owns it"
-    assert "rover-telemetry.service" in sh.split("=== Reload ===")[1], "both units restarted"
+    after_reload = sh.split("=== Reload ===")[1]
+    assert "rover-telemetry.service" in after_reload, "both units restarted"
+    assert "/var/lib/rover/data" in after_reload, "closing message names the scan folder"
+    assert "/var/lib/rover/bench" in after_reload, "closing message names the bench folder"
