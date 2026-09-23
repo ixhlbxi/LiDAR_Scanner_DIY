@@ -75,6 +75,16 @@ Changelog:
                          silently cleared an unresolved mid-session NTRIP
                          fatal after just one SCAN_ERROR publish (final
                          review I4).
+    0.12.0  2026-09-23  Sweep executed by rover.sweep.SweepPlanner (DEC-015
+                         amended): rest with the magnetometer on and IMU logged,
+                         scan steps to sweep_deg, rewind in <=45° chunks at
+                         rewind_rpm with nothing logged and SCAN_REWINDING
+                         published. Fixes the loop that stepped one direction
+                         forever and would wind every cable around the rod.
+                         Lidar records carry "sweep"; a sweep_start event ends
+                         each rest; metadata.json carries a "geometry" block.
+                         Teardown returns the mast home (no home switch exists)
+                         and records returned_home / return_home_failed.
 """
 
 from __future__ import annotations
@@ -94,9 +104,10 @@ from rover.gnss import GnssFix, GnssReceiver
 from rover.imu import ImuDriver
 from rover.lidar import LidarScan, LidarScanner
 from rover.logger import SessionLogger
-from rover.lora_protocol import SCAN_ERROR, SCAN_SCANNING
+from rover.lora_protocol import SCAN_ERROR, SCAN_REWINDING, SCAN_SCANNING
 from rover.ntrip import NtripClient
 from rover.stepper import StepperMotor
+from rover.sweep import SweepPlanner
 from rover.telemetry import TelemetryRouter, status_from_config
 from rover.watchdog import Watchdog
 
@@ -323,6 +334,60 @@ def _note_gate_trip(session_logger: SessionLogger, gate: _SensorGate, exc: BaseE
     )
 
 
+def _imu_record(batch: list) -> dict:
+    return {
+        "type": "imu",
+        "timestamp": batch[-1].timestamp,
+        "t": [s.timestamp for s in batch],
+        "accel": [list(s.accel) for s in batch],
+        "gyro": [list(s.gyro) for s in batch],
+        "mag": [list(s.mag) if s.mag is not None else None for s in batch],
+        "orientation": [list(s.orientation) for s in batch],
+    }
+
+
+def _return_home(sensors: _Sensors, config: RoverConfig, session_logger: SessionLogger) -> None:
+    """Rewind the mast to step 0 before the stepper is disabled.
+
+    There is no home switch (DEC-015, no slip ring): the next session calls
+    wherever the mast stands "step 0". Without this, every stop mid-sweep
+    would wind the cables a little further. Never raises — a failure is
+    logged and recorded so the operator knows to home the mast by hand.
+    """
+    stepper = sensors.stepper
+    if stepper is None or not stepper.available:
+        return
+    n = stepper.current_step
+    if n == 0:
+        return
+    if sensors.imu is not None and sensors.imu.available:
+        sensors.imu.enable_magnetometer(False)  # DEC-013
+    try:
+        stepper.step(-n, rpm=config.stepper.rewind_rpm)
+    except Exception as e:
+        logger.error(
+            "mast NOT home (%d steps out): %s — home it by hand before the next session", n, e
+        )
+        session_logger.write(
+            {
+                "type": "event",
+                "timestamp": time.time(),
+                "event": "return_home_failed",
+                "details": {"steps_from_home": stepper.current_step, "error": str(e)},
+            }
+        )
+        return
+    logger.info("mast returned home (%d steps)", n)
+    session_logger.write(
+        {
+            "type": "event",
+            "timestamp": time.time(),
+            "event": "returned_home",
+            "details": {"steps": n},
+        }
+    )
+
+
 def _scan_loop(
     config: RoverConfig,
     sensors: _Sensors,
@@ -369,6 +434,43 @@ def _scan_loop(
     gates = [lidar_gate, imu_gate, camera_gate, stepper_gate]
     ntrip_fatal_noted = False
 
+    planner: SweepPlanner | None = None
+    if sensors.stepper is not None and sensors.stepper.available and steps_per_increment > 0:
+        planner = SweepPlanner(config.stepper)
+
+    def _publish(st) -> None:
+        st.timestamp_epoch = time.time()
+        st.sensors_disabled = [g.name for g in gates if g.tripped]
+        st.logger_degraded = session_logger.degraded
+        nonlocal ntrip_fatal_noted
+        if ntrip_client is not None:
+            ntrip_stats = ntrip_client.stats
+            st.ntrip_connected = ntrip_stats.connected
+            st.ntrip_bytes_per_sec = ntrip_stats.bytes_received_this_sec
+            # A fatal rejection discovered after startup (e.g. the caster
+            # reboots into a bad auth state mid-session) is not grounds to
+            # abort — the data already logged is still valid — but it must
+            # be visible, once, rather than silently degrading to no RTCM.
+            if ntrip_client.fatal_error is not None and not ntrip_fatal_noted:
+                ntrip_fatal_noted = True
+                logger.error(
+                    "NTRIP fatal mid-session (continuing scan without RTK corrections): %s",
+                    ntrip_client.fatal_error,
+                )
+        # scan_state is derived from persistent conditions here rather than
+        # left as whatever the per-step logic above set: a tripped stepper
+        # gate or an NTRIP fatal error must keep publishing SCAN_ERROR even
+        # once the stepper resumes succeeding on a later iteration — the
+        # per-step logic on its own resets scan_state to SCAN_SCANNING on
+        # every healthy step, which previously erased an unresolved NTRIP
+        # fatal (that block above only logs it once) after a single
+        # SCAN_ERROR publish (final review I4).
+        if stepper_gate.tripped or (
+            ntrip_client is not None and ntrip_client.fatal_error is not None
+        ):
+            st.scan_state = SCAN_ERROR
+        telemetry.publish(st)
+
     while not stop_event.is_set():
         # Honor duration timeout for bench runs
         if duration_sec is not None and (time.monotonic() - started_monotonic) >= duration_sec:
@@ -381,19 +483,63 @@ def _scan_loop(
             except Exception:
                 pass
 
-        # --- Step + settle ---
+        # --- Sweep action (DEC-015 amended: rest → scan steps → rewind) ---
         stepped = False
         step_ok = True
-        if (
-            sensors.stepper is not None
-            and sensors.stepper.available
-            and steps_per_increment > 0
-            and not stepper_gate.tripped
-        ):
+        action = None
+        if planner is not None and not stepper_gate.tripped:
+            action = planner.next_action(sensors.stepper.current_step)
+
+        if action is not None and action.kind == "rest":
+            if sensors.imu is not None and sensors.imu.available:
+                sensors.imu.enable_magnetometer(config.imu.use_magnetometer)
+            stop_event.wait(action.seconds)
+            rest_batch: list = []
+            if sensors.imu is not None and sensors.imu.available and not imu_gate.tripped:
+                try:
+                    rest_batch = sensors.imu.drain()
+                    imu_gate.record_success()
+                except _SENSOR_ERRORS as e:
+                    if imu_gate.record_failure(e):
+                        _note_gate_trip(session_logger, imu_gate, e)
+            if rest_batch:
+                session_logger.write(_imu_record(rest_batch))
+            session_logger.write(
+                {
+                    "type": "event",
+                    "timestamp": time.time(),
+                    "event": "sweep_start",
+                    "details": {"sweep": planner.sweep_index, "rest_sec": action.seconds},
+                }
+            )
+            status.scan_state = SCAN_SCANNING
+            _publish(status)
+            continue
+
+        if action is not None and action.kind == "rewind":
             if sensors.imu is not None and sensors.imu.available:
                 sensors.imu.enable_magnetometer(False)  # DEC-013: stepper EMI
             try:
-                sensors.stepper.step(steps_per_increment)
+                sensors.stepper.step(action.steps, rpm=config.stepper.rewind_rpm)
+                stepper_gate.record_success()
+            except Exception as e:
+                if stepper_gate.record_failure(e):
+                    _note_gate_trip(session_logger, stepper_gate, e)
+                stop_event.wait(0.5)
+            if sensors.imu is not None and sensors.imu.available:
+                try:
+                    sensors.imu.drain()  # rewind samples are not scan data
+                except _SENSOR_ERRORS:
+                    pass
+            status.scan_state = SCAN_REWINDING
+            _publish(status)
+            continue
+
+        if action is not None:  # scan_step
+            if sensors.imu is not None and sensors.imu.available:
+                sensors.imu.enable_magnetometer(False)  # DEC-013: stepper EMI
+            try:
+                sensors.stepper.step(action.steps)
                 stepped = True
                 stepper_gate.record_success()
                 status.scan_state = SCAN_SCANNING
@@ -413,6 +559,7 @@ def _scan_loop(
             if sensors.stepper is not None and sensors.stepper.available
             else 0.0
         )
+        sweep_index = planner.sweep_index if planner is not None else 0
 
         # --- LiDAR ---
         lidar_scan: LidarScan | None = None
@@ -472,6 +619,7 @@ def _scan_loop(
                     "type": "lidar",
                     "timestamp": scan_wall_time if scan_wall_time is not None else now,
                     "step_index": step_index,
+                    "sweep": sweep_index,
                     "mast_angle_deg": mast_angle_deg,
                     "lidar_ms_start": lidar_scan.lidar_ms_start,
                     "lidar_ms_end": lidar_scan.lidar_ms_end,
@@ -481,17 +629,7 @@ def _scan_loop(
                 }
             )
         if imu_batch:
-            session_logger.write(
-                {
-                    "type": "imu",
-                    "timestamp": imu_batch[-1].timestamp,
-                    "t": [s.timestamp for s in imu_batch],
-                    "accel": [list(s.accel) for s in imu_batch],
-                    "gyro": [list(s.gyro) for s in imu_batch],
-                    "mag": [list(s.mag) if s.mag is not None else None for s in imu_batch],
-                    "orientation": [list(s.orientation) for s in imu_batch],
-                }
-            )
+            session_logger.write(_imu_record(imu_batch))
         if image_relpath is not None:
             session_logger.write(
                 {
@@ -537,36 +675,7 @@ def _scan_loop(
 
         # --- Telemetry publish (every iteration; TelemetryRouter applies its
         # own per-channel cadence — see rover.telemetry.TelemetryRouter) ---
-        status.timestamp_epoch = now
-        status.sensors_disabled = [g.name for g in gates if g.tripped]
-        status.logger_degraded = session_logger.degraded
-        if ntrip_client is not None:
-            ntrip_stats = ntrip_client.stats
-            status.ntrip_connected = ntrip_stats.connected
-            status.ntrip_bytes_per_sec = ntrip_stats.bytes_received_this_sec
-            # A fatal rejection discovered after startup (e.g. the caster
-            # reboots into a bad auth state mid-session) is not grounds to
-            # abort — the data already logged is still valid — but it must
-            # be visible, once, rather than silently degrading to no RTCM.
-            if ntrip_client.fatal_error is not None and not ntrip_fatal_noted:
-                ntrip_fatal_noted = True
-                logger.error(
-                    "NTRIP fatal mid-session (continuing scan without RTK corrections): %s",
-                    ntrip_client.fatal_error,
-                )
-        # scan_state is derived from persistent conditions here rather than
-        # left as whatever the per-step logic above set: a tripped stepper
-        # gate or an NTRIP fatal error must keep publishing SCAN_ERROR even
-        # once the stepper resumes succeeding on a later iteration — the
-        # per-step logic on its own resets scan_state to SCAN_SCANNING on
-        # every healthy step, which previously erased an unresolved NTRIP
-        # fatal (that block above only logs it once) after a single
-        # SCAN_ERROR publish (final review I4).
-        if stepper_gate.tripped or (
-            ntrip_client is not None and ntrip_client.fatal_error is not None
-        ):
-            status.scan_state = SCAN_ERROR
-        telemetry.publish(status)
+        _publish(status)
 
         step_index += 1
 
@@ -731,11 +840,19 @@ def run(
             except Exception as e:
                 logger.warning("TelemetryRouter stop failed: %s", e)
 
+        _return_home(sensors, config, session_logger)
         _stop_sensors(sensors)
 
         metadata: dict = {}
         if ntrip_client is not None:
             metadata["ntrip_stats"] = asdict(ntrip_client.stats)
+        metadata["geometry"] = {
+            "imu_mount": config.imu.mount,
+            "antenna_offset_m": config.calibration.antenna_offset_m,
+            "sweep_deg": config.stepper.sweep_deg,
+            "rewind_rpm": config.stepper.rewind_rpm,
+            "rest_before_sweep_sec": config.stepper.rest_before_sweep_sec,
+        }
 
         try:
             session_logger.stop(metadata=metadata)
