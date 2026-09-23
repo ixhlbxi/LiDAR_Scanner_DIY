@@ -66,6 +66,15 @@ Changelog:
                          guard is gone in favour of camera.py's own
                          picamera2 guard. The SIGTERM nested try and the
                          `# noqa: F821` are gone.
+    0.11.6  2026-09-23  _scan_loop's scan_state is now derived each
+                         iteration from persistent conditions (tripped
+                         stepper gate OR ntrip_client.fatal_error set)
+                         instead of being left as whatever the per-step
+                         success/failure logic set — a healthy step
+                         previously reset scan_state to SCAN_SCANNING and
+                         silently cleared an unresolved mid-session NTRIP
+                         fatal after just one SCAN_ERROR publish (final
+                         review I4).
 """
 
 from __future__ import annotations
@@ -541,11 +550,22 @@ def _scan_loop(
             # be visible, once, rather than silently degrading to no RTCM.
             if ntrip_client.fatal_error is not None and not ntrip_fatal_noted:
                 ntrip_fatal_noted = True
-                status.scan_state = SCAN_ERROR
                 logger.error(
                     "NTRIP fatal mid-session (continuing scan without RTK corrections): %s",
                     ntrip_client.fatal_error,
                 )
+        # scan_state is derived from persistent conditions here rather than
+        # left as whatever the per-step logic above set: a tripped stepper
+        # gate or an NTRIP fatal error must keep publishing SCAN_ERROR even
+        # once the stepper resumes succeeding on a later iteration — the
+        # per-step logic on its own resets scan_state to SCAN_SCANNING on
+        # every healthy step, which previously erased an unresolved NTRIP
+        # fatal (that block above only logs it once) after a single
+        # SCAN_ERROR publish (final review I4).
+        if stepper_gate.tripped or (
+            ntrip_client is not None and ntrip_client.fatal_error is not None
+        ):
+            status.scan_state = SCAN_ERROR
         telemetry.publish(status)
 
         step_index += 1

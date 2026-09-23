@@ -300,18 +300,29 @@ class TestStepperWithMockGPIO:
 
 
 def test_backend_detection_names_lgpio():
+    """The real rpi-lgpio 0.6 wheel installs at the SAME path as legacy
+    RPi.GPIO (RPi/GPIO/__init__.py) — both fixtures below use that identical
+    path, distinguished only by the `lgpio` attribute the real wheel's
+    module-level `import lgpio` leaves behind (final review C1)."""
     from rover import stepper
 
-    fake = type(
+    legacy = type(
         "G",
         (),
-        {"__file__": "/usr/lib/python3/dist-packages/RPi/_GPIO.cpython-311-aarch64-linux-gnu.so"},
+        {"__file__": "/usr/lib/python3/dist-packages/RPi/GPIO/__init__.py"},
     )()
-    assert stepper._detect_backend(fake) == "RPi.GPIO"
-    fake2 = type(
-        "G", (), {"__file__": "/usr/lib/python3/dist-packages/rpi_lgpio/RPi/GPIO/__init__.py"}
+    assert stepper._detect_backend(legacy) == "RPi.GPIO"
+
+    lgpio_module = type("LgpioModule", (), {})()
+    rpi_lgpio = type(
+        "G",
+        (),
+        {
+            "__file__": "/usr/lib/python3/dist-packages/RPi/GPIO/__init__.py",
+            "lgpio": lgpio_module,
+        },
     )()
-    assert stepper._detect_backend(fake2) == "rpi-lgpio"
+    assert stepper._detect_backend(rpi_lgpio) == "rpi-lgpio"
     assert stepper._detect_backend(None) == "none"
 
 

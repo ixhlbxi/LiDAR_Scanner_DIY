@@ -11,7 +11,8 @@ Two responsibilities, owned by GnssReceiver:
    has actually been parsed — constructing the UBXReader doesn't guarantee
    the F9P ever emits one. Once active, NAV-PVT is the sole position source;
    a GGA sentence arriving in the same session only contributes its
-   `rtk_age` to the latest NAV-PVT fix (see `_record_fix`). If NAV-PVT then
+   `rtk_age` and `hdop` to the latest NAV-PVT fix (see `_record_fix`) — NAV-PVT
+   itself has neither. If NAV-PVT then
    goes quiet for more than `_NAVPVT_STALE_SEC`, GGA resumes as the source
    (one warning logged) until NAV-PVT reappears. Without pyubx2, GGA is the
    only source there ever is. A GGA-carried `rtk_age` merged onto a NAV-PVT
@@ -62,6 +63,11 @@ Changelog:
                         _NAVPVT_STALE_SEC; a carried-forward rtk_age expires
                         after _RTK_AGE_VALID_SEC instead of freezing forever;
                         write_rtcm's serial-None check moved inside the lock.
+    0.11.2  2026-09-23  _record_fix's NAV-PVT-active branch now also merges
+                        the latest GGA hdop onto the published fix (NAV-PVT
+                        itself has no HDOP field) instead of leaking the
+                        99.9 placeholder into telemetry and build_gga
+                        (final review I1).
 """
 
 from __future__ import annotations
@@ -415,10 +421,16 @@ class GnssReceiver:
                     self._ubx_active = False
                     # Fall through — GGA is accepted as the source below.
                 else:
-                    # NAV-PVT is the position source; GGA only contributes the RTCM age.
-                    if self._latest is not None and fix.rtk_age >= 0:
-                        self._latest = dataclasses.replace(self._latest, rtk_age=fix.rtk_age)
-                        self._rtk_age_mono = time.monotonic()
+                    # NAV-PVT is the position source; GGA only contributes the
+                    # RTCM age and HDOP — NAV-PVT itself carries no HDOP (see
+                    # _fix_from_nav_pvt) and would otherwise leak its 99.9
+                    # placeholder into telemetry/build_gga forever (I1).
+                    if self._latest is not None:
+                        updates: dict[str, float] = {"hdop": fix.hdop}
+                        if fix.rtk_age >= 0:
+                            updates["rtk_age"] = fix.rtk_age
+                            self._rtk_age_mono = time.monotonic()
+                        self._latest = dataclasses.replace(self._latest, **updates)
                     return
             if (
                 source == "nav_pvt"
@@ -471,7 +483,9 @@ def _fix_from_nav_pvt(msg) -> GnssFix:  # noqa: ANN001 (pyubx2 type)
     re-shift any of these. `height` is ellipsoidal (WGS84); `hMSL` is
     orthometric — we use `height` so both fix sources agree on datum.
     NAV-PVT carries no HDOP, so `hdop` is always 99.9 here; `pdop` carries the
-    real DOP figure instead. fixType is 1=DR 2=2D 3=3D 4=GNSS+DR 5=time-only;
+    real DOP figure instead. `_record_fix` overwrites this placeholder from
+    the latest GGA sentence, if one has been seen, once this fix becomes the
+    published `_latest` (I1). fixType is 1=DR 2=2D 3=3D 4=GNSS+DR 5=time-only;
     combined with carrSoln we translate that pair back into our 0..5 enum.
     """
     fix_type_raw = getattr(msg, "fixType", 0)

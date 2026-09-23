@@ -30,8 +30,10 @@ Public API:
             latest fix, sent upstream as `$GPGGA` for VRS casters
     .start() / .stop() — stop() shuts down the live socket so a thread
         blocked in recv() doesn't outlive the caller
-    .fatal_error — str | None; set on 401/404 in the arm_group profile, after
-        which the background loop has exited (BASE_STATION_INTEGRATION.md §7)
+    .fatal_error — str | None; set on NtripFatalError (401, 404, or chunked
+        Transfer-Encoding) in the arm_group profile, after which the
+        background loop has exited (BASE_STATION_INTEGRATION.md §7) — every
+        other rejection (503, a handshake closed early, ...) just retries
     .stats — an NtripStats snapshot (dataclasses.replace); mutating the
         returned object never affects the client's own state
     .build_request(host, mountpoint, username, password, user_agent="...")
@@ -63,6 +65,19 @@ Changelog:
                          forwarded to the sink instead of silently dropped;
                          chunked transfer encoding is refused with a fatal
                          NtripError instead of being mis-forwarded as RTCM.
+    0.11.2  2026-09-23  NtripFatalError (a narrower NtripError subclass) now
+                         covers only 401/404/chunked; the arm_group latch in
+                         _run_loop checks isinstance against it instead of
+                         catching every NtripError, so a 503 or an
+                         early-closed handshake retries instead of aborting
+                         the session (final review I3). connect()'s
+                         _one_connection now bails immediately if _stop_event
+                         is already set right after publishing self._sock, so
+                         a stop() racing create_connection() can't leave the
+                         thread blocked in a header read (final review M3).
+                         build_gga's docstring corrected: the altitude field
+                         carries ellipsoidal height (GnssFix.alt), not MSL
+                         (final review M2).
 """
 
 from __future__ import annotations
@@ -124,10 +139,22 @@ class NtripStats:
 
 
 class NtripError(RuntimeError):
-    """Raised by the request-building / response-parsing helpers on a fatal error
-    (rejected mountpoint, auth failure). Reconnectable errors (TCP reset,
-    timeout) are not exposed via this exception type — those just trip the
-    backoff loop."""
+    """Raised by the request-building / response-parsing helpers on a caster
+    rejection. Covers both retryable rejections (503, a malformed status
+    line, a handshake closed early) and the fatal subset (NtripFatalError,
+    below). Reconnectable transport errors (TCP reset, timeout) are not
+    exposed via this exception type — those just trip the backoff loop."""
+
+
+class NtripFatalError(NtripError):
+    """Raised only for a caster response that will never succeed on retry:
+    HTTP 401 (bad credentials), HTTP 404 (mountpoint doesn't exist), or
+    chunked Transfer-Encoding (unsupported by design, not a transient
+    condition). Every other NtripError — 503, an unexpected non-200/401/404
+    status, a malformed status line, a handshake closed before any status
+    line arrived — is presumed transient and must NOT latch
+    NtripClient.fatal_error even in the arm_group profile; see
+    NtripClient._run_loop's dispatch on this type."""
 
 
 def build_request(
@@ -255,8 +282,13 @@ def build_gga(fix: GnssFix, when: time.struct_time | None = None) -> bytes:
     internal fix_type has FLOAT=4/FIX=5, but the GGA wire format we emit here
     uses the standard NMEA quality indicator (FIXED=4/FLOAT=5) — we're
     encoding back to the wire vocabulary, not echoing our internal enum.
-    Altitude is reported as MSL with a zero geoid separation (the F9P's own
-    sentence is not available here); casters use only lat/lon.
+    Altitude: GnssFix.alt is ellipsoidal height (WGS84), not MSL — gnss.py
+    normalises both NAV-PVT and GGA sources to that datum before they reach
+    GnssFix (see rover.gnss). It is placed directly in the GGA altitude
+    field with a geoid separation of 0.0 rather than being converted back to
+    MSL, since we have no orthometric height/geoid model here to convert
+    with. Casters consume $GPGGA for its lat/lon only, so this does not
+    matter in practice (final review M2).
     """
     if when is None:
         when = time.gmtime()
@@ -323,8 +355,10 @@ class NtripClient:
 
     @property
     def fatal_error(self) -> str | None:
-        """Set when the caster rejected us in a way that will not self-heal
-        (401/404) and the profile is arm_group; the loop has exited."""
+        """Set when the caster rejected us with an NtripFatalError (401, 404,
+        or chunked Transfer-Encoding — never on a transient rejection like
+        503 or an early-closed handshake) and the profile is arm_group; the
+        loop has exited."""
         return self._fatal_error
 
     def _resolve_password(self) -> str:
@@ -428,9 +462,14 @@ class NtripClient:
                 backoff = _BACKOFF_INITIAL_SEC
                 warned_fatal = False
             except NtripError as e:
-                # Fatal-per-attempt (auth, bad mountpoint).
+                # NtripError covers both retryable rejections (503, a
+                # handshake closed early) and the fatal subset
+                # (NtripFatalError: 401/404/chunked). Only the fatal subset
+                # latches fatal_error in arm_group — everything else falls
+                # through to the normal warn + backoff/retry path below
+                # (final review I3).
                 self._bump_error(str(e))
-                if self._profile == "arm_group":
+                if self._profile == "arm_group" and isinstance(e, NtripFatalError):
                     self._fatal_error = str(e)
                     logger.error("NTRIP fatal in arm_group profile — refusing to continue: %s", e)
                     self._publish_stats()
@@ -475,6 +514,22 @@ class NtripClient:
         sock.settimeout(_READ_TIMEOUT_SEC)
         self._sock = sock
 
+        if self._stop_event.is_set():
+            # stop() may have raced create_connection(): by the time it ran,
+            # self._sock was still None (or the previous connection's), so
+            # stop() had nothing of ITS to shut down, and this thread was
+            # about to proceed into a blocking header read that nothing will
+            # ever interrupt again (measured: the full 30 s _READ_TIMEOUT_SEC
+            # to time out, instead of returning promptly). Check again right
+            # here, immediately after publishing self._sock, and bail before
+            # the blocking read (final review M3).
+            try:
+                sock.close()
+            except OSError:
+                pass
+            self._sock = None
+            return
+
         try:
             request = build_request(
                 host=self._cfg.caster_host,
@@ -492,16 +547,20 @@ class NtripClient:
             head, _, tail = header_buf.partition(b"\r\n\r\n")
             code, reason = parse_response_status(head)
             if code == 401:
-                raise NtripError(
+                raise NtripFatalError(
                     f"caster rejected credentials (401) for mountpoint "
                     f"{self._cfg.mountpoint!r}; check ${self._cfg.password_env}"
                 )
             if code == 404:
-                raise NtripError(f"caster does not serve mountpoint {self._cfg.mountpoint!r} (404)")
+                raise NtripFatalError(
+                    f"caster does not serve mountpoint {self._cfg.mountpoint!r} (404)"
+                )
             if code != 200:
                 raise NtripError(f"caster returned HTTP {code} {reason!r}")
             if _is_chunked_transfer_encoding(head):
-                raise NtripError("caster uses chunked transfer encoding, which is not supported")
+                raise NtripFatalError(
+                    "caster uses chunked transfer encoding, which is not supported"
+                )
 
             with self._stats_lock:
                 self._stats.connected = True
@@ -642,6 +701,7 @@ __all__ = [
     "NtripClient",
     "NtripStats",
     "NtripError",
+    "NtripFatalError",
     "build_request",
     "build_gga",
     "parse_response_status",

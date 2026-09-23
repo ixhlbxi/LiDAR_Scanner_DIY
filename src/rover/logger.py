@@ -26,6 +26,10 @@ Changelog:
                         (S2-R4); stop() sets _stopping before cancelling the
                         timer so a racing _schedule_flush() cannot leave a
                         stray live Timer behind (S3-R4)
+    0.1.3  2026-09-23  _fsync_files() and _close_files() now both run under
+                        `_lock` so a periodic-flush fsync can no longer race
+                        stop()'s file close and raise on a closed fd (final
+                        review M4).
 """
 
 from __future__ import annotations
@@ -487,15 +491,35 @@ class SessionLogger:
         return None
 
     def _fsync_files(self) -> None:
-        for stream in (self._scan, self._gnss):
-            f = stream.file
-            if f is not None and not f.closed:
-                f.flush()
-                os.fsync(f.fileno())
+        """Flush and fsync every open stream.
+
+        Shares `_lock` with `_close_files()` (M4): without it, this method's
+        own not-closed check and its `os.fsync()` call are not atomic with
+        respect to a concurrent `_close_files()` — `stop()` calls
+        `_fsync_files()` then `_close_files()` back to back, but
+        `_periodic_flush()` (background timer thread) can call
+        `_fsync_files()` at the same moment, and the file could be closed
+        out from under it in the gap between the check and the syscall,
+        raising ValueError/OSError on a closed fd and marking a perfectly
+        clean stop() falsely degraded. Safe to add here: unlike the
+        drop-oldest path in `write()` (which must NEVER wait on this lock —
+        see its comment), nothing on that path calls `_fsync_files()` or
+        `_close_files()`, so this cannot introduce the stall S2-R4 avoids.
+        """
+        with self._lock:
+            for stream in (self._scan, self._gnss):
+                f = stream.file
+                if f is not None and not f.closed:
+                    f.flush()
+                    os.fsync(f.fileno())
 
     def _close_files(self) -> None:
-        """Close all open file handles."""
-        for stream in (self._scan, self._gnss):
-            if stream.file is not None and not stream.file.closed:
-                stream.file.close()
-            stream.file = None
+        """Close all open file handles.
+
+        Under `_lock` for the same reason as `_fsync_files()` above (M4).
+        """
+        with self._lock:
+            for stream in (self._scan, self._gnss):
+                if stream.file is not None and not stream.file.closed:
+                    stream.file.close()
+                stream.file = None

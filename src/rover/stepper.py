@@ -23,6 +23,11 @@ Dependencies:
 Changelog:
     0.1.0  2026-03-22  Stub
     0.2.0  2026-03-22  Full implementation
+    0.2.1  2026-09-23  _detect_backend() now keys off the `lgpio` module
+                        attribute instead of `__file__` path-sniffing — the
+                        real rpi-lgpio 0.6 wheel installs at the SAME path as
+                        legacy RPi.GPIO (RPi/GPIO/__init__.py) and the two
+                        were indistinguishable by path alone (final review C1).
 """
 
 from __future__ import annotations
@@ -40,11 +45,17 @@ os.environ.setdefault("LG_WD", "/tmp")
 
 
 def _detect_backend(gpio_module: object) -> str:
-    """'rpi-lgpio' (DEC-029 drop-in), 'RPi.GPIO' (legacy, broken on Bookworm), or 'none'."""
+    """'rpi-lgpio' (DEC-029 drop-in), 'RPi.GPIO' (legacy, broken on Bookworm), or 'none'.
+
+    The real rpi-lgpio 0.6 wheel installs at the SAME import path as legacy
+    RPi.GPIO (RPi/GPIO/__init__.py) and executes `import lgpio` at module
+    load time, so the resulting module object carries an `lgpio` attribute;
+    legacy RPi.GPIO does not. `__file__` path-sniffing cannot tell the two
+    apart — detect by that attribute instead (final review C1).
+    """
     if gpio_module is None:
         return "none"
-    path = (getattr(gpio_module, "__file__", "") or "").replace("\\", "/").lower()
-    return "rpi-lgpio" if "lgpio" in path else "RPi.GPIO"
+    return "rpi-lgpio" if getattr(gpio_module, "lgpio", None) is not None else "RPi.GPIO"
 
 
 try:

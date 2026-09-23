@@ -632,6 +632,53 @@ def test_lost_records_counted_on_flush_failure(fast_flush_cfg, monkeypatch):
     assert lg.lost_records == 3
 
 
+def test_fsync_does_not_race_close_files(cfg, monkeypatch):
+    """_fsync_files() and _close_files() must share `_lock` so they can never
+    interleave: without it, _close_files() could close `stream.file` between
+    _fsync_files()'s not-closed check and its `os.fsync()` call, raising
+    ValueError on the now-closed file and marking a perfectly clean stop()
+    falsely degraded (final review M4)."""
+    import os as os_mod
+
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.write({"type": "event", "event": "x"})
+    lg._flush()  # a real record on disk, so there is something to fsync
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_fsync = os_mod.fsync
+
+    def _pausing_fsync(fd):
+        entered.set()
+        release.wait(2)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os_mod, "fsync", _pausing_fsync)
+
+    fsync_thread = threading.Thread(target=lg._fsync_files)
+    fsync_thread.start()
+    assert entered.wait(2), "_fsync_files() never reached os.fsync()"
+
+    close_thread = threading.Thread(target=lg._close_files)
+    close_thread.start()
+    time.sleep(0.1)
+    assert close_thread.is_alive(), (
+        "_close_files() must block behind _lock until _fsync_files() finishes, not race it"
+    )
+
+    release.set()
+    fsync_thread.join(2)
+    close_thread.join(2)
+
+    assert not fsync_thread.is_alive()
+    assert not close_thread.is_alive()
+    assert lg._scan.file is None
+    assert lg._gnss.file is None
+    assert lg.degraded is False
+
+
 def test_write_does_not_block_behind_flush(cfg):
     """Drop-oldest must not wait on the flush lock (S2-R4)."""
     config, path = cfg

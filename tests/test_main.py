@@ -733,3 +733,127 @@ def test_scan_constants_come_from_lora_protocol():
     from rover import lora_protocol
 
     assert main_mod.SCAN_ERROR is lora_protocol.SCAN_ERROR
+
+
+# ---------------------------------------------------------------------------
+# Final review I4 — scan_state must persist through a mid-session NTRIP fatal
+# ---------------------------------------------------------------------------
+
+
+class _LateFatalNtrip:
+    """Fakes NtripClient: healthy through the startup grace check, then
+    fatal_error flips non-None partway through the scan loop — a caster
+    rejection discovered mid-session, not at connect time."""
+
+    def __init__(self, config, rtcm_sink=None, gga_source=None) -> None:
+        from rover.ntrip import NtripStats
+
+        self.stats = NtripStats(connected=True)
+        self._go_fatal_at: float | None = None
+
+    def start(self) -> None:
+        self._go_fatal_at = time.monotonic() + 0.35
+
+    def stop(self) -> None:
+        pass
+
+    @property
+    def fatal_error(self):
+        if self._go_fatal_at is not None and time.monotonic() >= self._go_fatal_at:
+            return "401 Unauthorized (simulated mid-session)"
+        return None
+
+
+class _FakeGnssMinimal:
+    def __init__(self, *_a, **_kw) -> None: ...
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def latest_fix(self):
+        return None
+
+    def write_rtcm(self, b) -> None: ...
+
+
+def test_scan_state_persists_through_mid_session_ntrip_fatal(tmp_path: Path, monkeypatch) -> None:
+    """scan_state must be derived each iteration from persistent conditions
+    (tripped stepper gate OR an NTRIP fatal error), not left as whatever the
+    per-step logic set: previously, once the stepper resumed succeeding, the
+    next healthy step reset scan_state to SCAN_SCANNING and silently cleared
+    an unresolved NTRIP fatal that had only been logged once (final review
+    I4)."""
+    monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
+    monkeypatch.setattr(main_mod, "GnssReceiver", _FakeGnssMinimal)
+    monkeypatch.setattr(main_mod, "NtripClient", _LateFatalNtrip)
+    monkeypatch.setattr(main_mod, "_NTRIP_FATAL_GRACE_SEC", 0.02)
+
+    published: list = []
+    real_router = main_mod.TelemetryRouter
+
+    class _SpyRouter(real_router):
+        def publish(self, status):
+            published.append(status.scan_state)
+            return super().publish(status)
+
+    monkeypatch.setattr(main_mod, "TelemetryRouter", _SpyRouter)
+
+    cfg = tmp_path / "i4.toml"
+    cfg.write_text(
+        f"""
+[stepper]
+enabled = true
+steps_per_rev = 3200
+step_interval_deg = 1.125
+
+[lidar]
+enabled = false
+[imu]
+enabled = false
+[camera]
+enabled = false
+
+[gnss]
+enabled = true
+
+[ntrip]
+enabled = true
+client_location = "pi"
+caster_host = "127.0.0.1"
+caster_port = 1
+mountpoint = "ARM_BASE"
+
+[lora]
+enabled = false
+role = "disabled"
+
+[base_station_integration]
+enabled = false
+
+[telemetry]
+http_enabled = false
+
+[watchdog]
+enabled = false
+
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "i4"
+"""
+    )
+
+    exit_code = main_mod.run(config_path=cfg, duration_sec=1.3)
+    assert exit_code == 0  # a mid-session fatal does not abort the run
+
+    assert main_mod.SCAN_ERROR in published, f"SCAN_ERROR must be published: {published}"
+    first_error_idx = published.index(main_mod.SCAN_ERROR)
+    tail = published[first_error_idx:]
+    assert len(tail) >= 3, f"expected SCAN_ERROR to persist across several iterations: {published}"
+    assert all(s == main_mod.SCAN_ERROR for s in tail), (
+        f"a healthy step must not clear an unresolved NTRIP fatal: {published}"
+    )

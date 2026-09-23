@@ -212,6 +212,29 @@ class TestStage4Gnss:
         assert latest.lat == 40.0 and latest.alt == 5.0  # GGA did not replace the NAV-PVT fix
         assert latest.rtk_age == 2.5  # but its RTCM age was merged
 
+    def test_nav_pvt_active_merges_gga_hdop(self):
+        """NAV-PVT carries no HDOP of its own (always 99.9 — see
+        _fix_from_nav_pvt); while NAV-PVT is the active source, a GGA
+        sentence must still merge its HDOP onto the published fix, the same
+        way it already merges rtk_age (final review I1)."""
+        from rover.gnss import GnssReceiver
+
+        r = GnssReceiver.__new__(GnssReceiver)
+        r._lock = __import__("threading").Lock()
+        r._latest = None
+        r._ubx_active = True
+        r._last_navpvt_mono = time.monotonic()  # fresh — not stale
+        r._rtk_age_mono = 0.0
+        nav = GnssFix(timestamp=1.0, fix_type=5, lat=40.0, lon=-75.0, alt=5.0, pdop=1.1)
+        r._record_fix(nav, source="nav_pvt")
+        assert r.latest_fix().hdop == 99.9  # NAV-PVT's own placeholder, unmerged so far
+
+        gga = GnssFix(timestamp=1.2, fix_type=5, lat=41.0, lon=-76.0, alt=99.0, hdop=0.8)
+        r._record_fix(gga, source="gga")
+        latest = r.latest_fix()
+        assert latest.lat == 40.0  # still the NAV-PVT position
+        assert latest.hdop == 0.8  # but HDOP came from GGA
+
     def test_gga_is_source_without_ubx(self):
         from rover.gnss import GnssReceiver
 

@@ -227,6 +227,109 @@ class TestFatalErrors:
         c.stop()
         assert time.monotonic() - t0 < 2.0, "stop() must not wait out the 30 s read timeout"
 
+    def test_404_in_arm_group_sets_fatal_and_stops(self, tmp_path):
+        """404 (mountpoint doesn't exist) never succeeds on retry — one of the
+        three NtripFatalError cases, same as 401 (final review I3)."""
+        caster = _FakeCaster(b"HTTP/1.1 404 Not Found\r\n\r\n")
+        c = _client(_cfg(tmp_path, "arm_group"), caster)
+        c.start()
+        deadline = time.monotonic() + 3
+        while c.fatal_error is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        try:
+            assert c.fatal_error is not None and "404" in c.fatal_error
+            assert not c._thread.is_alive()
+        finally:
+            c.stop()
+
+    def test_503_in_arm_group_is_not_fatal(self, tmp_path):
+        """A 503 is a transient caster rejection (not one of 401/404/chunked)
+        — even in arm_group it must go through the normal retry path, not
+        latch fatal_error (final review I3)."""
+        caster = _FakeCaster(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+        c = _client(_cfg(tmp_path, "arm_group"), caster)
+        c.start()
+        time.sleep(0.5)
+        try:
+            assert c.fatal_error is None
+            assert c.stats.error_count >= 1
+        finally:
+            c.stop()
+
+    def test_handshake_closed_in_arm_group_is_not_fatal(self, tmp_path):
+        """A caster that accepts then closes before sending a status line is
+        a transient handshake failure, not one of the three fatal cases —
+        even in arm_group it must retry rather than latch (final review I3)."""
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+
+        def _serve():
+            conn, _ = srv.accept()
+            conn.recv(4096)  # consume the request, then close gracefully —
+            conn.close()  # a graceful FIN gives recv() a clean EOF (b""),
+            srv.close()  # not a reset, so this hits the NtripError path
+
+        threading.Thread(target=_serve, daemon=True).start()
+
+        cfg = _cfg(tmp_path, "arm_group")
+        cfg = replace(cfg, ntrip=replace(cfg.ntrip, caster_port=port))
+        c = NtripClient(cfg, rtcm_sink=lambda b: None)
+        c.start()
+        time.sleep(0.5)
+        try:
+            assert c.fatal_error is None
+            assert c.stats.error_count >= 1
+        finally:
+            c.stop()
+
+
+class TestConnectStopRace:
+    def test_stop_set_before_connect_closes_socket_without_blocking(self, tmp_path):
+        """A stop() landing between create_connection() and the header read
+        must not leave the thread blocked in a blocking recv() that nothing
+        will ever interrupt again (M3). Deterministic reproduction: the
+        guard added right after `self._sock = sock` is published checks
+        `self._stop_event` — that check behaves identically whether the
+        event was set microseconds ago (the real race) or well before
+        _one_connection() was even called, so setting it up front exercises
+        the same code path without needing to win a real timing race.
+        """
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        accepted: list[socket.socket] = []
+
+        def _serve():
+            try:
+                conn, _ = srv.accept()
+                accepted.append(conn)
+            except OSError:
+                pass
+
+        threading.Thread(target=_serve, daemon=True).start()
+
+        cfg = _cfg(tmp_path)
+        cfg = replace(cfg, ntrip=replace(cfg.ntrip, caster_port=port))
+        c = NtripClient(cfg, rtcm_sink=lambda b: None)
+        c._stop_event.set()
+
+        t0 = time.monotonic()
+        c._one_connection()  # must return promptly, not block in a header read
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 1.0, "must not block in a header read after a raced stop()"
+        assert c._sock is None
+
+        srv.close()
+        for conn in accepted:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
 
 # ---------------------------------------------------------------------------
 # GGA upload, header-tail forwarding, chunked-encoding refusal
