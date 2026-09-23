@@ -401,20 +401,20 @@ class GnssReceiver:
 def _fix_from_nav_pvt(msg) -> GnssFix:  # noqa: ANN001 (pyubx2 type)
     """Convert a pyubx2 NAV-PVT message to a GnssFix.
 
-    NAV-PVT carries lat/lon as 1e-7 deg, height as mm, ground speed as mm/s,
-    plus a fix-type byte (1=DR 2=2D 3=3D 4=GNSS+DR 5=time-only) and a flags
-    byte with carrSoln in bits 6-7 (0=none 1=float 2=fix). We translate that
-    pair back into our 0..5 enum.
+    pyubx2 (default `scaling=True`) already delivers `lat`/`lon` in degrees,
+    `hMSL` in mm, `pDOP` scaled, and expands the flags byte into its own
+    `carrSoln` attribute (0=none 1=float 2=fix) — do not re-divide or re-shift
+    any of these. fixType is 1=DR 2=2D 3=3D 4=GNSS+DR 5=time-only; combined
+    with carrSoln we translate that pair back into our 0..5 enum.
     """
     fix_type_raw = getattr(msg, "fixType", 0)
-    flags = getattr(msg, "flags", 0)
-    carr_soln = (flags >> 6) & 0x3
+    carr_soln = getattr(msg, "carrSoln", 0)
 
     fix_type = 0
     if fix_type_raw == 2:
         fix_type = 1  # 2D
-    elif fix_type_raw == 3:
-        fix_type = 2  # 3D
+    elif fix_type_raw in (3, 4):
+        fix_type = 2  # 3D (4 = GNSS + dead reckoning)
     if carr_soln == 1:
         fix_type = 4  # FLOAT
     elif carr_soln == 2:
@@ -423,12 +423,12 @@ def _fix_from_nav_pvt(msg) -> GnssFix:  # noqa: ANN001 (pyubx2 type)
     return GnssFix(
         timestamp=time.time(),
         fix_type=fix_type,
-        lat=getattr(msg, "lat", 0) / 1e7,
-        lon=getattr(msg, "lon", 0) / 1e7,
-        alt=getattr(msg, "height", 0) / 1000.0,
-        hdop=getattr(msg, "pDOP", 99.9) / 100.0,
+        lat=float(getattr(msg, "lat", 0.0)),
+        lon=float(getattr(msg, "lon", 0.0)),
+        alt=float(getattr(msg, "hMSL", 0)) / 1000.0,
+        hdop=float(getattr(msg, "pDOP", 99.9)),  # pDOP, labelled properly in stage 4
         vdop=99.9,  # NAV-PVT doesn't break out vDOP
-        sat_count=getattr(msg, "numSV", 0),
+        sat_count=int(getattr(msg, "numSV", 0)),
         rtk_age=-1.0,  # NAV-PVT iTOW differs from RTCM age; left as unknown here
     )
 

@@ -24,6 +24,7 @@ pi = [
 dev = [
     "pytest",
     "ruff>=0.16,<0.17",
+    "pyubx2",
 ]
 # Post-processing / CRS-aware export (DEC-034, Phase E)
 post = [
