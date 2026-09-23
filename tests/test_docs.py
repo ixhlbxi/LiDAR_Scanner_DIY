@@ -77,6 +77,27 @@ EXEMPT: dict[str, set[str]] = {}
 
 REQUIRED: dict[str, list[tuple[str, int]]] = {}
 
+# --- Task 2: CLAUDE.md ---
+ENFORCED.add("CLAUDE.md")
+REQUIRED["CLAUDE.md"] = [
+    (r"sweep\.py", 1),
+    (r"lora_protocol\.py", 1),
+    (r"_io\.py", 1),
+    (r"pygeomag", 1),
+    (r"python -m ruff format", 1),
+    (r"/dev/rover-f9p", 1),
+    (r"\[imu\]\.mount", 1),
+    (r"antenna_offset_m", 1),
+    (r"DEC-035", 2),
+    (r"V2_SLAM_CONCEPT\.md", 1),
+    (r"test_docs\.py", 1),
+    (r"(?i)never share a base session", 1),
+]
+FORBIDDEN_BY_FILE["CLAUDE.md"] = [
+    (r"Phase C", "stale phase label"),
+    (r"(?i)overhaul in progress", "stale"),
+]
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
