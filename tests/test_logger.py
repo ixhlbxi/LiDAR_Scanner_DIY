@@ -183,9 +183,11 @@ class TestJSONLWriting:
             assert len(gnss_lines) == 1
             assert json.loads(gnss_lines[0])["type"] == "gnss"
 
-            # Should also appear in scan.jsonl (all records go there)
-            scan_lines = (session_dir / "scan.jsonl").read_text().strip().split("\n")
-            assert len(scan_lines) == 1
+            # Must NOT be mirrored into scan.jsonl (T1-053) — gnss*.jsonl is
+            # now the sole source of GNSS records; inverted from the old
+            # stage-2 expectation that every record landed in both files.
+            scan_content = (session_dir / "scan.jsonl").read_text().strip()
+            assert scan_content == ""
         finally:
             lg.stop()
 
@@ -562,8 +564,8 @@ def test_stop_closes_files_when_metadata_write_fails(cfg, monkeypatch):
     lg.stop()  # must not raise
 
     assert lg.degraded is True
-    assert lg._scan_file is None or lg._scan_file.closed
-    assert lg._gnss_file is None or lg._gnss_file.closed
+    assert lg._scan.file is None or lg._scan.file.closed
+    assert lg._gnss.file is None or lg._gnss.file.closed
 
 
 def test_write_drop_only_counts_real_drops(cfg, monkeypatch):
@@ -596,3 +598,71 @@ def test_write_drop_only_counts_real_drops(cfg, monkeypatch):
         assert lg._queue.get_nowait()["event"] == "raced"
     finally:
         lg.stop()
+
+
+# ---------------------------------------------------------------------------
+# Task 9 — single GNSS stream, generic rotation, counted losses, unblocked
+# producer (T1-053, S2-R4, S3-R4)
+# ---------------------------------------------------------------------------
+
+
+def test_gnss_records_only_in_gnss_file(cfg):
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.write({"type": "gnss", "lat": 1.0})
+    lg.write({"type": "lidar", "angle": []})
+    lg.stop()
+    scan = (lg.session_dir / "scan.jsonl").read_text()
+    gnss = (lg.session_dir / "gnss.jsonl").read_text()
+    assert '"gnss"' not in scan and '"gnss"' in gnss
+
+
+def test_lost_records_counted_on_flush_failure(fast_flush_cfg, monkeypatch):
+    config, path = fast_flush_cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    monkeypatch.setattr(lg, "_write_record", lambda r: (_ for _ in ()).throw(OSError(28, "full")))
+    for i in range(3):
+        lg.write({"type": "event", "i": i})
+    deadline = time.monotonic() + 3
+    while lg.lost_records < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    lg.stop()
+    assert lg.lost_records == 3
+
+
+def test_write_does_not_block_behind_flush(cfg):
+    """Drop-oldest must not wait on the flush lock (S2-R4)."""
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    from rover import logger as logger_mod
+
+    for i in range(logger_mod._QUEUE_MAX):
+        lg.write({"type": "event", "i": i})
+    lg._lock.acquire()  # simulate a flush stalled on disk
+    try:
+        t0 = time.monotonic()
+        lg.write({"type": "event", "i": -1})
+        assert time.monotonic() - t0 < 0.5
+        assert lg.dropped_records == 1
+    finally:
+        lg._lock.release()
+        lg.stop()
+
+
+def test_stop_leaves_no_live_timer(cfg):
+    """S3-R4: stop() must not race a concurrently-rescheduled flush Timer,
+    leaving one stray live Timer behind after stop() returns."""
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.write({"type": "event", "i": 0})
+    lg.stop()
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        if lg._flush_timer is None or not lg._flush_timer.is_alive():
+            break
+        time.sleep(0.01)
+    assert lg._flush_timer is None or not lg._flush_timer.is_alive()

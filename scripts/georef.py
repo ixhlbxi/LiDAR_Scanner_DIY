@@ -48,6 +48,11 @@ Dependencies: numpy (required); laspy + pyproj (optional, install via `[post]`
 extra).
 
 Changelog:
+    0.13.0  2026-09-23  load_session() reads gnss*.jsonl unconditionally (the
+                        logger no longer mirrors GNSS into scan*.jsonl,
+                        T1-053) and merges it with any legacy GNSS records
+                        still embedded in scan segments, de-duplicating
+                        consecutive same-timestamp records after sorting.
     0.12.0  2026-09-23  project_to_crs() returns (xyz, epsg_to_embed) so a LAS
                         file never carries a CRS its coordinates aren't
                         actually in (no GNSS fix, geographic target, or a
@@ -237,14 +242,27 @@ def load_session(session_dir: Path) -> SessionData:
         elif t == "gnss":
             gnss.append(rec)
 
-    # gnss records are mirrored into scan.jsonl by the logger; dedicated gnss*
-    # segments are supplemental (e.g. a rotated segment whose mirror in
-    # scan.jsonl was itself rotated away) rather than a strict either/or —
-    # de-duplication across the two sources is deferred (stage 4).
+    # gnss*.jsonl is the unconditional GNSS source (T1-053: the logger no
+    # longer mirrors GNSS records into scan*.jsonl). Records picked up above
+    # from scan segments are legacy support only — pre-T1-053 sessions (or a
+    # rotated gnss segment whose scan-mirror wasn't itself rotated away)
+    # still carry "type": "gnss" records there. Merge both sources, sort by
+    # timestamp, and de-duplicate consecutive same-timestamp records (keep
+    # the first) so a legacy session mirrored in both places isn't double
+    # counted.
     gnss_files = _segment_files(session_dir, "gnss")
-    if gnss_files:
-        extra = [r for r in _iter_jsonl(gnss_files) if r.get("type") == "gnss"]
-        gnss = gnss + extra if gnss else extra
+    gnss.extend(r for r in _iter_jsonl(gnss_files) if r.get("type") == "gnss")
+
+    gnss.sort(key=lambda r: r.get("timestamp", 0.0))
+    deduped_gnss: list[dict] = []
+    prev_ts = None
+    for rec in gnss:
+        ts = rec.get("timestamp")
+        if deduped_gnss and ts == prev_ts:
+            continue
+        deduped_gnss.append(rec)
+        prev_ts = ts
+    gnss = deduped_gnss
 
     logger.info(
         "Loaded session: %d lidar, %d imu, %d gnss records across %d scan segment(s)",

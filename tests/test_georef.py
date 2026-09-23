@@ -156,6 +156,28 @@ class TestLoadSession:
         assert [r["step_index"] for r in data.lidar_records] == [0, 1, 2]
         assert [r["timestamp"] for r in data.gnss_records] == [100.05, 250.0]
 
+    def test_load_session_dedupes_gnss_records_with_same_timestamp(self, tmp_path):
+        """T1-053: gnss*.jsonl is now the unconditional GNSS source, merged
+        with any legacy GNSS records still embedded in scan*.jsonl (pre-T1-053
+        sessions). A record mirrored in both places at the same timestamp
+        must be counted once, not twice."""
+        sess = _make_session(tmp_path)  # scan.jsonl embeds one gnss record @ 100.05
+        (sess / "gnss.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "gnss",
+                    "timestamp": 100.05,
+                    "fix_type": 5,
+                    "lat": 40.7128,
+                    "lon": -74.0060,
+                    "alt": 10.0,
+                }
+            )
+            + "\n"
+        )
+        data = georef.load_session(sess)
+        assert [r["timestamp"] for r in data.gnss_records] == [100.05]
+
 
 # ---------------------------------------------------------------------------
 # Quaternion + orientation_at
