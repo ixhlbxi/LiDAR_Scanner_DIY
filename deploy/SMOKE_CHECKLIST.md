@@ -9,7 +9,8 @@ Each line is pass/fail. Record the outcome and date in the audit report row name
    → `active`. Then `journalctl -u rover-telemetry -n 20` shows `Watchdog started` or
    `Watchdog disabled by config` and NO `start operation timed out`. (T1-002)
 3. `cat /run/rover/status.json` → JSON with `schema_version`. (RuntimeDirectory, T2-003)
-4. `ls /var/lib/rover/data/` → one session directory. (StateDirectory, T2-001)
+4. `ls /var/lib/rover/bench/` → one session directory (telemetry-only logs to its own
+   `bench` folder, separate from `rover.service`'s `/var/lib/rover/data`). (StateDirectory, T2-001)
 5. `sudo systemctl stop rover-telemetry` returns within 10 s and the session has
    `metadata.json`. (T1-029)
 6. `sudo systemctl start rover` with the stepper connected → journal shows no
