@@ -78,7 +78,7 @@ role = "rtcm_rx+status_tx"        # "rtcm_rx+status_tx" | "status_tx_only" | "di
 [base_station_integration]        # DEC-033 channel A
 enabled = false                   # true in arm_group profile
 status_json_path = "/run/rover/status.json"
-status_schema_version = 1
+status_schema_version = 0  # 0 = use the code constant (STATUS_SCHEMA_VERSION)
 publish_interval_sec = 1.0
 
 [telemetry]                       # DEC-033 channel B

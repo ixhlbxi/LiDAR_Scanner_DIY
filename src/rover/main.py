@@ -47,6 +47,13 @@ Changelog:
     0.11.3  2026-09-23  NtripClient now gets gga_source=sensors.gnss.latest_fix
                          so VRS-style casters that require periodic $GPGGA
                          uploads receive them.
+    0.11.4  2026-09-23  telemetry.publish(status) now called every loop
+                         iteration instead of self-cadenced here — schema v2's
+                         TelemetryRouter applies its own per-channel cadence
+                         (T1-025/T1-030); status.pdop fed from GnssFix.pdop;
+                         status.sensors_disabled/logger_degraded fed from the
+                         sensor gates / SessionLogger.degraded each iteration
+                         (S2-R2).
 """
 
 from __future__ import annotations
@@ -331,13 +338,14 @@ def _scan_loop(
 
     The loop is robust to all-sensors-disabled — in that case it idles on a
     1Hz heartbeat + telemetry publish. That's the bench/test mode.
+
+    telemetry.publish(status) is called once per iteration; TelemetryRouter
+    itself decides, per channel, whether enough time has passed to actually
+    send (schema v2 per-channel cadence — see rover.telemetry).
     """
     status = status_from_config(config)
     status.scan_state = SCAN_SCANNING
 
-    # Cadence bookkeeping
-    publish_interval = config.base_station_integration.publish_interval_sec or 1.0
-    last_publish = 0.0
     last_logged_fix_ts: float = -1.0
 
     # Steps-per-increment derived from stepper geometry
@@ -356,6 +364,10 @@ def _scan_loop(
     lidar_gate = _SensorGate("lidar")
     imu_gate = _SensorGate("imu")
     camera_gate = _SensorGate("camera")
+    # Local list (not individual names) so a later gate — e.g. Task 6's
+    # stepper_gate — can be appended here without touching the
+    # sensors_disabled computation below.
+    gates = [lidar_gate, imu_gate, camera_gate]
     ntrip_fatal_noted = False
 
     while not stop_event.is_set():
@@ -501,32 +513,33 @@ def _scan_loop(
             status.fix_type = gnss_fix.fix_type
             status.sat_count = gnss_fix.sat_count
             status.hdop = gnss_fix.hdop
+            status.pdop = gnss_fix.pdop
             status.lat = gnss_fix.lat
             status.lon = gnss_fix.lon
             status.alt_m = gnss_fix.alt
             status.rtk_age_s = gnss_fix.rtk_age
 
-        # --- Telemetry publish (cadenced) ---
-        now_monotonic = time.monotonic()
-        if now_monotonic - last_publish >= publish_interval:
-            status.timestamp_epoch = now
-            if ntrip_client is not None:
-                ntrip_stats = ntrip_client.stats
-                status.ntrip_connected = ntrip_stats.connected
-                status.ntrip_bytes_per_sec = ntrip_stats.bytes_received_this_sec
-                # A fatal rejection discovered after startup (e.g. the caster
-                # reboots into a bad auth state mid-session) is not grounds to
-                # abort — the data already logged is still valid — but it must
-                # be visible, once, rather than silently degrading to no RTCM.
-                if ntrip_client.fatal_error is not None and not ntrip_fatal_noted:
-                    ntrip_fatal_noted = True
-                    status.scan_state = SCAN_ERROR
-                    logger.error(
-                        "NTRIP fatal mid-session (continuing scan without RTK corrections): %s",
-                        ntrip_client.fatal_error,
-                    )
-            telemetry.publish(status)
-            last_publish = now_monotonic
+        # --- Telemetry publish (every iteration; TelemetryRouter applies its
+        # own per-channel cadence — see rover.telemetry.TelemetryRouter) ---
+        status.timestamp_epoch = now
+        status.sensors_disabled = [g.name for g in gates if g.tripped]
+        status.logger_degraded = session_logger.degraded
+        if ntrip_client is not None:
+            ntrip_stats = ntrip_client.stats
+            status.ntrip_connected = ntrip_stats.connected
+            status.ntrip_bytes_per_sec = ntrip_stats.bytes_received_this_sec
+            # A fatal rejection discovered after startup (e.g. the caster
+            # reboots into a bad auth state mid-session) is not grounds to
+            # abort — the data already logged is still valid — but it must
+            # be visible, once, rather than silently degrading to no RTCM.
+            if ntrip_client.fatal_error is not None and not ntrip_fatal_noted:
+                ntrip_fatal_noted = True
+                status.scan_state = SCAN_ERROR
+                logger.error(
+                    "NTRIP fatal mid-session (continuing scan without RTK corrections): %s",
+                    ntrip_client.fatal_error,
+                )
+        telemetry.publish(status)
 
         step_index += 1
 

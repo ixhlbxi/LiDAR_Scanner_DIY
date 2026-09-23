@@ -20,6 +20,10 @@ Changelog:
     0.1.1  2026-09-23  mag_offset rejects bool/non-finite values; step_interval_deg
                         error names both integer-multiple neighbours instead of
                         rounding (which could suggest 0)
+    0.1.2  2026-09-23  base_station_integration.status_schema_version default
+                        changed 1 -> 0 ("0 = use the code constant") and its
+                        validation loosened from "must be positive" to ">= 0"
+                        (telemetry schema v2, T1-030).
 """
 
 from __future__ import annotations
@@ -290,7 +294,7 @@ _DEFAULTS: dict = {
     "base_station_integration": {
         "enabled": False,
         "status_json_path": "/run/rover/status.json",
-        "status_schema_version": 1,
+        "status_schema_version": 0,  # 0 = use the code constant (telemetry.STATUS_SCHEMA_VERSION)
         "publish_interval_sec": 1.0,
     },
     "telemetry": {
@@ -572,9 +576,11 @@ def _validate(raw: dict) -> None:
     _require_type(
         "base_station_integration", "status_schema_version", bsi["status_schema_version"], int
     )
-    _require_positive(
-        "base_station_integration", "status_schema_version", bsi["status_schema_version"]
-    )
+    if bsi["status_schema_version"] < 0:
+        raise ValueError(
+            "[base_station_integration] status_schema_version: must be >= 0 "
+            f"(0 = use the code constant), got {bsi['status_schema_version']}"
+        )
     _require_type(
         "base_station_integration",
         "publish_interval_sec",

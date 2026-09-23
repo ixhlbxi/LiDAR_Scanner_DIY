@@ -312,14 +312,26 @@ class TestBaseStationIntegration:
         cfg = load_config()
         assert isinstance(cfg.base_station_integration, BaseStationIntegrationConfig)
         assert cfg.base_station_integration.enabled is False
-        assert cfg.base_station_integration.status_schema_version == 1
+        # 0 = "use the code constant" (telemetry.STATUS_SCHEMA_VERSION) — schema v2.
+        assert cfg.base_station_integration.status_schema_version == 0
         assert cfg.base_station_integration.publish_interval_sec == 1.0
+
+    def test_schema_version_zero_is_valid(self, tmp_toml):
+        """0 means "use the code constant" — it is the default, not an error."""
+        p = tmp_toml(
+            """
+            [base_station_integration]
+            status_schema_version = 0
+            """
+        )
+        cfg = load_config(p)
+        assert cfg.base_station_integration.status_schema_version == 0
 
     def test_negative_schema_version(self, tmp_toml):
         p = tmp_toml(
             """
             [base_station_integration]
-            status_schema_version = 0
+            status_schema_version = -1
             """
         )
         with pytest.raises(ValueError, match="status_schema_version"):

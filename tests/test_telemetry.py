@@ -14,12 +14,14 @@ import pytest
 
 from rover.config import load_config
 from rover.telemetry import (
+    STATUS_SCHEMA_VERSION,
     LocalHttpPublisher,
     LoRaPublisher,
     RoverStatus,
     StatusJsonPublisher,
     TelemetryRouter,
     atomic_write_json,
+    build_payload,
     status_from_config,
 )
 
@@ -99,7 +101,12 @@ class TestStatusJsonPublisher:
         assert status_path.exists()
 
     def test_payload_shape_matches_contract(self, tmp_toml, tmp_path):
-        """Schema required by docs/BASE_STATION_INTEGRATION.md §3.1."""
+        """Schema required by docs/BASE_STATION_INTEGRATION.md §3.1 (schema v2).
+
+        battery_mv is measured on this status, so it's present; lora_link_rssi
+        and lora_link_snr are never set here, so v2 omits them entirely
+        instead of carrying a fake -128 placeholder (S2-R2).
+        """
         status_path = tmp_path / "rover_status.json"
         cfg = self._make_cfg(tmp_toml, status_path)
         pub = StatusJsonPublisher(cfg)
@@ -126,24 +133,41 @@ class TestStatusJsonPublisher:
             "fix_type",
             "sat_count",
             "hdop",
+            "pdop",
             "lat",
             "lon",
             "alt_m",
             "rtk_age_s",
             "battery_mv",
-            "lora_link_rssi",
-            "lora_link_snr",
             "ntrip_connected",
             "ntrip_bytes_per_sec",
+            "sensors_disabled",
+            "logger_degraded",
         }
         assert required.issubset(set(payload.keys()))
+        assert "lora_link_rssi" not in payload
+        assert "lora_link_snr" not in payload
 
     def test_schema_version_from_config(self, tmp_toml, tmp_path):
+        """A non-zero override in config flows through to the payload verbatim.
+
+        0 (the default) means "use the code constant" — covered separately by
+        TestSchemaV2.test_schema_version_zero_means_constant.
+        """
         status_path = tmp_path / "rover_status.json"
-        cfg = self._make_cfg(tmp_toml, status_path)
+        cfg = load_config(
+            tmp_toml(
+                f"""
+                [base_station_integration]
+                enabled = true
+                status_json_path = "{status_path.as_posix()}"
+                status_schema_version = 5
+                """
+            )
+        )
         pub = StatusJsonPublisher(cfg)
         payload = pub.build_payload(RoverStatus())
-        assert payload["schema_version"] == cfg.base_station_integration.status_schema_version
+        assert payload["schema_version"] == 5 == cfg.base_station_integration.status_schema_version
 
     def test_failure_does_not_raise(self, tmp_toml, tmp_path):
         """status.json write failures are warning-logged, not propagated."""
@@ -224,7 +248,13 @@ class TestLocalHttpPublisher:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/nope")
             with pytest.raises(urllib.error.HTTPError) as excinfo:
                 urllib.request.urlopen(req, timeout=2.0)
-            assert excinfo.value.code == 404
+            # HTTPError wraps an open http.client.HTTPResponse; closing it
+            # explicitly (rather than letting it be garbage-collected later,
+            # possibly after pub.stop() has torn the server down) avoids a
+            # PytestUnraisableExceptionWarning ("I/O operation on closed
+            # file") surfacing on an unrelated later test.
+            with excinfo.value:
+                assert excinfo.value.code == 404
         finally:
             pub.stop()
 
@@ -246,6 +276,9 @@ class TestLoRaPublisher:
         pub.stop()
 
     def test_disabled_role_no_publish(self, tmp_toml):
+        """role = "disabled" is enforced at construction time — TelemetryRouter
+        never builds a LoRaPublisher for it (v2 removed the redundant
+        role == "disabled" re-check inside LoRaPublisher.publish() itself)."""
         cfg = load_config(
             tmp_toml(
                 """
@@ -254,9 +287,8 @@ class TestLoRaPublisher:
                 """
             )
         )
-        pub = LoRaPublisher(cfg)
-        # Don't start — confirm publish is still safe to call
-        pub.publish(RoverStatus())
+        router = TelemetryRouter(cfg)
+        assert all(p.name != "lora" for p in router.publishers)
 
 
 # ---------------------------------------------------------------------------
@@ -360,3 +392,75 @@ class TestStatusFromConfig:
         assert st.device == "rover-42"
         assert st.profile == "personal"
         assert st.mission == "TEST"
+
+
+# ---------------------------------------------------------------------------
+# Schema v2 — build_payload(), omitted-when-None fields, schema_version=0
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaV2:
+    def test_payload_omits_unmeasured_fields(self):
+        s = RoverStatus()
+        p = build_payload(s, schema_version=STATUS_SCHEMA_VERSION, device="r")
+        assert "battery_mv" not in p and "lora_link_rssi" not in p and "lora_link_snr" not in p
+        assert p["schema_version"] == 2
+        assert p["sensors_disabled"] == [] and p["logger_degraded"] is False
+
+    def test_payload_includes_measured_battery(self):
+        s = RoverStatus(battery_mv=11800)
+        assert build_payload(s, schema_version=2, device="r")["battery_mv"] == 11800
+
+    def test_schema_version_zero_means_constant(self, tmp_toml, tmp_path):
+        p = tmp_toml(
+            f"""
+            [base_station_integration]
+            enabled = true
+            status_json_path = "{(tmp_path / "s.json").as_posix()}"
+            status_schema_version = 0
+            """
+        )
+        from rover.config import load_config
+
+        pub = StatusJsonPublisher(load_config(p))
+        assert pub.build_payload(RoverStatus())["schema_version"] == STATUS_SCHEMA_VERSION
+
+
+# ---------------------------------------------------------------------------
+# TelemetryRouter — per-channel publish cadence
+# ---------------------------------------------------------------------------
+
+
+class TestRouterCadence:
+    def test_router_per_channel_cadence(self, tmp_toml, tmp_path, monkeypatch):
+        p = tmp_toml(
+            f"""
+            [base_station_integration]
+            enabled = true
+            status_json_path = "{(tmp_path / "s.json").as_posix()}"
+            publish_interval_sec = 0.2
+            [lora]
+            enabled = true
+            role = "status_tx_only"
+            telemetry_interval_sec = 1.0
+            [telemetry]
+            http_enabled = false
+            """
+        )
+        from rover.config import load_config
+
+        router = TelemetryRouter(load_config(p))
+        calls = {pub.name: 0 for pub in router.publishers}
+
+        for pub in router.publishers:
+            monkeypatch.setattr(
+                pub, "publish", lambda s, _n=pub.name: calls.__setitem__(_n, calls[_n] + 1)
+            )
+        clock = [0.0]
+        monkeypatch.setattr("rover.telemetry.time.monotonic", lambda: clock[0])
+        s = RoverStatus()
+        for i in range(21):  # 0.0 .. 2.0 s in 0.1 s steps
+            clock[0] = i * 0.1
+            router.publish(s)
+        assert calls["status_json"] == 11  # every 0.2 s incl. t=0
+        assert calls["lora"] == 3  # t=0, 1.0, 2.0
