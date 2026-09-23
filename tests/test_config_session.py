@@ -251,8 +251,23 @@ class TestLoraV2Fields:
         assert cfg.lora.sync_word == 0x12
 
     def test_lora_default_role(self):
+        """DEC-031 amended 2026-09-23: LoRa is status-only; NTRIP is the only RTK path."""
         cfg = load_config()
-        assert cfg.lora.role == "rtcm_rx+status_tx"
+        assert cfg.lora.role == "status_tx_only"
+
+    def test_retired_rtcm_role_rejected(self, tmp_toml):
+        p = tmp_toml(
+            """
+            [lora]
+            role = "rtcm_rx+status_tx"
+            """
+        )
+        with pytest.raises(ValueError, match=r"\[lora\] role"):
+            load_config(p)
+
+    def test_lora_default_interval_is_10s(self):
+        """Matches the Base-Station Heltec beacon on the shared 915 MHz / SF7 / 0x12 channel."""
+        assert load_config().lora.telemetry_interval_sec == 10.0
 
     def test_lora_default_spreading_factor_is_7(self):
         """SF7 is the new default (matches Base-Station Heltec/T-Deck firmware)."""
@@ -382,7 +397,7 @@ class TestRoverConfigComposition:
         cfg = load_config(Path("config/default.toml"))
         assert cfg.session.profile == "personal"
         assert cfg.ntrip.enabled is False
-        assert cfg.lora.role == "rtcm_rx+status_tx"
+        assert cfg.lora.role == "status_tx_only"
 
 
 # ---------------------------------------------------------------------------

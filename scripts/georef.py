@@ -14,17 +14,50 @@ logs in SI / WGS84 / local ENU; CRS conversion happens here.
 Coordinate flow:
 
     LiDAR polar (angle, distance)  →  local Cartesian (forward, left, up)
-    ─(T_lidar_imu — identity in v1.0 absent calibration; DEC-024)─►
-    IMU frame
-    ─(slerp(t_scan) using IMU ring buffer; DEC-014)─►
-    World-aligned per-scan orientation
-    ─(GNSS antenna position; T_body_gnss zero in v1.0 absent calibration)─►
+    ─(mount, then Rz(mast_angle_deg))─►
+    Body frame
+    ─(per-scan tilt: Madgwick quaternion at t_scan, mount correction removed
+      for imu_mount == "platform" (DEC-024); yaw from the sweep's rest
+      heading, NEVER from in-sweep gyro yaw — DEC-013)─►
+    World-aligned per-scan orientation, Madgwick's NWU converted to ENU via
+    Rz(-D) · Rz(+90°), D = WMM declination at the GNSS origin (S3-R1)
+    ─(GNSS antenna position; rotating antenna lever arm subtracted when
+      antenna_offset_m is set, S3-R3)─►
     Local ENU (origin = first valid GNSS fix in the session)
     ─(pyproj transform → target_crs_epsg from metadata.json or --crs)─►
     Target CRS (e.g. NAD83(2011) PA-N ft-US for arm_group profile)
 
-Heights are ellipsoidal (WGS84) throughout; no geoid model is applied. Z is
-scaled to the target CRS's horizontal unit so LAS/PLY axes agree.
+For a projected export (`target_crs_epsg` resolves to a non-zero embedded
+EPSG), two point clouds are written: `<prefix>_ellipsoidal.{ply,las}` carries
+the raw ellipsoidal (NAD83(2011)) heights this pipeline has always produced,
+and `<prefix>_navd88.{ply,las}` converts those heights to NAVD88 via the
+GEOID18 grid (source CRS NAD83(2011) geographic 3D EPSG:6319, target compound
+`EPSG:<horizontal>+6360` for a ftUS CRS or `+5703` for a metric one). PROJ
+does not raise when the GEOID18 grid is unavailable locally and the network
+is off or fails — it silently returns a "ballpark" transform that leaves
+ellipsoidal heights unchanged — so the NAVD88 path checks transformer
+availability explicitly and refuses any result whose undulation is under 1 m
+anywhere across the point cloud, not merely on average (`GeoidUnavailable`).
+When that happens (or the grid genuinely can't be fetched — `projsync --file
+us_noaa_g2018u0.tif` installs it), the ellipsoidal files are still written,
+`export.json` names the failure, and the process exits **3**.
+
+A units/CRS mismatch (`--units` disagrees with the target CRS's native unit)
+shares that exit code for a different reason: `project_to_crs` still converts
+the values but drops the CRS label (`epsg_to_embed == 0`), and — when a CRS
+was actually requested and a GNSS origin exists to project from — that is
+reported honestly rather than as local ENU: the manifest's `horizontal` names
+the dropped EPSG and the unit conversion, `vertical` stays "ellipsoidal
+NAD83(2011)", `navd88_error` names the mismatch (NAVD88 needs the CRS's own
+unit to locate the geoid), an ERROR is logged, and the process exits **3**
+with only the single `<prefix>.{ply,las}` written — there is no embedded CRS
+to split an ellipsoidal/NAVD88 pair on. True local-ENU output — no CRS ever
+requested (`target_crs_epsg == 0`), or no GNSS fix to project from — keeps
+its original exit-0 labels ("local ENU (ellipsoidal offsets)" /
+"LiDAR-relative") and carries ellipsoidal/relative heights only. Every export
+also writes `export/export.json`, naming each file's horizontal and vertical
+datum plus the heading reference, declination, IMU mount and antenna offset
+used to build the cloud (Task 6).
 
 Defaults:
     * `target_crs_epsg = 0` (the personal-profile default) → no CRS conversion;
@@ -41,6 +74,11 @@ Failure modes:
     * Session has no GNSS records → emits points in raw LiDAR frame and warns;
       useful for indoor / no-fix scans. The exported LAS carries no CRS in
       this case either, for the same reason.
+    * GEOID18 grid unavailable → ellipsoidal files written, NAVD88 skipped,
+      exit 3.
+    * `--units` disagrees with the target CRS's native unit, and a GNSS
+      origin exists → values converted but the CRS label is dropped; the
+      manifest and PLY comments say so, NAVD88 is not attempted, exit 3.
 
 Decision references: DEC-014, DEC-022, DEC-024, DEC-034.
 
@@ -48,6 +86,29 @@ Dependencies: numpy (required); laspy + pyproj (optional, install via `[post]`
 extra).
 
 Changelog:
+    0.15.1  2026-09-23  Final review fixes: _rest_samples_by_sweep keeps only
+                        the last _REST_WINDOW_SEC (1.0 s) before each sweep's
+                        rest_end, matching main.py's sweep-0 heading-settle
+                        wait, so an early unconverged mag sample earlier in a
+                        long rest cannot set the heading (I1); a units/CRS
+                        mismatch that dropped the CRS label is now labelled
+                        truthfully in export.json and the PLY comments
+                        (never "local ENU") and exits 3 instead of 0 (I2);
+                        navd88_from_enu's ballpark guard now checks the
+                        MINIMUM |undulation| across all points, not the
+                        maximum, so a transform that is ballpark for only
+                        some points is still refused (M2).
+    0.15.0  2026-09-23  Dual export for projected CRSs: <prefix>_ellipsoidal
+                        and <prefix>_navd88 (GEOID18, EPSG:<H>+6360/5703, source
+                        NAD83(2011) 3D EPSG:6319); refuses PROJ's silent ballpark
+                        vertical (|N| < 1 m) and exits 3 with the ellipsoidal
+                        files written; export.json manifest names every file's
+                        horizontal and vertical datum and the heading reference.
+    0.14.0  2026-09-23  Heading model (S3-R1, S3-R3): Madgwick NWU converted
+                        to ENU with WMM declination; yaw from a per-sweep rest
+                        heading, never from gyro yaw during the sweep; tilt per
+                        scan; imu_mount "base" | "platform"; rotating antenna
+                        lever arm; heading labelled true/magnetic/relative.
     0.13.1  2026-09-23  load_session() dedup fix round 1: gnss*.jsonl records
                         now sort ahead of scan-embedded ones so a timestamp
                         tie keeps the authoritative gnss-file version, and
@@ -84,7 +145,7 @@ import logging
 import math
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger("georef")
@@ -183,6 +244,7 @@ class SessionData:
     lidar_records: list[dict]
     imu_records: list[dict]
     gnss_records: list[dict]
+    sweep_starts: dict[int, float] = field(default_factory=dict)
 
 
 _SEGMENT_RE = re.compile(r"^(scan|gnss)(?:_(\d+))?\.jsonl$")
@@ -238,6 +300,7 @@ def load_session(session_dir: Path) -> SessionData:
     lidar: list[dict] = []
     imu: list[dict] = []
     scan_gnss: list[dict] = []
+    sweep_starts: dict[int, float] = {}
     for rec in _iter_jsonl(scan_files):
         t = rec.get("type")
         if t == "lidar":
@@ -246,6 +309,9 @@ def load_session(session_dir: Path) -> SessionData:
             imu.extend(_flatten_imu_batch(rec))
         elif t == "gnss":
             scan_gnss.append(rec)
+        elif t == "event" and rec.get("event") == "sweep_start":
+            k = int((rec.get("details") or {}).get("sweep", 0))
+            sweep_starts.setdefault(k, float(rec["timestamp"]))
 
     # gnss*.jsonl is the unconditional, AUTHORITATIVE GNSS source (T1-053:
     # the logger no longer mirrors GNSS records into scan*.jsonl). Records
@@ -287,7 +353,13 @@ def load_session(session_dir: Path) -> SessionData:
         len(gnss),
         len(scan_files),
     )
-    return SessionData(metadata=metadata, lidar_records=lidar, imu_records=imu, gnss_records=gnss)
+    return SessionData(
+        metadata=metadata,
+        lidar_records=lidar,
+        imu_records=imu,
+        gnss_records=gnss,
+        sweep_starts=sweep_starts,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -384,12 +456,14 @@ def _strip_yaw(q):
     upper-left 2x2 block (standard Z-first Euler extraction), then
     left-multiply the matrix by R_z(-yaw) to cancel it —
     R_z(-yaw) @ R(q) keeps R(q)'s roll/pitch while zeroing its heading.
-    Used by session_to_pointcloud() when no magnetometer data is present in
-    the session (see its docstring / the INFO log it emits).
+    Used by session_to_pointcloud() on every scan to isolate the per-scan
+    tilt (roll/pitch) from the IMU quaternion before the per-sweep rest
+    heading (yaw) is applied on top of it — see the heading model in that
+    function's docstring.
     """
     r = _quat_to_rotmat(q)
-    yaw = math.atan2(float(r[1, 0]), float(r[0, 0]))
-    r_no_yaw = _rot_z(-math.degrees(yaw)) @ r
+    yaw = _yaw_deg(r)
+    r_no_yaw = _rot_z(-yaw) @ r
     return _rotmat_to_quat(r_no_yaw)
 
 
@@ -451,6 +525,91 @@ def geodetic_from_enu(east, north, up, lat0: float, lon0: float, alt0: float):
 
 
 # ---------------------------------------------------------------------------
+# Heading reference
+# ---------------------------------------------------------------------------
+
+
+def magnetic_declination_deg(lat: float, lon: float, when_epoch: float) -> float | None:
+    """WMM 2025 declination (degrees, east-positive) at the ellipsoid surface.
+
+    Returns None — and says why — when pygeomag is not installed or the date
+    is outside the model's five-year life span; the caller then labels the
+    heading "magnetic" instead of "true".
+    """
+    pygeomag = _optional_import("pygeomag")
+    if pygeomag is None:
+        logger.warning(
+            'pygeomag not installed — heading stays magnetic; install via `pip install -e ".[post]"`'
+        )
+        return None
+    from datetime import UTC, datetime
+
+    day = datetime.fromtimestamp(when_epoch, UTC).date()
+    year = pygeomag.decimal_year_from_date(day)
+    try:
+        result = pygeomag.GeoMag(coefficients_file="wmm/WMM_2025.COF").calculate(
+            glat=lat, glon=lon, alt=0.0, time=year
+        )
+    except ValueError as e:
+        logger.warning(
+            "WMM 2025 cannot give a declination for %s (%s) — heading stays magnetic", day, e
+        )
+        return None
+    return float(result.d)
+
+
+def _yaw_deg(r) -> float:
+    return math.degrees(math.atan2(float(r[1, 0]), float(r[0, 0])))
+
+
+def _nwu_to_enu(declination_deg: float | None):
+    """Madgwick world (North-West-Up, x = magnetic north) → ENU, true north when
+    the declination is known: Rz(-D) · Rz(+90°)."""
+    return _rot_z(-(declination_deg or 0.0)) @ _rot_z(90.0)
+
+
+def _circular_mean_deg(angles: list[float]) -> float:
+    s = sum(math.sin(math.radians(a)) for a in angles)
+    c = sum(math.cos(math.radians(a)) for a in angles)
+    return math.degrees(math.atan2(s, c))
+
+
+_REST_WINDOW_SEC = 1.0  # only the last second before rest_end is trusted (I1)
+
+
+def _rest_samples_by_sweep(session: SessionData, imu_sorted: list[dict]) -> dict[int, list[dict]]:
+    """Mag-bearing IMU samples in
+    (max(end of previous sweep, rest end - _REST_WINDOW_SEC), rest end of this sweep].
+
+    Restricted to the last _REST_WINDOW_SEC (not the whole rest) because the
+    Madgwick filter run at acquisition time has not necessarily converged
+    earlier in a long rest (I1: measured up to ~30 s for a 170° heading with
+    the repo's beta=0.1 filter) — main.py's sweep-0 heading-settle wait
+    (_HEADING_SETTLE_WINDOW_SEC et al.) targets exactly this trailing window,
+    so the samples it produces are the ones this function keeps. Still
+    excludes anything at or before the previous sweep's own last scan, so an
+    in-sweep sample can never leak into the next sweep's rest window.
+    """
+    by_sweep: dict[int, list[dict]] = {}
+    for rec in session.lidar_records:
+        by_sweep.setdefault(int(rec.get("sweep", 0)), []).append(rec)
+    out: dict[int, list[dict]] = {}
+    prev_end = float("-inf")
+    for k in sorted(by_sweep):
+        recs = by_sweep[k]
+        first = min(r["timestamp"] for r in recs)
+        rest_end = session.sweep_starts.get(k, first)
+        window_start = max(prev_end, rest_end - _REST_WINDOW_SEC)
+        out[k] = [
+            s
+            for s in imu_sorted
+            if s.get("mag") is not None and window_start < s["timestamp"] <= rest_end
+        ]
+        prev_end = max(r["timestamp"] for r in recs)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Point cloud assembly
 # ---------------------------------------------------------------------------
 
@@ -477,12 +636,22 @@ def lidar_points_to_local(lidar_record: dict, quat):
     return world, inten
 
 
-def session_to_pointcloud(session: SessionData):
+def session_to_pointcloud(session: SessionData, info: dict | None = None):
     """Assemble all lidar records into one Nx3 point cloud (local ENU meters)
     plus an aligned intensity array.
 
     Origin is the first valid GNSS fix (fix_type >= 2). When no fix is available,
     the origin is the rover itself (all points are in LiDAR-relative meters).
+
+    Heading model (S3-R1, S3-R3): per-scan tilt comes from the IMU (mount
+    correction removed for a platform-mounted IMU); yaw comes from a
+    per-sweep rest heading derived from magnetometer samples taken while the
+    mast is home, converted from Madgwick's NWU world frame to ENU using the
+    WMM declination at the session's GNSS origin, never from in-sweep gyro
+    yaw. See the module docstring's coordinate-flow block.
+
+    When ``info`` is given, it is filled with
+    ``{"heading_reference", "declination_deg", "imu_mount", "antenna_offset_m"}``.
     """
     np = _require_numpy()
     imu_sorted = sorted(session.imu_records, key=lambda r: r["timestamp"])
@@ -495,19 +664,6 @@ def session_to_pointcloud(session: SessionData):
         mast_angles = {rec.get("mast_angle_deg", 0.0) for rec in session.lidar_records}
         if len(mast_angles) == 1:
             logger.warning("mast angle never changed: output is planar (continuous mode?)")
-
-    # DEC-013 / DEC-012: a 6-DOF Madgwick filter (no magnetometer) has no
-    # absolute heading reference, so its yaw is pure gyro-integration drift —
-    # meaningless on a rover that is stationary between scans. When nothing in
-    # the session ever supplied a magnetometer sample, strip yaw from every
-    # orientation and let the commanded mast angle (already applied in
-    # lidar_points_to_local via _rot_z) stand in for heading instead.
-    strip_yaw = not any(r.get("mag") is not None for r in session.imu_records)
-    if strip_yaw:
-        logger.info(
-            "no magnetometer data: using IMU roll/pitch only; yaw from the "
-            "commanded mast angle (6-DOF gyro yaw drifts on a static rover)"
-        )
 
     if not gnss_sorted:
         logger.warning(
@@ -527,13 +683,57 @@ def session_to_pointcloud(session: SessionData):
             origin_alt,
         )
 
+    geometry = session.metadata.get("geometry") or {}
+    mount = geometry.get("imu_mount", "base")
+    antenna = geometry.get("antenna_offset_m")
+    arm_platform = np.asarray(antenna, dtype=float) if antenna else None
+
+    rest = _rest_samples_by_sweep(session, imu_sorted)
+    have_rest = any(rest.values())
+    declination = None
+    if have_rest and origin_lat is not None and session.lidar_records:
+        t_first = min(r["timestamp"] for r in session.lidar_records)
+        declination = magnetic_declination_deg(origin_lat, origin_lon, t_first)
+    enu = _nwu_to_enu(declination)
+    yaw_ref: dict[int, float] = {}
+    for k, samples in rest.items():
+        if samples:
+            yaw_ref[k] = _circular_mean_deg(
+                [_yaw_deg(enu @ _quat_to_rotmat(s["orientation"])) for s in samples]
+            )
+    if not have_rest:
+        label = "relative"
+        logger.info(
+            "no magnetometer data at rest: heading is relative (mast-0 forward = +X); "
+            "tilt from the IMU, yaw from the commanded mast angle"
+        )
+    else:
+        label = "true" if declination is not None else "magnetic"
+        missing = sorted(k for k in rest if k not in yaw_ref)
+        if missing:
+            logger.warning("sweeps %s have no rest heading; reusing the nearest sweep's", missing)
+        for k in missing:
+            earlier = [j for j in yaw_ref if j < k]
+            yaw_ref[k] = yaw_ref[max(earlier)] if earlier else yaw_ref[min(yaw_ref)]
+    logger.info("heading reference: %s (declination %s)", label, declination)
+    if info is not None:
+        info.update(
+            heading_reference=label,
+            declination_deg=declination,
+            imu_mount=mount,
+            antenna_offset_m=antenna,
+        )
+
     chunks_xyz = []
     chunks_int = []
     for rec in session.lidar_records:
-        quat = orientation_at(rec["timestamp"], imu_sorted)
-        if strip_yaw:
-            quat = _strip_yaw(quat)
-        pts_local, intens = lidar_points_to_local(rec, quat)
+        mast = float(rec.get("mast_angle_deg", 0.0))
+        q_t = orientation_at(rec["timestamp"], imu_sorted)
+        m_imu = mast if mount == "platform" else 0.0
+        tilt = _strip_yaw(_rotmat_to_quat(_quat_to_rotmat(q_t) @ _rot_z(-m_imu)))
+        r_world = _rot_z(yaw_ref.get(int(rec.get("sweep", 0)), 0.0)) @ _quat_to_rotmat(tilt)
+        q_world = _rotmat_to_quat(r_world)
+        pts_local, intens = lidar_points_to_local(rec, q_world)
         if pts_local.size == 0:
             continue
 
@@ -551,6 +751,10 @@ def session_to_pointcloud(session: SessionData):
                     origin_alt,
                 )
                 pts_local = pts_local + np.array([dE, dN, dU])
+            if arm_platform is not None:
+                # GNSS fix is the antenna; the LiDAR sits at antenna minus the
+                # lever arm, rotated with the mast and the world orientation.
+                pts_local = pts_local - r_world @ (_rot_z(mast) @ arm_platform)
 
         chunks_xyz.append(pts_local)
         chunks_int.append(intens)
@@ -654,18 +858,92 @@ def project_to_crs(xyz, origin_lat_lon_alt, target_epsg: int, units: str):
 
 
 # ---------------------------------------------------------------------------
+# NAVD88 (GEOID18) vertical datum conversion
+# ---------------------------------------------------------------------------
+
+
+class GeoidUnavailable(RuntimeError):
+    """NAVD88 heights cannot be produced honestly (grid missing, or PROJ fell
+    back to a ballpark vertical transform)."""
+
+
+_GEOID_GRID = "us_noaa_g2018u0.tif"
+_NAVD88_VERTICAL = {True: 6360, False: 5703}  # ftUS CRS → 6360, metric → 5703
+
+
+def _geoid_transformer(target_epsg: int):
+    """GEOID18 transformer NAD83(2011) 3D (EPSG:6319) → EPSG:<H>+<NAVD88>.
+
+    PROJ does not raise when the geoid grid is missing: it silently returns a
+    'ballpark' transform that leaves ellipsoidal heights unchanged (measured
+    2026-09-23, pyproj 3.7.2, even with only_best=True). So availability is
+    checked explicitly, and the PROJ network (cdn.proj.org) is tried once.
+    """
+    import warnings
+
+    pyproj = _optional_import("pyproj")
+    if pyproj is None:
+        raise GeoidUnavailable('pyproj not installed — install via `pip install -e ".[post]"`')
+    from pyproj.transformer import TransformerGroup
+
+    crs = pyproj.CRS.from_epsg(target_epsg)
+    unit_m = float(crs.axis_info[0].unit_conversion_factor)
+    is_ft = abs(unit_m - US_SURVEY_FOOT_M) < 1e-9 or abs(unit_m - 0.3048) < 1e-9
+    compound = f"EPSG:{target_epsg}+{_NAVD88_VERTICAL[is_ft]}"
+
+    def _group():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return TransformerGroup("EPSG:6319", compound, always_xy=True)
+
+    group = _group()
+    if not group.best_available and not pyproj.network.is_network_enabled():
+        logger.info("GEOID18 grid not found locally; fetching %s from cdn.proj.org", _GEOID_GRID)
+        pyproj.network.set_network_enabled(True)
+        group = _group()
+    if not group.best_available or not group.transformers:
+        raise GeoidUnavailable(
+            f"GEOID18 grid {_GEOID_GRID} unavailable — run `projsync --file {_GEOID_GRID}` "
+            "or allow network access, then re-export"
+        )
+    return group.transformers[0], compound, unit_m
+
+
+def navd88_from_enu(xyz, origin_lat_lon_alt, target_epsg: int):
+    """Local ENU metres → (x, y, NAVD88 height) in target_epsg's unit, via GEOID18."""
+    np = _require_numpy()
+    transformer, compound, unit_m = _geoid_transformer(target_epsg)
+    lat0, lon0, alt0 = origin_lat_lon_alt
+    lats, lons, alts = geodetic_from_enu(xyz[:, 0], xyz[:, 1], xyz[:, 2], lat0, lon0, alt0)
+    xs, ys, zs = transformer.transform(lons, lats, alts)
+    zs = np.asarray(zs, dtype=float)
+    undulation = np.asarray(alts, dtype=float) - zs * unit_m
+    # CONUS geoid heights run about -8 m to -53 m; |N| < 1 m ANYWHERE means at
+    # least one point came back through PROJ's ballpark transform (unchanged
+    # ellipsoidal height) even if others look like real geoid values — so the
+    # guard checks the MINIMUM |undulation|, not the maximum (M2): a max-based
+    # check would pass a result that is only PARTLY ballpark.
+    if not np.all(np.isfinite(zs)) or float(np.min(np.abs(undulation))) < 1.0:
+        raise GeoidUnavailable(
+            "transform returned ellipsoidal heights (ballpark) — refusing to label them NAVD88"
+        )
+    return np.column_stack([np.asarray(xs), np.asarray(ys), zs]), compound
+
+
+# ---------------------------------------------------------------------------
 # Exporters
 # ---------------------------------------------------------------------------
 
 
-def export_ply(out_path: Path, xyz, intensity) -> None:
+def export_ply(out_path: Path, xyz, intensity, comments: tuple[str, ...] | list[str] = ()) -> None:
     """Write a binary little-endian PLY file with intensity-as-color."""
     np = _require_numpy()
     n = len(xyz)
     header = (
         "ply\n"
         "format binary_little_endian 1.0\n"
-        f"element vertex {n}\n"
+        + "".join(f"comment {c}\n" for c in comments)
+        + f"element vertex {n}\n"
         "property double x\n"
         "property double y\n"
         "property double z\n"
@@ -688,9 +966,13 @@ def export_ply(out_path: Path, xyz, intensity) -> None:
     logger.info("PLY written: %s (%d points)", out_path, n)
 
 
-def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
+def export_las(out_path: Path, xyz, intensity, target_epsg: int | str) -> bool:
     """Write a LAS 1.4 point record format 6 file. Returns False if laspy
-    isn't available."""
+    isn't available.
+
+    ``target_epsg`` is an int for a single CRS (``0`` = no CRS embedded) or a
+    compound-CRS string such as ``"EPSG:6563+6360"`` for a NAVD88 export.
+    """
     laspy = _optional_import("laspy")
     if laspy is None:
         logger.warning("laspy not installed — skipping LAS export (PLY still emitted)")
@@ -698,16 +980,21 @@ def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
     np = _require_numpy()
 
     header = laspy.LasHeader(point_format=6, version="1.4")
-    if target_epsg > 0:
+    has_crs = isinstance(target_epsg, str) or target_epsg > 0
+    if has_crs:
         try:
-            header.add_crs(f"EPSG:{target_epsg}")
+            if isinstance(target_epsg, str):
+                pyproj = _optional_import("pyproj")
+                header.add_crs(pyproj.CRS(target_epsg))
+            else:
+                header.add_crs(f"EPSG:{target_epsg}")
         except Exception as e:
             # Broad on purpose: an older/incompatible laspy version, a pyproj
             # error surfacing through add_crs(), or anything else that can go
             # wrong embedding the CRS must still leave the LAS file written —
             # the geometry is correct even when the label isn't embeddable.
             logger.warning(
-                "laspy %s cannot embed CRS EPSG:%d — LAS written without CRS (%s)",
+                "laspy %s cannot embed CRS %s — LAS written without CRS (%s)",
                 getattr(laspy, "__version__", "?"),
                 target_epsg,
                 e,
@@ -722,7 +1009,7 @@ def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     las.write(str(out_path))
-    logger.info("LAS written: %s (%d points, EPSG:%d)", out_path, len(xyz), target_epsg)
+    logger.info("LAS written: %s (%d points, %s)", out_path, len(xyz), target_epsg)
     return True
 
 
@@ -791,23 +1078,105 @@ def main(argv: list[str] | None = None) -> int:
         units,
     )
 
-    xyz, intensity, origin = session_to_pointcloud(session)
-    if len(xyz) == 0:
+    info: dict = {}
+    xyz_enu, intensity, origin = session_to_pointcloud(session, info=info)
+    if len(xyz_enu) == 0:
         logger.error("No points to export")
         return 1
 
     epsg_to_embed = target_epsg
+    xyz = xyz_enu
     if target_epsg != 0 or units == "ft":
-        xyz, epsg_to_embed = project_to_crs(xyz, origin, target_epsg, units)
+        xyz, epsg_to_embed = project_to_crs(xyz_enu, origin, target_epsg, units)
 
     prefix = args.out_prefix or session_dir.name
     out_dir = session_dir / "export"
-    export_ply(out_dir / f"{prefix}.ply", xyz, intensity)
-    if not args.no_las:
-        export_las(out_dir / f"{prefix}.las", xyz, intensity, epsg_to_embed)
+    files: list[dict] = []
+    navd88_error: str | None = None
+    exit_code = 0
+    # A CRS was requested and a GNSS origin exists, but project_to_crs dropped
+    # the CRS label because --units disagreed with the CRS's native unit
+    # (T1-A) -- distinct from "no CRS was ever requested" (target_epsg == 0)
+    # or "nothing to project from" (no GNSS fix, origin[0] is None), both of
+    # which keep the local-ENU/LiDAR-relative labels in the `else` branch
+    # below (I2). The coordinate VALUES are still correct here -- only the
+    # CRS label was dropped -- so this must not be reported as "local ENU",
+    # and NAVD88 cannot be attempted without a real horizontal CRS to locate
+    # the geoid.
+    units_crs_mismatch = target_epsg != 0 and epsg_to_embed == 0 and origin[0] is not None
+    if epsg_to_embed != 0:
+        name = f"{prefix}_ellipsoidal"
+        vertical = "ellipsoidal NAD83(2011)"
+        export_ply(
+            out_dir / f"{name}.ply",
+            xyz,
+            intensity,
+            comments=(f"vertical {vertical}", f"horizontal EPSG:{epsg_to_embed}"),
+        )
+        if not args.no_las:
+            export_las(out_dir / f"{name}.las", xyz, intensity, epsg_to_embed)
+        files.append(
+            {"path": f"{name}.ply", "horizontal": f"EPSG:{epsg_to_embed}", "vertical": vertical}
+        )
+        try:
+            xyz_n, compound = navd88_from_enu(xyz_enu, origin, epsg_to_embed)
+        except GeoidUnavailable as e:
+            navd88_error = str(e)
+            logger.error("NAVD88 export skipped: %s", e)
+            exit_code = 3
+        else:
+            name = f"{prefix}_navd88"
+            vertical = f"NAVD88 (GEOID18) EPSG:{compound.split('+')[1]}"
+            export_ply(
+                out_dir / f"{name}.ply",
+                xyz_n,
+                intensity,
+                comments=(f"vertical {vertical}", f"horizontal EPSG:{epsg_to_embed}"),
+            )
+            if not args.no_las:
+                export_las(out_dir / f"{name}.las", xyz_n, intensity, compound)
+            files.append(
+                {
+                    "path": f"{name}.ply",
+                    "horizontal": f"EPSG:{epsg_to_embed}",
+                    "vertical": vertical,
+                }
+            )
+    elif units_crs_mismatch:
+        vertical = "ellipsoidal NAD83(2011)"
+        horizontal = f"EPSG:{target_epsg} values converted to {units}, CRS label dropped"
+        navd88_error = (
+            f"units/CRS mismatch: --units {units} on EPSG:{target_epsg}; "
+            "re-export with the CRS's native unit to get NAVD88"
+        )
+        logger.error("NAVD88 export skipped: %s", navd88_error)
+        exit_code = 3
+        export_ply(
+            out_dir / f"{prefix}.ply",
+            xyz,
+            intensity,
+            comments=(f"vertical {vertical}", f"horizontal {horizontal}"),
+        )
+        if not args.no_las:
+            export_las(out_dir / f"{prefix}.las", xyz, intensity, 0)
+        files.append({"path": f"{prefix}.ply", "horizontal": horizontal, "vertical": vertical})
+    else:
+        vertical = "local ENU (ellipsoidal offsets)" if origin[0] is not None else "LiDAR-relative"
+        export_ply(out_dir / f"{prefix}.ply", xyz, intensity, comments=(f"vertical {vertical}",))
+        if not args.no_las:
+            export_las(out_dir / f"{prefix}.las", xyz, intensity, 0)
+        files.append({"path": f"{prefix}.ply", "horizontal": "none", "vertical": vertical})
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "files": files,
+        "navd88_error": navd88_error,
+        **info,
+    }
+    (out_dir / "export.json").write_text(json.dumps(manifest, indent=2))
 
     logger.info("Export complete: %s", out_dir)
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -279,7 +279,7 @@ class TestPipelinePly:
         with pytest.raises(SystemExit):
             georef.main([str(sess)])
 
-    def test_arm_group_with_crs_override(self, tmp_path):
+    def test_arm_group_with_crs_override(self, tmp_path, monkeypatch):
         sess = _make_session(tmp_path, profile="arm_group", target_crs=0)
         # Without pyproj, target_epsg != 0 should fail fast
         try:
@@ -293,8 +293,194 @@ class TestPipelinePly:
             with pytest.raises(SystemExit):
                 georef.main([str(sess), "--crs", "6563"])
         else:
-            rc = georef.main([str(sess), "--crs", "6563", "--no-las"])
+            # EPSG:6563 is natively ftUS; the session's own "units": "m"
+            # (from _make_session, hardcoded for every profile) would trip
+            # the pre-existing units/CRS-mismatch guard (T1-A) and force
+            # epsg_to_embed back to 0, skipping the dual-export path this
+            # override is meant to exercise -- so --units ft matches the
+            # requested CRS the way a real arm_group capture would.
+            monkeypatch.setattr(georef, "_geoid_transformer", _fake_geoid(-33.3))
+            rc = georef.main([str(sess), "--crs", "6563", "--units", "ft", "--no-las"])
             assert rc == 0
+            out = sess / "export"
+            assert (out / f"{sess.name}_ellipsoidal.ply").exists()
+            assert (out / f"{sess.name}_navd88.ply").exists()
+
+    def test_units_crs_mismatch_labelled_truthfully_and_exits_3(self, tmp_path):
+        """I2: a CRS was requested (target_crs_epsg=6563, ftUS) and a GNSS
+        origin exists, but `_make_session` hardcodes "units": "m" -- a
+        mismatch against 6563's native ftUS unit. project_to_crs still
+        converts the values but drops the CRS label (epsg_to_embed == 0);
+        that must be reported as a units/CRS mismatch, not mislabelled
+        "local ENU", and NAVD88 (which needs the CRS's own unit to locate the
+        geoid) must be refused rather than silently skipped."""
+        pytest.importorskip("pyproj")
+        sess = _make_session(tmp_path, profile="arm_group", target_crs=6563)
+        rc = georef.main([str(sess), "--no-las"])
+        assert rc == 3
+        out = sess / "export"
+        assert not (out / f"{sess.name}_ellipsoidal.ply").exists()
+        assert not (out / f"{sess.name}_navd88.ply").exists()
+        assert (out / f"{sess.name}.ply").exists()
+        manifest = json.loads((out / "export.json").read_text())
+        assert manifest["files"] == [
+            {
+                "path": f"{sess.name}.ply",
+                "horizontal": "EPSG:6563 values converted to m, CRS label dropped",
+                "vertical": "ellipsoidal NAD83(2011)",
+            }
+        ]
+        assert "units/CRS mismatch" in manifest["navd88_error"]
+        assert "--units m" in manifest["navd88_error"]
+        assert "EPSG:6563" in manifest["navd88_error"]
+        head = (out / f"{sess.name}.ply").read_bytes().split(b"end_header")[0]
+        assert b"comment vertical ellipsoidal NAD83(2011)" in head
+        assert b"comment horizontal EPSG:6563 values converted to m, CRS label dropped" in head
+
+
+# ---------------------------------------------------------------------------
+# NAVD88 (GEOID18) export: dual ellipsoidal/NAVD88 output, ballpark guard,
+# export.json manifest (Task 7)
+# ---------------------------------------------------------------------------
+
+
+def _fake_geoid(undulation_m: float, unit_m: float = 0.3048006096012192):
+    """Stand-in for _geoid_transformer: real pyproj horizontal, fixed geoid undulation."""
+
+    def _factory(target_epsg: int):
+        import pyproj
+
+        horiz = pyproj.Transformer.from_crs("EPSG:6319", f"EPSG:{target_epsg}", always_xy=True)
+
+        class _T:
+            def transform(self, lons, lats, alts):
+                xs, ys = horiz.transform(lons, lats)
+                return xs, ys, (np.asarray(alts) - undulation_m) / unit_m
+
+        return _T(), f"EPSG:{target_epsg}+6360", unit_m
+
+    return _factory
+
+
+def _grid_available() -> bool:
+    pytest.importorskip("pyproj")
+    import warnings
+
+    from pyproj.transformer import TransformerGroup
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return TransformerGroup("EPSG:6319", "EPSG:6563+6360", always_xy=True).best_available
+
+
+class TestNavd88Export:
+    def _arm_session(self, tmp_path):
+        """EPSG:6563 (PA North) is natively ftUS; `_make_session` hardcodes
+        "units": "m" for every profile, which would trip the pre-existing
+        units/CRS-mismatch guard (T1-A, TestExportUnits) and force
+        epsg_to_embed back to 0 — never exercising the dual-export path this
+        class exists to test. A real arm_group session records units that
+        match its own target_crs_epsg, so the metadata is corrected here to
+        "ft" rather than passing --units on every call."""
+        sess = _make_session(tmp_path, profile="arm_group", target_crs=6563)
+        meta_path = sess / "metadata.json"
+        meta = json.loads(meta_path.read_text())
+        meta["session"]["units"] = "ft"
+        meta_path.write_text(json.dumps(meta))
+        return sess
+
+    def test_ballpark_transform_is_refused(self, monkeypatch):
+        """Review Focus 1: PROJ's ballpark vertical returns ellipsoidal heights
+        unchanged (measured 2026-09-23, even with only_best=True). Undulation 0
+        must raise, never be labelled NAVD88."""
+        pytest.importorskip("pyproj")
+        monkeypatch.setattr(georef, "_geoid_transformer", _fake_geoid(0.0))
+        xyz = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+        with pytest.raises(georef.GeoidUnavailable, match="ballpark"):
+            georef.navd88_from_enu(xyz, (40.79, -77.86, 300.0), 6563)
+
+    def test_ballpark_guard_triggers_when_only_one_point_is_ballpark(self, monkeypatch):
+        """M2: the guard must check the MINIMUM |undulation| across the whole
+        point cloud, not the maximum -- a max-based check would let a result
+        through where only SOME points came back ballpark, because a single
+        real-looking undulation elsewhere in the cloud would dominate the
+        max. Point 0 gets a real geoid undulation (-33.3 m); point 1 comes
+        back ballpark (N=0, PROJ handed back the ellipsoidal height
+        unchanged) -- the minimum is 0, so this must still raise."""
+        pytest.importorskip("pyproj")
+        import pyproj
+
+        def _factory(target_epsg):
+            horiz = pyproj.Transformer.from_crs("EPSG:6319", f"EPSG:{target_epsg}", always_xy=True)
+
+            class _T:
+                def transform(self, lons, lats, alts):
+                    xs, ys = horiz.transform(lons, lats)
+                    alts = np.asarray(alts, dtype=float)
+                    zs = np.array([alts[0] + 33.3, alts[1]]) / 0.3048006096012192
+                    return xs, ys, zs
+
+            return _T(), f"EPSG:{target_epsg}+6360", 0.3048006096012192
+
+        monkeypatch.setattr(georef, "_geoid_transformer", _factory)
+        xyz = np.array([[0.0, 0.0, 0.0], [10.0, 10.0, 0.0]])
+        with pytest.raises(georef.GeoidUnavailable, match="ballpark"):
+            georef.navd88_from_enu(xyz, (40.79, -77.86, 300.0), 6563)
+
+    def test_missing_grid_writes_ellipsoidal_only_and_exits_3(self, tmp_path, monkeypatch, caplog):
+        pytest.importorskip("pyproj")
+
+        def _no_grid(_epsg):
+            raise georef.GeoidUnavailable("GEOID18 grid us_noaa_g2018u0.tif unavailable")
+
+        monkeypatch.setattr(georef, "_geoid_transformer", _no_grid)
+        sess = self._arm_session(tmp_path)
+        with caplog.at_level("ERROR", logger="georef"):
+            rc = georef.main([str(sess), "--no-las"])
+        assert rc == 3
+        out = sess / "export"
+        assert (out / f"{sess.name}_ellipsoidal.ply").exists()
+        assert not (out / f"{sess.name}_navd88.ply").exists()
+        manifest = json.loads((out / "export.json").read_text())
+        assert "us_noaa_g2018u0" in manifest["navd88_error"]
+        assert [f["vertical"] for f in manifest["files"]] == ["ellipsoidal NAD83(2011)"]
+        assert any("NAVD88" in r.message for r in caplog.records)
+
+    def test_manifest_and_ply_headers_name_their_datum(self, tmp_path, monkeypatch):
+        pytest.importorskip("pyproj")
+        monkeypatch.setattr(georef, "_geoid_transformer", _fake_geoid(-33.3))
+        sess = self._arm_session(tmp_path)
+        assert georef.main([str(sess), "--no-las"]) == 0
+        out = sess / "export"
+        manifest = json.loads((out / "export.json").read_text())
+        verticals = {f["path"]: f["vertical"] for f in manifest["files"]}
+        assert verticals[f"{sess.name}_ellipsoidal.ply"] == "ellipsoidal NAD83(2011)"
+        assert verticals[f"{sess.name}_navd88.ply"] == "NAVD88 (GEOID18) EPSG:6360"
+        assert manifest["navd88_error"] is None
+        assert manifest["heading_reference"] == "relative"
+        head = (out / f"{sess.name}_navd88.ply").read_bytes().split(b"end_header")[0]
+        assert b"comment vertical NAVD88 (GEOID18) EPSG:6360" in head
+
+    def test_navd88_z_is_ellipsoidal_minus_undulation(self, tmp_path, monkeypatch):
+        pytest.importorskip("pyproj")
+        monkeypatch.setattr(georef, "_geoid_transformer", _fake_geoid(-33.3))
+        xyz = np.array([[0.0, 0.0, 0.0]])
+        out, compound = georef.navd88_from_enu(xyz, (40.79, -77.86, 300.0), 6563)
+        assert compound == "EPSG:6563+6360"
+        assert out[0, 2] == pytest.approx((300.0 + 33.3) / 0.3048006096012192, abs=1e-6)
+
+    def test_real_geoid18_known_answer(self):
+        """pyproj + the real GEOID18 grid. Skips (with the reason) only when the
+        grid is not on this machine — install it with
+        `projsync --file us_noaa_g2018u0.tif` to run it."""
+        if not _grid_available():
+            pytest.skip("GEOID18 grid us_noaa_g2018u0.tif not installed locally")
+        transformer, compound, unit_m = georef._geoid_transformer(6563)
+        x, y, z = transformer.transform(-77.86, 40.79, 300.0)
+        assert compound == "EPSG:6563+6360"
+        assert z == pytest.approx(1093.5003, abs=0.001)
+        transformer5, _c, _u = georef._geoid_transformer(6565)
+        assert transformer5.transform(-76.3, 40.0, 100.0)[2] == pytest.approx(439.5313, abs=0.001)
 
 
 # ---------------------------------------------------------------------------
@@ -619,11 +805,14 @@ class TestYawStripWithoutMag:
         assert any("no magnetometer data" in r.message for r in caplog.records)
 
     def test_yaw_kept_with_mag(self, tmp_path):
+        """With mag at rest the heading is kept and converted from Madgwick's
+        NWU frame to ENU (S3-R1). A 90° yaw in NWU turns body forward from
+        magnetic north (NWU +x) to west (NWU +y), which is ENU -x. No GNSS, so
+        no declination: the label is "magnetic"."""
         sess = self._session(tmp_path, mag=[1.0, 2.0, 3.0])
         data = georef.load_session(sess)
         xyz, _intensity, _origin = georef.session_to_pointcloud(data)
-        # Yaw kept: the IMU's 90° Z rotation carries the point to the left.
-        np.testing.assert_allclose(xyz[0], [0.0, 1.0, 0.0], atol=1e-9)
+        np.testing.assert_allclose(xyz[0], [-1.0, 0.0, 0.0], atol=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -660,3 +849,516 @@ class TestMastAngleNeverChangedWarning:
         with caplog.at_level("WARNING", logger="georef"):
             georef.session_to_pointcloud(data)
         assert not any("mast angle never changed" in r.message for r in caplog.records)
+
+
+class TestDeclination:
+    _WHEN = 1790121600.0  # 2026-09-23T00:00:00Z
+
+    def test_state_college_known_answer(self):
+        pytest.importorskip("pygeomag", reason="pygeomag not installed (post/dev extra)")
+        d = georef.magnetic_declination_deg(40.79, -77.86, self._WHEN)
+        assert d == pytest.approx(-10.5348, abs=0.01)
+
+    def test_east_pa_is_more_westerly_than_central(self):
+        pytest.importorskip("pygeomag", reason="pygeomag not installed (post/dev extra)")
+        central = georef.magnetic_declination_deg(40.79, -77.86, self._WHEN)
+        east = georef.magnetic_declination_deg(41.40, -75.66, self._WHEN)
+        assert east < central < -9.0
+
+    def test_outside_lifespan_returns_none(self, caplog):
+        """Review Focus 5: WMM 2025 ends in 2030; a later session falls back."""
+        pytest.importorskip("pygeomag", reason="pygeomag not installed (post/dev extra)")
+        when_2031 = 1940000000.0  # 2031-06-23
+        with caplog.at_level("WARNING", logger="georef"):
+            assert georef.magnetic_declination_deg(40.79, -77.86, when_2031) is None
+        assert any("life span" in r.message or "lifespan" in r.message for r in caplog.records)
+
+    def test_missing_library_returns_none(self, monkeypatch, caplog):
+        monkeypatch.setattr(georef, "_optional_import", lambda name: None)
+        with caplog.at_level("WARNING", logger="georef"):
+            assert georef.magnetic_declination_deg(40.79, -77.86, self._WHEN) is None
+        assert any("pygeomag" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Heading model (S3-R1, S3-R3): NWU->ENU, per-sweep rest heading, tilt per
+# scan, IMU mount, rotating antenna lever arm.
+# ---------------------------------------------------------------------------
+
+
+def _heading_session(
+    tmp_path: Path,
+    *,
+    name: str = "hd",
+    rest_q=(1.0, 0.0, 0.0, 0.0),
+    scan_q=None,
+    mag=(20.0, 0.0, -40.0),
+    with_gnss: bool = True,
+    mast_angles=(0.0,),
+    mount: str = "base",
+    antenna_offset=None,
+    when: float = 1790121600.0,
+    platform_q_follows_mast: bool = False,
+) -> Path:
+    """Rest IMU sample (with mag) at `when`, sweep_start at when+0.1, one lidar
+    point 1 m straight ahead per mast angle, GNSS fix at State College."""
+    sess = tmp_path / name
+    sess.mkdir()
+    meta = {
+        "session": {"profile": "personal", "target_crs_epsg": 0, "units": "m"},
+        "geometry": {"imu_mount": mount, "antenna_offset_m": antenna_offset},
+    }
+    (sess / "metadata.json").write_text(json.dumps(meta))
+    lines = [json.dumps(_imu_batch([when], orientation=rest_q, mag=list(mag) if mag else None))]
+    lines.append(
+        json.dumps(
+            {
+                "type": "event",
+                "timestamp": when + 0.1,
+                "event": "sweep_start",
+                "details": {"sweep": 0, "rest_sec": 0.1},
+            }
+        )
+    )
+    if with_gnss:
+        lines.append(
+            json.dumps(
+                {
+                    "type": "gnss",
+                    "timestamp": when + 0.2,
+                    "fix_type": 5,
+                    "lat": 40.79,
+                    "lon": -77.86,
+                    "alt": 300.0,
+                    "hdop": 0.8,
+                    "vdop": 1.0,
+                    "sat_count": 18,
+                    "rtk_age": 1.0,
+                }
+            )
+        )
+    for i, m in enumerate(mast_angles):
+        t = when + 1.0 + i
+        q = scan_q if scan_q is not None else rest_q
+        if platform_q_follows_mast:
+            # IMU on the platform: R_platform = R_base · Rz(mast)
+            q = tuple(
+                float(v)
+                for v in georef._rotmat_to_quat(georef._quat_to_rotmat(q) @ georef._rot_z(m))
+            )
+        lines.append(json.dumps(_imu_batch([t - 0.01, t + 0.01], orientation=q, mag=None)))
+        rec = _lidar_record(t, i, float(m), [0.0], [1.0], [1])
+        rec["sweep"] = 0
+        lines.append(json.dumps(rec))
+    (sess / "scan.jsonl").write_text("\n".join(lines) + "\n")
+    return sess
+
+
+class TestHeadingModel:
+    D_STATE_COLLEGE = -10.5348  # Task 5 known answer, 2026-09-23
+
+    def test_true_north_known_answer(self, tmp_path):
+        """Body forward = magnetic north at rest (identity NWU quaternion). With
+        D = -10.53°, a point 1 m ahead lies at true azimuth 349.47°:
+        ENU (-sin 10.53°, cos 10.53°, 0)."""
+        pytest.importorskip("pygeomag", reason="pygeomag not installed (post/dev extra)")
+        import math
+
+        data = georef.load_session(_heading_session(tmp_path))
+        info: dict = {}
+        xyz, _i, _o = georef.session_to_pointcloud(data, info=info)
+        d = math.radians(-self.D_STATE_COLLEGE)
+        np.testing.assert_allclose(xyz[0], [-math.sin(d), math.cos(d), 0.0], atol=1e-3)
+        assert info["heading_reference"] == "true"
+        assert info["declination_deg"] == pytest.approx(self.D_STATE_COLLEGE, abs=0.01)
+
+    def test_magnetic_label_without_gnss(self, tmp_path):
+        """Review Focus 4: mag at rest, no GNSS → 'magnetic', no declination,
+        forward = magnetic north = ENU +y."""
+        data = georef.load_session(_heading_session(tmp_path, with_gnss=False))
+        info: dict = {}
+        xyz, _i, _o = georef.session_to_pointcloud(data, info=info)
+        np.testing.assert_allclose(xyz[0], [0.0, 1.0, 0.0], atol=1e-9)
+        assert info["heading_reference"] == "magnetic"
+        assert info["declination_deg"] is None
+
+    def test_relative_label_without_mag(self, tmp_path):
+        data = georef.load_session(_heading_session(tmp_path, mag=None, with_gnss=False))
+        info: dict = {}
+        xyz, _i, _o = georef.session_to_pointcloud(data, info=info)
+        np.testing.assert_allclose(xyz[0], [1.0, 0.0, 0.0], atol=1e-9)
+        assert info["heading_reference"] == "relative"
+
+    def test_gyro_yaw_drift_during_sweep_is_ignored(self, tmp_path):
+        """The scan-time quaternion carries 30° of gyro yaw drift (mag off while
+        stepping, DEC-013). Yaw comes from the rest heading, so the point stays put."""
+        import math
+
+        h = math.radians(30.0) / 2
+        drifted = (math.cos(h), 0.0, 0.0, math.sin(h))
+        data = georef.load_session(_heading_session(tmp_path, scan_q=drifted, with_gnss=False))
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        np.testing.assert_allclose(xyz[0], [0.0, 1.0, 0.0], atol=1e-9)
+
+    def test_tilt_applied_per_scan(self, tmp_path):
+        """Base tilted 10° about body X, relative heading: at mast 90° the
+        forward point goes left, then the tilt lifts it: (0, cos10°, sin10°)."""
+        import math
+
+        h = math.radians(10.0) / 2
+        tilted = (math.cos(h), math.sin(h), 0.0, 0.0)
+        data = georef.load_session(
+            _heading_session(
+                tmp_path, rest_q=tilted, mag=None, with_gnss=False, mast_angles=(90.0,)
+            )
+        )
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        t = math.radians(10.0)
+        np.testing.assert_allclose(xyz[0], [0.0, math.cos(t), math.sin(t)], atol=1e-9)
+
+    def test_scan_time_tilt_used_not_rest_time_tilt(self, tmp_path):
+        """test_tilt_applied_per_scan (brief-verbatim) sets scan_q == rest_q, so
+        it cannot tell whether the tilt came from the scan-time orientation or
+        the rest-time one. Here the rest orientation is LEVEL (identity, mag
+        present -> yaw_ref = 90 deg, magnetic heading) and only the scan-time
+        orientation is tilted 10 deg about X; at mast 90 deg the point must
+        show that tilt, which is possible only if tilt comes from q_t
+        (orientation_at the scan timestamp), not from the rest sample:
+        world = Rz(90) . Rx(10) . mast-rotated-forward = (-cos10, 0, sin10)."""
+        import math
+
+        h = math.radians(10.0) / 2
+        tilted = (math.cos(h), math.sin(h), 0.0, 0.0)
+        data = georef.load_session(
+            _heading_session(tmp_path, scan_q=tilted, with_gnss=False, mast_angles=(90.0,))
+        )
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        t = math.radians(10.0)
+        np.testing.assert_allclose(xyz[0], [-math.cos(t), 0.0, math.sin(t)], atol=1e-9)
+
+    def test_platform_mount_matches_base_mount(self, tmp_path):
+        """An IMU riding the mast reports R_base · Rz(mast). With mount =
+        'platform' the mast rotation is removed before the tilt is taken, so
+        the cloud equals the base-mount cloud of the same scene.
+
+        The base is TILTED 10° about X on purpose: with a level base, strip_yaw
+        would discard a pure mast yaw anyway, and the test would pass even if
+        the mount were ignored. With a tilt, ignoring the mount makes the tilt
+        axis turn with the mast (strip_yaw(Rx·Rz(m)) != Rx), so the clouds differ."""
+        import math
+
+        h = math.radians(10.0) / 2
+        tilted = (math.cos(h), math.sin(h), 0.0, 0.0)
+        masts = (0.0, 45.0, 90.0, 135.0)
+        base = georef.session_to_pointcloud(
+            georef.load_session(
+                _heading_session(
+                    tmp_path, name="b", rest_q=tilted, mast_angles=masts, with_gnss=False
+                )
+            )
+        )[0]
+        plat = georef.session_to_pointcloud(
+            georef.load_session(
+                _heading_session(
+                    tmp_path,
+                    name="p",
+                    rest_q=tilted,
+                    mast_angles=masts,
+                    with_gnss=False,
+                    mount="platform",
+                    platform_q_follows_mast=True,
+                )
+            )
+        )[0]
+        np.testing.assert_allclose(plat, base, atol=1e-9)
+        # Same scene with the mount wrongly declared "base" must NOT match.
+        wrong = georef.session_to_pointcloud(
+            georef.load_session(
+                _heading_session(
+                    tmp_path,
+                    name="w",
+                    rest_q=tilted,
+                    mast_angles=masts,
+                    with_gnss=False,
+                    mount="base",
+                    platform_q_follows_mast=True,
+                )
+            )
+        )[0]
+        assert not np.allclose(wrong, base, atol=1e-6)
+
+    def test_lever_arm_on_axis(self, tmp_path):
+        """Antenna 0.5 m above the LiDAR: every point drops 0.5 m (relative heading)."""
+        data = georef.load_session(
+            _heading_session(tmp_path, mag=None, antenna_offset=[0.0, 0.0, 0.5])
+        )
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        np.testing.assert_allclose(xyz[0], [1.0, 0.0, -0.5], atol=1e-6)
+
+    def test_lever_arm_rotates_with_mast(self, tmp_path):
+        """Antenna 0.2 m ahead and 0.5 m up at mast 0; at mast 90° the arm
+        points left: forward point (0, 1, 0) minus arm (0, 0.2, 0.5)."""
+        data = georef.load_session(
+            _heading_session(
+                tmp_path, mag=None, antenna_offset=[0.2, 0.0, 0.5], mast_angles=(90.0,)
+            )
+        )
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        np.testing.assert_allclose(xyz[0], [0.0, 0.8, -0.5], atol=1e-6)
+
+    def test_lever_arm_uses_world_rotation_not_mast_alone(self, tmp_path):
+        """test_lever_arm_on_axis and test_lever_arm_rotates_with_mast both use
+        mag=None (relative heading, level rest_q), so r_world is the identity
+        there and cannot show whether the arm subtraction actually rotates by
+        r_world or just by the mast. Here the base is tilted 10 deg about X
+        (mag off, so heading stays relative/yaw_ref=0, but r_world = Rx(10) is
+        NOT identity) with antenna_offset_m = [0.2, 0.0, 0.5] at mast 0.
+
+        By hand: forward point world = (1, 0, 0) (mast 0, X-axis is invariant
+        under an X-tilt, so the point itself doesn't visibly move). GNSS has
+        one fix == the origin, so no ENU offset. The arm is
+        r_world @ (Rz(0) @ a) = Rx(10) @ (0.2, 0, 0.5)
+          = (0.2, -0.5*sin10, 0.5*cos10),
+        so the exported point is (1,0,0) - that arm =
+        (0.8, 0.5*sin10, -0.5*cos10) -- NOT (0.8, 0, -0.5), which is what a
+        mast-only (r_world-less) subtraction would give."""
+        import math
+
+        h = math.radians(10.0) / 2
+        tilted = (math.cos(h), math.sin(h), 0.0, 0.0)
+        data = georef.load_session(
+            _heading_session(tmp_path, rest_q=tilted, mag=None, antenna_offset=[0.2, 0.0, 0.5])
+        )
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        t = math.radians(10.0)
+        expected = [0.8, 0.5 * math.sin(t), -0.5 * math.cos(t)]
+        np.testing.assert_allclose(xyz[0], expected, atol=1e-6)
+        # A mast-only subtraction (dropping r_world) would give (0.8, 0, -0.5)
+        # instead -- confirm the two are not the same point.
+        assert not np.allclose(xyz[0], [0.8, 0.0, -0.5], atol=1e-6)
+
+    def test_old_session_without_geometry_or_events_loads(self, tmp_path):
+        """Pre-stage-5 sessions: no geometry, no sweep field, no sweep_start."""
+        sess = _make_session(tmp_path)
+        data = georef.load_session(sess)
+        assert data.sweep_starts == {}
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        assert len(xyz) == 4
+
+    # -----------------------------------------------------------------------
+    # Multi-sweep pinning (fix round 1): the brief's own _heading_session
+    # always builds exactly one sweep, so none of the tests above can tell
+    # the per-sweep rest window, the old-session rest_end fallback, or the
+    # missing-sweep reuse rule apart from a bug that happens to look right on
+    # a single sweep. These build a SessionData directly (bypassing the JSONL
+    # round trip, which is already pinned by test_old_session_..._loads and
+    # the true/magnetic/relative label tests above) to isolate
+    # _rest_samples_by_sweep's window arithmetic precisely.
+    # -----------------------------------------------------------------------
+
+    def test_rest_window_excludes_other_sweeps_scan_time_and_post_start_samples(
+        self, tmp_path, caplog
+    ):
+        """Three sweeps:
+          - sweep 0's rest sample is at t=0.0 (NWU yaw 0 deg); a mag sample at
+            t=1.5 sits DURING sweep 0's own scans (first lidar t=1.0, last
+            t=2.0) and must not leak into sweep 1's rest window (it would, if
+            the window dropped its prev_end lower bound).
+          - sweep 1's rest sample is at t=3.0 (NWU yaw -90 deg,
+            sweep_starts[1]=3.1); a mag sample at t=3.2, just AFTER that
+            sweep_start, must not leak in either (it would, if the window
+            dropped its rest_end upper bound).
+          - sweep 2 has no rest samples at all (sweep_starts[2]=4.9 is used
+            only as a rest_end bound, no mag sample falls in it) and must
+            reuse sweep 1's yaw_ref, with exactly one WARNING naming it.
+        No declination (no GNSS), so yaw_ref = yaw(Rz(90) . R(rest_q)):
+        sweep 0 (NWU 0) -> ENU +Y forward; sweep 1 and the reused sweep 2
+        (NWU -90) -> ENU +X forward."""
+        import math
+
+        def qz(deg):
+            half = math.radians(deg) / 2
+            return [math.cos(half), 0.0, 0.0, math.sin(half)]
+
+        def lidar(t, sweep):
+            return {
+                "type": "lidar",
+                "timestamp": t,
+                "mast_angle_deg": 0.0,
+                "angle": [0.0],
+                "distance": [1.0],
+                "intensity": [1],
+                "sweep": sweep,
+            }
+
+        imu = [
+            {"timestamp": 0.0, "orientation": qz(0.0), "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 1.5, "orientation": qz(45.0), "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 3.0, "orientation": qz(-90.0), "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 3.2, "orientation": qz(45.0), "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 5.0, "orientation": qz(45.0), "mag": None},
+        ]
+        session = georef.SessionData(
+            metadata={},
+            lidar_records=[lidar(1.0, 0), lidar(2.0, 0), lidar(3.5, 1), lidar(5.0, 2)],
+            imu_records=imu,
+            gnss_records=[],
+            sweep_starts={0: 0.5, 1: 3.1, 2: 4.9},
+        )
+        imu_sorted = sorted(imu, key=lambda r: r["timestamp"])
+        rest = georef._rest_samples_by_sweep(session, imu_sorted)
+        assert [s["timestamp"] for s in rest[0]] == [0.0]
+        assert [s["timestamp"] for s in rest[1]] == [3.0]
+        assert rest[2] == []
+
+        info: dict = {}
+        with caplog.at_level("WARNING", logger="georef"):
+            xyz, _i, _o = georef.session_to_pointcloud(session, info=info)
+        np.testing.assert_allclose(xyz[0], [0.0, 1.0, 0.0], atol=1e-9)  # sweep 0 @ t=1.0
+        np.testing.assert_allclose(xyz[1], [0.0, 1.0, 0.0], atol=1e-9)  # sweep 0 @ t=2.0
+        np.testing.assert_allclose(xyz[2], [1.0, 0.0, 0.0], atol=1e-9)  # sweep 1
+        np.testing.assert_allclose(xyz[3], [1.0, 0.0, 0.0], atol=1e-9)  # sweep 2, reused
+        reuse_warnings = [
+            r.message
+            for r in caplog.records
+            if r.levelname == "WARNING" and "rest heading" in r.message
+        ]
+        assert len(reuse_warnings) == 1
+        assert "2" in reuse_warnings[0]
+
+    def test_rest_window_uses_only_the_last_second_before_rest_end(self):
+        """I1: sweep 0's rest heading must come from where the acquisition-time
+        Madgwick filter has had a chance to converge -- the LAST second before
+        rest_end -- not an early, still-unconverged sample from earlier in the
+        same rest (the controller measured beta=0.1 needing up to ~30s to
+        fully converge; main.py's own sweep-0 heading-settle wait targets
+        exactly this trailing window)."""
+
+        def lidar(t, sweep):
+            return {
+                "type": "lidar",
+                "timestamp": t,
+                "mast_angle_deg": 0.0,
+                "angle": [0.0],
+                "distance": [1.0],
+                "intensity": [1],
+                "sweep": sweep,
+            }
+
+        imu = [
+            # 8 s before rest_end: still unconverged, must be dropped.
+            {"timestamp": 2.0, "orientation": [1.0, 0.0, 0.0, 0.0], "mag": [1.0, 0.0, 0.0]},
+            # 0.4 s before rest_end: inside the last second, kept.
+            {"timestamp": 9.6, "orientation": [1.0, 0.0, 0.0, 0.0], "mag": [1.0, 0.0, 0.0]},
+        ]
+        session = georef.SessionData(
+            metadata={},
+            lidar_records=[lidar(11.0, 0)],
+            imu_records=imu,
+            gnss_records=[],
+            sweep_starts={0: 10.0},
+        )
+        rest = georef._rest_samples_by_sweep(session, imu)
+        assert [s["timestamp"] for s in rest[0]] == [9.6]
+
+    def test_missing_sweeps_with_no_earlier_sweep_reuse_nearest_later(self, caplog):
+        """Fix round 2 (item 1c, second half): the reuse rule's "no earlier
+        sweep -> take the nearest LATER sweep" branch (the `else` in
+        `yaw_ref[max(earlier)] if earlier else yaw_ref[min(yaw_ref)]`) had no
+        test — every prior missing-sweep case had an earlier known sweep to
+        fall back to.
+
+        Sweeps 0 and 1 have NO rest samples at all (nothing precedes them);
+        sweep 2's rest sample is NWU yaw 0 deg (-> ENU +Y forward, yaw_ref=90);
+        sweep 3's is NWU yaw -90 deg (-> ENU +X forward, yaw_ref=0), a
+        DIFFERENT value. Sweeps 0 and 1 must both take sweep 2's yaw (the
+        nearest LATER sweep, via `min(yaw_ref)`), not sweep 3's -- and
+        exactly one WARNING must name both missing sweeps."""
+        import math
+
+        def qz(deg):
+            half = math.radians(deg) / 2
+            return [math.cos(half), 0.0, 0.0, math.sin(half)]
+
+        def lidar(t, sweep):
+            return {
+                "type": "lidar",
+                "timestamp": t,
+                "mast_angle_deg": 0.0,
+                "angle": [0.0],
+                "distance": [1.0],
+                "intensity": [1],
+                "sweep": sweep,
+            }
+
+        imu = [
+            {"timestamp": 2.4, "orientation": qz(0.0), "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 4.4, "orientation": qz(-90.0), "mag": [1.0, 0.0, 0.0]},
+        ]
+        session = georef.SessionData(
+            metadata={},
+            lidar_records=[lidar(1.0, 0), lidar(2.0, 1), lidar(3.0, 2), lidar(5.0, 3)],
+            imu_records=imu,
+            gnss_records=[],
+            sweep_starts={0: 0.5, 1: 1.5, 2: 2.5, 3: 4.5},
+        )
+        imu_sorted = sorted(imu, key=lambda r: r["timestamp"])
+        rest = georef._rest_samples_by_sweep(session, imu_sorted)
+        assert rest[0] == []
+        assert rest[1] == []
+        assert [s["timestamp"] for s in rest[2]] == [2.4]
+        assert [s["timestamp"] for s in rest[3]] == [4.4]
+
+        with caplog.at_level("WARNING", logger="georef"):
+            xyz, _i, _o = georef.session_to_pointcloud(session)
+        # sweep 2's own point (ENU +Y): sweeps 0 and 1 must match it exactly,
+        # not sweep 3's (ENU +X).
+        np.testing.assert_allclose(xyz[0], [0.0, 1.0, 0.0], atol=1e-9)  # sweep 0, reused
+        np.testing.assert_allclose(xyz[1], [0.0, 1.0, 0.0], atol=1e-9)  # sweep 1, reused
+        np.testing.assert_allclose(xyz[2], [0.0, 1.0, 0.0], atol=1e-9)  # sweep 2, own rest
+        np.testing.assert_allclose(xyz[3], [1.0, 0.0, 0.0], atol=1e-9)  # sweep 3, own rest
+        reuse_warnings = [
+            r.message
+            for r in caplog.records
+            if r.levelname == "WARNING" and "rest heading" in r.message
+        ]
+        assert len(reuse_warnings) == 1
+        assert "[0, 1]" in reuse_warnings[0]
+
+    def test_old_session_rest_end_falls_back_to_first_lidar_timestamp(self):
+        """No sweep_start events at all (pre-stage-5 session): rest_end for
+        sweep 0 must fall back to its FIRST lidar timestamp (10.0), not its
+        last (11.0) and not +inf. A mag sample just before 10.0 counts; one
+        just after must not, even though it is still well before the sweep's
+        last scan."""
+
+        def lidar(t):
+            return {
+                "type": "lidar",
+                "timestamp": t,
+                "mast_angle_deg": 0.0,
+                "angle": [0.0],
+                "distance": [1.0],
+                "intensity": [1],
+                "sweep": 0,
+            }
+
+        imu = [
+            {"timestamp": 9.9, "orientation": [1.0, 0.0, 0.0, 0.0], "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 10.1, "orientation": [1.0, 0.0, 0.0, 0.0], "mag": [1.0, 0.0, 0.0]},
+        ]
+        session = georef.SessionData(
+            metadata={},
+            lidar_records=[lidar(10.0), lidar(11.0)],
+            imu_records=imu,
+            gnss_records=[],
+            # sweep_starts intentionally empty: no sweep_start events.
+        )
+        rest = georef._rest_samples_by_sweep(session, imu)
+        assert [s["timestamp"] for s in rest[0]] == [9.9]
+
+    def test_circular_mean_wraps_across_plus_minus_180(self):
+        """Rest samples at yaw ~= +179 deg and -179 deg straddle the wrap
+        boundary; their true circular mean is 180 deg. A naive arithmetic
+        mean would silently give 0 deg -- the opposite heading."""
+        assert georef._circular_mean_deg([179.0, -179.0]) == pytest.approx(180.0, abs=1e-6)

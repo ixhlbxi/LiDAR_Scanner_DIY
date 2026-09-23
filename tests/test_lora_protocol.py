@@ -12,7 +12,6 @@ from rover.lora_protocol import (
     LINK_PAYLOAD_SIZE,
     STATUS_PAYLOAD_SIZE,
     TYPE_LINK,
-    TYPE_RTCM_CHUNK,
     TYPE_STATUS,
     FrameError,
     crc16_ccitt,
@@ -60,11 +59,17 @@ class TestFrameRoundtrip:
         assert decoded == payload
 
     def test_empty_payload_roundtrip(self):
-        frame = encode_frame(TYPE_RTCM_CHUNK, 0, b"")
+        frame = encode_frame(TYPE_LINK, 0, b"")
         ptype, seq, decoded = decode_frame(frame)
-        assert ptype == TYPE_RTCM_CHUNK
+        assert ptype == TYPE_LINK
         assert seq == 0
         assert decoded == b""
+
+    def test_rtcm_chunk_type_is_retired(self):
+        """DEC-031 amended 2026-09-23: no RTCM over LoRa; 0x10 stays reserved, unexported."""
+        from rover import lora_protocol
+
+        assert not hasattr(lora_protocol, "TYPE_RTCM_CHUNK")
 
     def test_frame_has_expected_overhead(self):
         # Frame: [version 1][type 1][seq 2][len 2][payload N][crc 2] = N + 8
@@ -221,3 +226,13 @@ def test_crc_matches_binascii():
 
     for data in (b"", b"\x00", b"123456789", bytes(range(256))):
         assert crc16_ccitt(data) == binascii.crc_hqx(data, 0xFFFF)
+
+
+def test_scan_rewinding_state_encodes():
+    from rover.lora_protocol import SCAN_REWINDING, decode_status_payload, encode_status_payload
+
+    assert SCAN_REWINDING == 4
+    payload = encode_status_payload(
+        fix_type=5, sat_count=18, hdop=0.85, battery_mv=11800, scan_state=SCAN_REWINDING
+    )
+    assert decode_status_payload(payload)["scan_state"] == 4

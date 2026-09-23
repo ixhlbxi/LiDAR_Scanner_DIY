@@ -25,12 +25,14 @@ dev = [
     "pytest",
     "ruff>=0.16,<0.17",
     "pyubx2",
+    "pygeomag>=1.1,<2",
 ]
 # Post-processing / CRS-aware export (DEC-034, Phase E)
 post = [
     "laspy",
     "pyproj",
     "numpy",
+    "pygeomag>=1.1,<2",
 ]
 
 [tool.setuptools.packages.find]

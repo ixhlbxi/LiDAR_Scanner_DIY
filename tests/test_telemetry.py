@@ -315,7 +315,7 @@ class TestTelemetryRouter:
         assert names == ["status_json"]
 
     def test_default_config_has_lora_only(self):
-        """Default config: lora.enabled=true, role=rtcm_rx+status_tx, others off."""
+        """Default config: lora.enabled=true, role=status_tx_only, others off."""
         cfg = load_config()
         router = TelemetryRouter(cfg)
         names = [p.name for p in router.publishers]

@@ -24,6 +24,9 @@ Changelog:
                         changed 1 -> 0 ("0 = use the code constant") and its
                         validation loosened from "must be positive" to ">= 0"
                         (telemetry schema v2, T1-030).
+    0.1.3  2026-09-23  StepperConfig adds sweep_deg/rewind_rpm/rest_before_sweep_sec;
+                        ImuConfig adds mount; CalibrationConfig adds antenna_offset_m
+                        (Task 2, Stage 5 scan geometry).
 """
 
 from __future__ import annotations
@@ -110,6 +113,9 @@ class StepperConfig:
     direction_pin: int
     step_pin: int
     enable_pin: int
+    sweep_deg: float = 360.0  # DEC-015 (amended): 360° forward, then rewind; never more
+    rewind_rpm: float = 10.0
+    rest_before_sweep_sec: float = 2.0  # IMU settles with the magnetometer on before each sweep
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,7 @@ class ImuConfig:
     sample_rate_hz: int
     use_magnetometer: bool
     fusion_beta: float
+    mount: str = "base"  # "base" (fixed body) | "platform" (turns with the mast) — S3-R3
 
 
 @dataclass(frozen=True)
@@ -139,7 +146,7 @@ class LoraConfig:
     coding_rate: str
     telemetry_interval_sec: float
     sync_word: int = 0x12
-    role: str = "rtcm_rx+status_tx"
+    role: str = "status_tx_only"
 
 
 @dataclass(frozen=True)
@@ -174,6 +181,9 @@ class CalibrationConfig:
     imu_to_gnss_translation: list[float] | None = None
     mag_offset: list[float] | None = (
         None  # hard-iron offset (x, y, z) in µT, body frame; None = uncalibrated
+    )
+    antenna_offset_m: list[float] | None = (
+        None  # LiDAR centre → antenna phase centre, metres, platform frame at mast 0
     )
 
 
@@ -234,6 +244,9 @@ _DEFAULTS: dict = {
         "direction_pin": 17,
         "step_pin": 27,
         "enable_pin": 22,
+        "sweep_deg": 360.0,
+        "rewind_rpm": 10.0,
+        "rest_before_sweep_sec": 2.0,
     },
     "imu": {
         "enabled": True,
@@ -242,6 +255,7 @@ _DEFAULTS: dict = {
         "sample_rate_hz": 200,
         "use_magnetometer": False,
         "fusion_beta": 0.1,
+        "mount": "base",
     },
     "gnss": {
         "enabled": True,
@@ -269,9 +283,9 @@ _DEFAULTS: dict = {
         "spreading_factor": 7,
         "bandwidth_khz": 125,
         "coding_rate": "4/5",
-        "telemetry_interval_sec": 1.0,
+        "telemetry_interval_sec": 10.0,
         "sync_word": 0x12,
-        "role": "rtcm_rx+status_tx",
+        "role": "status_tx_only",
     },
     "base_station_integration": {
         "enabled": False,
@@ -464,6 +478,21 @@ def _validate(raw: dict) -> None:
         _require_type("stepper", pin_key, st[pin_key], int)
         _require_range("stepper", pin_key, st[pin_key], 0, 27)
 
+    _require_type("stepper", "sweep_deg", st["sweep_deg"], (int, float))
+    st["sweep_deg"] = float(st["sweep_deg"])
+    if not (st["step_interval_deg"] <= st["sweep_deg"] <= 360.0):
+        raise ValueError(
+            f"[stepper] sweep_deg ({st['sweep_deg']}) must be between step_interval_deg "
+            f"({st['step_interval_deg']}) and 360 (DEC-015: no slip ring)"
+        )
+    _require_type("stepper", "rewind_rpm", st["rewind_rpm"], (int, float))
+    _require_positive("stepper", "rewind_rpm", st["rewind_rpm"])
+    st["rewind_rpm"] = float(st["rewind_rpm"])
+    _require_type("stepper", "rest_before_sweep_sec", st["rest_before_sweep_sec"], (int, float))
+    if st["rest_before_sweep_sec"] < 0:
+        raise ValueError("[stepper] rest_before_sweep_sec must be >= 0")
+    st["rest_before_sweep_sec"] = float(st["rest_before_sweep_sec"])
+
     # -- imu --
     im = raw["imu"]
     _require_type("imu", "enabled", im["enabled"], bool)
@@ -482,6 +511,8 @@ def _validate(raw: dict) -> None:
     _require_type("imu", "fusion_beta", im["fusion_beta"], (int, float))
     _require_range("imu", "fusion_beta", im["fusion_beta"], 0.0, 1.0)
     im["fusion_beta"] = float(im["fusion_beta"])
+    _require_type("imu", "mount", im["mount"], str)
+    _require_in("imu", "mount", im["mount"], {"base", "platform"})
 
     # -- gnss --
     gn = raw["gnss"]
@@ -532,7 +563,7 @@ def _validate(raw: dict) -> None:
     _require_type("lora", "sync_word", lo["sync_word"], int)
     _require_range("lora", "sync_word", lo["sync_word"], 0, 0xFF)
     _require_type("lora", "role", lo["role"], str)
-    _require_in("lora", "role", lo["role"], {"rtcm_rx+status_tx", "status_tx_only", "disabled"})
+    _require_in("lora", "role", lo["role"], {"status_tx_only", "disabled"})
 
     # -- base_station_integration (DEC-033 channel A) --
     bsi = raw["base_station_integration"]
@@ -616,7 +647,12 @@ def _validate(raw: dict) -> None:
 
     # -- calibration (all optional) --
     cal = raw.get("calibration", {})
-    for key in ("lidar_to_imu_translation", "imu_to_gnss_translation", "mag_offset"):
+    for key in (
+        "lidar_to_imu_translation",
+        "imu_to_gnss_translation",
+        "mag_offset",
+        "antenna_offset_m",
+    ):
         if key in cal and cal[key] is not None:
             v = cal[key]
             if not isinstance(v, list) or len(v) != 3:
@@ -682,6 +718,7 @@ def _build_config(raw: dict) -> RoverConfig:
             lidar_to_imu_rotation=cal_raw.get("lidar_to_imu_rotation"),
             imu_to_gnss_translation=cal_raw.get("imu_to_gnss_translation"),
             mag_offset=cal_raw.get("mag_offset"),
+            antenna_offset_m=cal_raw.get("antenna_offset_m"),
         ),
     )
 

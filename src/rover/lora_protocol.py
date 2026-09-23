@@ -2,8 +2,7 @@
 
 Implements the LoRa frame v2 spec described in docs/BASE_STATION_INTEGRATION.md §4
 and CLAUDE.md Appendix C. The same envelope is encoded/decoded on the Base-Station
-Heltec V3 (DISPLAY + RTCM_CHUNK Tx) and the rover ESP32 (STATUS + LINK Tx,
-RTCM_CHUNK Rx) firmware.
+Heltec V3 (DISPLAY Tx) and the rover ESP32 (STATUS + LINK Tx) firmware.
 
 Frame layout (no Sync bytes — LoRa PHY preamble + sync_word handles synchronization):
 
@@ -14,7 +13,7 @@ Payload byte (i.e. everything except the trailing CRC).
 
 Public API:
     FRAME_VERSION
-    TYPE_STATUS, TYPE_LINK, TYPE_RTCM_CHUNK, TYPE_DISPLAY, TYPE_DEBUG_TEXT
+    TYPE_STATUS, TYPE_LINK, TYPE_DISPLAY, TYPE_DEBUG_TEXT
     encode_frame(packet_type, sequence, payload) -> bytes
     decode_frame(frame_bytes) -> (packet_type, sequence, payload)  | raises FrameError
     encode_status_payload(...) -> bytes
@@ -25,6 +24,8 @@ Dependencies: stdlib only.
 
 Changelog:
     0.10.0  2026-05-23  Initial v2 implementation (Phase B of overhaul).
+    0.11.0  2026-09-23  TYPE_RTCM_CHUNK removed (DEC-031 amended: LoRa is
+                        status-only); 0x10 reserved.
 """
 
 from __future__ import annotations
@@ -37,7 +38,8 @@ FRAME_VERSION: int = 0x02
 # Packet types (see BASE_STATION_INTEGRATION.md §4)
 TYPE_STATUS: int = 0x01  # rover → handhelds/base
 TYPE_LINK: int = 0x02  # rover → handhelds/base
-TYPE_RTCM_CHUNK: int = 0x10  # base → rover
+# 0x10 was RTCM_CHUNK (base → rover). Retired 2026-09-23 with DEC-031's
+# amendment; the value stays reserved so no future type reuses it.
 TYPE_DISPLAY: int = 0x20  # base → handhelds (rover ignores)
 TYPE_DEBUG_TEXT: int = 0x7F  # any direction
 
@@ -138,6 +140,7 @@ SCAN_IDLE = 0
 SCAN_SCANNING = 1
 SCAN_PAUSED = 2
 SCAN_ERROR = 3
+SCAN_REWINDING = 4  # mast returning home after a sweep; no data logged (DEC-015 amended)
 
 
 def encode_status_payload(
@@ -154,7 +157,7 @@ def encode_status_payload(
         sat_count: 0..255.
         hdop: Floating-point HDOP; encoded as round(hdop*100) clamped to uint16.
         battery_mv: 0..65535.
-        scan_state: 0..3 (see SCAN_* constants).
+        scan_state: 0..4 (see SCAN_* constants).
     """
     if not (0 <= fix_type <= 0xFF):
         raise ValueError(f"fix_type out of range: {fix_type}")

@@ -7,6 +7,7 @@ sensor init failures.
 
 from __future__ import annotations
 
+import math
 import sys
 import threading
 import time
@@ -83,6 +84,11 @@ def test_run_all_disabled_clean_exit(tmp_path: Path) -> None:
     assert (session / "scan.jsonl").exists()
     assert (session / "metadata.json").exists()
     assert (session / "config.toml").exists()
+
+    import json
+
+    meta = json.loads((session / "metadata.json").read_text())
+    assert "lora_rtcm_used" not in meta
 
 
 def test_external_stop_event_aborts_promptly(tmp_path: Path) -> None:
@@ -464,23 +470,30 @@ class _StaticLidar:
 
 
 class _FakeStepper:
+    moves: list[tuple[int, float | None]] = []
+
     def __init__(self, *_a, **_kw) -> None:
-        self._angle = 0.0
+        self._step = 0
 
     @property
     def available(self) -> bool:
         return True
 
     @property
+    def current_step(self) -> int:
+        return self._step
+
+    @property
     def current_angle(self) -> float:
-        return self._angle
+        return self._step * (360.0 / 3200)
 
     def start(self) -> None: ...
 
     def stop(self) -> None: ...
 
-    def step(self, steps: int) -> None:
-        self._angle += steps * (360.0 / 3200)
+    def step(self, steps: int, rpm: float | None = None) -> None:
+        type(self).moves.append((steps, rpm))
+        self._step += steps
 
 
 class _FakeImu:
@@ -520,6 +533,12 @@ class _FakeImu:
             ),
         ]
 
+    def latest(self):
+        """None by default: the sweep-0 heading-settle helper (I1) then skips
+        immediately, adding no extra wait, so existing tests' timing is
+        unaffected. Subclasses override this to exercise the settle path."""
+        return None
+
 
 def _stage3_config(tmp_path: Path) -> Path:
     cfg = tmp_path / "s3.toml"
@@ -533,6 +552,7 @@ scan_rate_hz = 10
 enabled = true
 steps_per_rev = 3200
 step_interval_deg = 1.125
+rest_before_sweep_sec = 0.0
 
 [imu]
 enabled = true
@@ -584,13 +604,16 @@ def test_records_are_columnar_with_mast_angle_and_imu_batches(tmp_path: Path, mo
     assert r["mast_angle_deg"] == pytest.approx(1.125)  # after the first 10-microstep move
     assert "points" not in r
     assert len(lidar) >= 2 and lidar[1]["mast_angle_deg"] == pytest.approx(2.25)
+    assert r["sweep"] == 0
     # IMU batches
     assert imu, "no imu records"
     b = imu[0]
     assert b["t"] == [1.0, 1.005] and b["mag"] == [None, [1, 2, 3]]
     assert b["orientation"][0] == [1, 0, 0, 0]
-    # DEC-013: mag disabled before each step, re-enabled after settle
-    assert _FakeImu.mag_calls[:2] == [False, True]
+    # The first iteration is the rest (magnetometer on); DEC-013 gating then
+    # disables it before each step and re-enables it after settle.
+    assert _FakeImu.mag_calls[0] is True
+    assert _FakeImu.mag_calls[1:3] == [False, True]
     # stale discard after a step
     assert _StaticLidar.calls and all(_StaticLidar.calls)
 
@@ -694,7 +717,7 @@ session_prefix = "ag"
 class _BrokenStepper(_FakeStepper):
     fails = 0
 
-    def step(self, steps: int) -> None:
+    def step(self, steps: int, rpm: float | None = None) -> None:
         type(self).fails += 1
         raise RuntimeError("stall")
 
@@ -810,6 +833,7 @@ def test_scan_state_persists_through_mid_session_ntrip_fatal(tmp_path: Path, mon
 enabled = true
 steps_per_rev = 3200
 step_interval_deg = 1.125
+rest_before_sweep_sec = 0.0
 
 [lidar]
 enabled = false
@@ -857,3 +881,407 @@ session_prefix = "i4"
     assert all(s == main_mod.SCAN_ERROR for s in tail), (
         f"a healthy step must not clear an unresolved NTRIP fatal: {published}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 5 Task 4 — the acquisition loop executes the 360-then-rewind sweep
+# ---------------------------------------------------------------------------
+
+
+def _sweep_config(tmp_path: Path, sweep_deg: float = 9.0, rest: float = 0.05) -> Path:
+    cfg = tmp_path / "sweep.toml"
+    cfg.write_text(
+        f"""
+[lidar]
+enabled = true
+scan_rate_hz = 20                 # config allows 1..20; 50 ms settle keeps these tests short
+
+[stepper]
+enabled = true
+steps_per_rev = 3200
+step_interval_deg = 1.125
+sweep_deg = {sweep_deg}
+rewind_rpm = 30.0
+rest_before_sweep_sec = {rest}
+
+[imu]
+enabled = true
+use_magnetometer = true
+mount = "platform"
+
+[calibration]
+antenna_offset_m = [0.0, 0.0, 0.35]
+
+[gnss]
+enabled = false
+[camera]
+enabled = false
+[ntrip]
+enabled = false
+[lora]
+enabled = false
+role = "disabled"
+[base_station_integration]
+enabled = false
+[telemetry]
+http_enabled = false
+[watchdog]
+enabled = false
+
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "sw"
+"""
+    )
+    return cfg
+
+
+def _records(tmp_path: Path, prefix: str) -> tuple[list[dict], dict]:
+    import json
+
+    session = next((tmp_path / "data").glob(f"{prefix}_*"))
+    recs = [json.loads(x) for x in (session / "scan.jsonl").read_text().splitlines() if x]
+    meta = json.loads((session / "metadata.json").read_text())
+    return recs, meta
+
+
+def test_sweep_rewinds_and_never_exceeds_sweep_deg(tmp_path: Path, monkeypatch) -> None:
+    """DEC-015 (amended): 9° forward, rewind, repeat — the mast never passes 9°."""
+    _FakeStepper.moves = []
+    published: list[int] = []
+    monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
+
+    class _SpyRouter(main_mod.TelemetryRouter):
+        def publish(self, status):
+            published.append(status.scan_state)
+            return super().publish(status)
+
+    monkeypatch.setattr(main_mod, "TelemetryRouter", _SpyRouter)
+    assert main_mod.run(config_path=_sweep_config(tmp_path), duration_sec=4.0) == 0
+
+    pos = peak = 0
+    for steps, _rpm in _FakeStepper.moves:
+        pos += steps
+        peak = max(peak, pos)
+    assert peak == 80  # 9° at 3200 steps/rev
+    rewinds = [(s, rpm) for s, rpm in _FakeStepper.moves if s < 0]
+    assert rewinds, "never rewound"
+    assert all(rpm == 30.0 for _s, rpm in rewinds)
+    assert all(rpm is None for s, rpm in _FakeStepper.moves if s > 0)
+    assert main_mod.SCAN_REWINDING in published
+
+    recs, meta = _records(tmp_path, "sw")
+    lidar = [r for r in recs if r["type"] == "lidar"]
+    assert {r["sweep"] for r in lidar} >= {0, 1}
+    assert all(
+        0.0 < r["mast_angle_deg"] <= 9.0 for r in lidar
+    )  # nothing logged at home / mid-rewind
+    starts = [r for r in recs if r.get("event") == "sweep_start"]
+    assert [e["details"]["sweep"] for e in starts][:2] == [0, 1]
+    assert meta["geometry"] == {
+        "imu_mount": "platform",
+        "antenna_offset_m": [0.0, 0.0, 0.35],
+        "sweep_deg": 9.0,
+        "rewind_rpm": 30.0,
+        "rest_before_sweep_sec": 0.05,
+    }
+
+
+class _MarkingImu(_FakeImu):
+    """Marks every sample drained while the magnetometer is off. Only the
+    rewind drains with it off: a scan step re-enables it after settle (before
+    the drain), and a rest enables it before draining."""
+
+    marked = 0
+
+    def drain(self):
+        from rover.imu import ImuSample
+
+        rewinding = bool(type(self).mag_calls) and type(self).mag_calls[-1] is False
+        if rewinding:
+            type(self).marked += 1
+        q = (0.0, 1.0, 0.0, 0.0) if rewinding else (1.0, 0.0, 0.0, 0.0)
+        return [
+            ImuSample(
+                timestamp=time.time(), accel=(0, 0, 9.81), gyro=(0, 0, 0), mag=None, orientation=q
+            )
+        ]
+
+
+def test_no_records_logged_during_rewind(tmp_path: Path, monkeypatch) -> None:
+    """Rewind drains the IMU and discards it; no marked sample reaches scan.jsonl,
+    and no lidar record is written between a sweep's end and the next sweep_start."""
+    _FakeStepper.moves = []
+    _FakeImu.mag_calls = []
+    _MarkingImu.marked = 0
+    monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _MarkingImu)
+    assert main_mod.run(config_path=_sweep_config(tmp_path), duration_sec=4.0) == 0
+    recs, _meta = _records(tmp_path, "sw")
+    assert _MarkingImu.marked >= 1, "no rewind drain happened — the test proves nothing"
+    logged_orientations = [o for r in recs if r["type"] == "imu" for o in r["orientation"]]
+    assert [0.0, 1.0, 0.0, 0.0] not in logged_orientations
+    last0 = max(r["timestamp"] for r in recs if r["type"] == "lidar" and r["sweep"] == 0)
+    start1 = next(
+        r["timestamp"]
+        for r in recs
+        if r.get("event") == "sweep_start" and r["details"]["sweep"] == 1
+    )
+    assert not [r for r in recs if r["type"] == "lidar" and last0 < r["timestamp"] < start1]
+
+
+def test_stop_during_rewind_is_prompt(tmp_path: Path, monkeypatch) -> None:
+    """Review Focus 2: a stop during a rewind ends the loop after the current
+    45° chunk; teardown then returns the rest of the way home in one move."""
+    moves: list[tuple[int, float | None]] = []
+    stop = threading.Event()
+
+    class _SlowRewindStepper(_FakeStepper):
+        def step(self, steps: int, rpm: float | None = None) -> None:
+            moves.append((steps, rpm))
+            if steps < 0 and not stop.is_set():
+                time.sleep(0.2)  # a chunk takes time on real hardware
+                stop.set()  # SIGTERM arrives mid-rewind
+            self._step += steps
+
+    monkeypatch.setattr(main_mod, "StepperMotor", _SlowRewindStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
+    t0 = time.monotonic()
+    assert (
+        main_mod.run(
+            config_path=_sweep_config(tmp_path, sweep_deg=90.0, rest=0.0),
+            duration_sec=30.0,
+            stop_event=stop,
+        )
+        == 0
+    )
+    assert time.monotonic() - t0 < 25.0
+    negatives = [(s, rpm) for s, rpm in moves if s < 0]
+    # 90° = 800 steps: one 400-step loop chunk, then the teardown's 400-step return home.
+    assert negatives == [(-400, 30.0), (-400, 30.0)], negatives
+    assert sum(s for s, _ in moves) == 0, "mast not home after shutdown"
+
+
+def test_shutdown_mid_sweep_returns_home(tmp_path: Path, monkeypatch) -> None:
+    """No home switch exists: the next session treats its start position as
+    step 0. A clean stop mid-sweep must therefore return the mast home, or the
+    cables wind a little further every session (DEC-015)."""
+    _FakeStepper.moves = []
+    monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
+    # 90° sweep takes ~4 s at 20 Hz; stopping at 1 s lands mid-sweep.
+    assert (
+        main_mod.run(
+            config_path=_sweep_config(tmp_path, sweep_deg=90.0, rest=0.0), duration_sec=1.0
+        )
+        == 0
+    )
+    assert sum(s for s, _ in _FakeStepper.moves) == 0
+    last_steps, last_rpm = _FakeStepper.moves[-1]
+    assert last_steps < 0 and last_rpm == 30.0
+    recs, _meta = _records(tmp_path, "sw")
+    homes = [r for r in recs if r.get("event") == "returned_home"]
+    assert len(homes) == 1 and homes[0]["details"]["steps"] == -last_steps
+
+
+def test_return_home_failure_is_logged_not_raised(tmp_path: Path, monkeypatch) -> None:
+    """A stepper that fails during the return home must not crash teardown;
+    the session records that the mast is NOT home so the operator can fix it."""
+
+    class _FailsHomeStepper(_FakeStepper):
+        def step(self, steps: int, rpm: float | None = None) -> None:
+            if steps < 0 and rpm == 30.0 and self._step > 0 and stop_seen[0]:
+                raise RuntimeError("stall on the way home")
+            super().step(steps, rpm)
+
+    stop_seen = [False]
+    monkeypatch.setattr(main_mod, "StepperMotor", _FailsHomeStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
+    real_return_home = main_mod._return_home
+
+    def _spy(*a, **kw):
+        stop_seen[0] = True
+        return real_return_home(*a, **kw)
+
+    monkeypatch.setattr(main_mod, "_return_home", _spy)
+    assert (
+        main_mod.run(
+            config_path=_sweep_config(tmp_path, sweep_deg=90.0, rest=0.0), duration_sec=1.0
+        )
+        == 0
+    )
+    recs, _meta = _records(tmp_path, "sw")
+    fails = [r for r in recs if r.get("event") == "return_home_failed"]
+    assert len(fails) == 1 and fails[0]["details"]["steps_from_home"] > 0
+
+
+# ---------------------------------------------------------------------------
+# I1: sweep 0's rest heading waits for the Madgwick filter to settle
+# ---------------------------------------------------------------------------
+
+
+def _yaw_quat(deg: float) -> tuple[float, float, float, float]:
+    """Scalar-first quaternion for a pure yaw rotation of *deg* degrees."""
+    half = math.radians(deg) / 2.0
+    return (math.cos(half), 0.0, 0.0, math.sin(half))
+
+
+class _ConvergingImu:
+    """latest().orientation's yaw converges exponentially toward *target_deg*
+    with time constant *tau_sec* — stands in for an unconverged Madgwick
+    filter that settles quickly enough for a fast test."""
+
+    def __init__(self, target_deg: float = 90.0, tau_sec: float = 0.03) -> None:
+        self._t0 = time.monotonic()
+        self._target = target_deg
+        self._tau = tau_sec
+
+    def latest(self):
+        from rover.imu import ImuSample
+
+        t = time.monotonic() - self._t0
+        yaw = self._target * (1.0 - math.exp(-t / self._tau))
+        return ImuSample(
+            timestamp=time.time(),
+            accel=(0, 0, 9.81),
+            gyro=(0, 0, 0),
+            mag=(1, 2, 3),
+            orientation=_yaw_quat(yaw),
+        )
+
+
+class _NeverSettlingImu:
+    """latest().orientation's yaw climbs steadily and never stabilizes."""
+
+    def __init__(self, deg_per_sec: float = 90.0) -> None:
+        self._t0 = time.monotonic()
+        self._rate = deg_per_sec
+
+    def latest(self):
+        from rover.imu import ImuSample
+
+        t = time.monotonic() - self._t0
+        return ImuSample(
+            timestamp=time.time(),
+            accel=(0, 0, 9.81),
+            gyro=(0, 0, 0),
+            mag=(1, 2, 3),
+            orientation=_yaw_quat(self._rate * t),
+        )
+
+
+class _NoSampleImu:
+    def latest(self):
+        return None
+
+
+def test_heading_settle_converges_within_tolerance(monkeypatch) -> None:
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_WINDOW_SEC", 0.05)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_TOL_DEG", 0.5)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_MAX_SEC", 2.0)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_POLL_SEC", 0.01)
+    elapsed, settled = main_mod._wait_for_heading_settle(
+        _ConvergingImu(target_deg=90.0, tau_sec=0.03), threading.Event(), watchdog=None
+    )
+    assert settled is True
+    assert elapsed < 2.0  # converged well before the cap
+
+
+def test_heading_settle_caps_and_warns_when_never_settled(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_WINDOW_SEC", 0.02)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_TOL_DEG", 0.5)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_MAX_SEC", 0.05)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_POLL_SEC", 0.01)
+    with caplog.at_level("WARNING", logger="rover.main"):
+        elapsed, settled = main_mod._wait_for_heading_settle(
+            _NeverSettlingImu(), threading.Event(), watchdog=None
+        )
+    assert settled is False
+    assert elapsed >= 0.05 - 1e-3
+    assert any("not settled" in r.message for r in caplog.records)
+
+
+def test_heading_settle_skips_immediately_with_no_sample() -> None:
+    elapsed, settled = main_mod._wait_for_heading_settle(
+        _NoSampleImu(), threading.Event(), watchdog=None
+    )
+    assert elapsed == 0.0
+    assert settled is False
+
+
+def test_heading_settle_returns_promptly_when_stop_event_is_set(monkeypatch) -> None:
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_MAX_SEC", 60.0)
+    stop_event = threading.Event()
+    stop_event.set()
+    started = time.monotonic()
+    elapsed, settled = main_mod._wait_for_heading_settle(
+        _ConvergingImu(), stop_event, watchdog=None
+    )
+    assert time.monotonic() - started < 1.0
+    assert settled is False
+    assert elapsed < 1.0
+
+
+def test_heading_settle_heartbeats_the_watchdog_during_the_wait(monkeypatch) -> None:
+    """The main loop's own heartbeat only runs at the top of each iteration —
+    too infrequent once this wait can run up to _HEADING_SETTLE_MAX_SEC."""
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_MAX_SEC", 0.05)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_POLL_SEC", 0.01)
+    beats: list[float] = []
+
+    class _SpyWatchdog:
+        def heartbeat(self) -> None:
+            beats.append(time.monotonic())
+
+    main_mod._wait_for_heading_settle(_NeverSettlingImu(), threading.Event(), _SpyWatchdog())
+    assert len(beats) >= 2
+
+
+def test_sweep0_rest_records_settle_details(tmp_path: Path, monkeypatch) -> None:
+    """A main-loop test: sweep 0's sweep_start details carry the actual rest
+    seconds (configured rest + any extra settle wait) and whether the
+    heading settled; later sweeps are unchanged (heading_settled: null)."""
+
+    class _SettlingImu(_FakeImu):
+        """A fixed, unmoving orientation so the settle converges as soon as
+        one window has elapsed."""
+
+        def latest(self):
+            from rover.imu import ImuSample
+
+            return ImuSample(
+                timestamp=time.time(),
+                accel=(0, 0, 9.81),
+                gyro=(0, 0, 0),
+                mag=(1, 2, 3),
+                orientation=(1.0, 0.0, 0.0, 0.0),
+            )
+
+    _FakeStepper.moves = []
+    _FakeImu.mag_calls = []
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_WINDOW_SEC", 0.02)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_TOL_DEG", 0.5)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_MAX_SEC", 1.0)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_POLL_SEC", 0.01)
+    monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _SettlingImu)
+    assert main_mod.run(config_path=_sweep_config(tmp_path), duration_sec=4.0) == 0
+
+    recs, _meta = _records(tmp_path, "sw")
+    starts = [r for r in recs if r.get("event") == "sweep_start"]
+    assert len(starts) >= 2, "need at least two sweeps to see sweep 0 vs. a later sweep"
+    first = starts[0]["details"]
+    assert first["sweep"] == 0
+    assert first["heading_settled"] is True
+    assert first["rest_sec"] > 0.05  # configured rest (0.05) plus the settle wait
+    later = starts[1]["details"]
+    assert later["sweep"] == 1
+    assert later["heading_settled"] is None
+    assert later["rest_sec"] == pytest.approx(0.05)
