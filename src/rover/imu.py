@@ -29,6 +29,9 @@ Changelog:
     0.2.0   2026-03-22  Full implementation
     0.11.0  2026-09-22  Sampling thread with monotonic dt, drain()/latest(),
                          bus-error shutdown, MARG hard-iron offset wiring
+    0.11.1  2026-09-22  Fix round 1: dt bookkeeping + filter update atomic
+                         under the bus lock, sampling thread also survives
+                         struct.error, stop() warns on a stuck thread
 """
 
 from __future__ import annotations
@@ -295,6 +298,9 @@ class ImuDriver:
 
         self._bus_lock = threading.Lock()
         self._state_lock = threading.Lock()
+        # ~10 s of un-drained samples at sample_rate_hz; if drain() is not
+        # called at least that often, the oldest un-drained samples are
+        # silently dropped as the deque rolls over.
         self._pending: collections.deque[ImuSample] = collections.deque(
             maxlen=config.sample_rate_hz * 10
         )
@@ -439,6 +445,8 @@ class ImuDriver:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                logger.warning("IMU sampling thread did not stop within the 2.0 s join timeout")
             self._thread = None
 
         try:
@@ -453,27 +461,41 @@ class ImuDriver:
         logger.info("IMU stopped")
 
     def _read_one(self) -> ImuSample:
-        """One locked bus read + filter step. Raises OSError on bus failure."""
+        """One locked bus read, dt bookkeeping, and filter update.
+
+        The whole thing — the bus read, the `_last_mono` read/compute/write,
+        and the (not thread-safe) `MadgwickFilter.update()` call — runs under
+        `_bus_lock` as one unit. `read_sample()` (direct diagnostic reads) and
+        the sampling thread both call this; without the lock covering the dt
+        bookkeeping too, one caller can observe a stale `_last_mono` written
+        by the other and compute a negative or duplicated `dt`, and two
+        interleaved `update()` calls can corrupt the shared quaternion.
+
+        Raises:
+            OSError: On an I2C bus failure.
+            struct.error: On a malformed/short read.
+        """
         with self._bus_lock:
             accel, gyro = self._read_accel_gyro()
             mag = self._read_mag() if self._mag_enabled else None
-        now_mono = time.monotonic()
-        dt = (
-            (now_mono - self._last_mono)
-            if self._last_mono is not None
-            else 1.0 / self._config.sample_rate_hz
-        )
-        self._last_mono = now_mono
-        if mag is not None:
-            self._filter.update(*gyro, *accel, dt, *mag)
-        else:
-            self._filter.update(*gyro, *accel, dt)
+            now_mono = time.monotonic()
+            dt = (
+                (now_mono - self._last_mono)
+                if self._last_mono is not None
+                else 1.0 / self._config.sample_rate_hz
+            )
+            self._last_mono = now_mono
+            if mag is not None:
+                self._filter.update(*gyro, *accel, dt, *mag)
+            else:
+                self._filter.update(*gyro, *accel, dt)
+            orientation = self._filter.quaternion
         return ImuSample(
             timestamp=time.time(),
             accel=accel,
             gyro=gyro,
             mag=mag,
-            orientation=self._filter.quaternion,
+            orientation=orientation,
         )
 
     def read_sample(self) -> ImuSample:
@@ -502,12 +524,13 @@ class ImuDriver:
         while not self._stop_event.is_set():
             try:
                 sample = self._read_one()
-            except OSError as e:
+            except (OSError, struct.error) as e:
                 self._consecutive_errors += 1
                 if self._consecutive_errors >= _IMU_MAX_CONSECUTIVE_ERRORS:
                     logger.warning(
-                        "IMU: %d consecutive bus errors — sampling stopped, subsystem unavailable (last: %s)",
+                        "IMU: %d consecutive %s errors — sampling stopped, subsystem unavailable (last: %s)",
                         self._consecutive_errors,
+                        type(e).__name__,
                         e,
                     )
                     self._available = False

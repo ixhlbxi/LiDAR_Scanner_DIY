@@ -38,7 +38,19 @@ def disabled_config():
 
 @pytest.fixture
 def mock_smbus():
-    """Patch smbus2 and availability flag for off-Pi testing."""
+    """Patch smbus2 and availability flag for off-Pi testing.
+
+    Patches only `time.sleep` (a no-op), not the whole `time` module: `start()`
+    now also launches the sampling thread, and `rover.imu.time` IS the real
+    `time` module (same `sys.modules` singleton the thread's `time.monotonic()`/
+    `time.time()` calls resolve through). A whole-module `patch("rover.imu.time")`
+    used to be fine here because nothing but `read_sample()` ever touched it;
+    with a live thread also calling in, its pacing math (`delay = next_t -
+    time.monotonic(); if delay > 0`) hit a direct comparison against a
+    MagicMock and crashed the thread. Leaving `monotonic`/`time` real fixes
+    that; no-op'ing only `sleep` keeps `_init_mpu9250`/`_init_ak8963`'s ~0.22 s
+    of real init delay out of every test using this fixture.
+    """
     mock_bus = MagicMock()
     # WHO_AM_I returns MPU-9250
     mock_bus.read_byte_data.return_value = 0x71
@@ -49,7 +61,7 @@ def mock_smbus():
     with (
         patch("rover.imu._I2C_AVAILABLE", True),
         patch("rover.imu.SMBus", mock_smbus_class),
-        patch("rover.imu.time"),
+        patch("time.sleep", lambda *_a, **_k: None),
     ):
         yield mock_bus
 
@@ -110,7 +122,13 @@ class TestMadgwickMarg:
 
     def test_marg_converges_to_heading(self):
         """Level, with the magnetic field pointing +X (north = body forward) the
-        yaw must settle near 0; with the field along +Y it must settle near +90°."""
+        yaw must settle near 0; with the field measured along body +Y it must
+        settle near -90 deg.
+
+        Body forward = +X, left = +Y (repo convention). North measured along
+        the body's +Y (left) axis means north is 90 deg to the body's left, so
+        the body's forward axis has been yawed -90 deg from north.
+        """
         import math
 
         def yaw_deg(q):
@@ -125,7 +143,7 @@ class TestMadgwickMarg:
         g = MadgwickFilter(beta=0.3)
         for _ in range(2000):
             g.update(0, 0, 0, 0, 0, 9.81, 0.005, 0.0, 30.0, -40.0)
-        assert abs(yaw_deg(g.quaternion) - (-90.0)) < 3.0 or abs(yaw_deg(g.quaternion) - 90.0) < 3.0
+        assert abs(yaw_deg(g.quaternion) - (-90.0)) < 3.0
 
     def test_mag_offset_is_subtracted(self):
         """A hard-iron offset equal to the field itself leaves no field: the MARG
@@ -186,27 +204,39 @@ class TestImuWithMockI2C:
     def test_start_opens_bus(self, imu_config, mock_smbus):
         driver = ImuDriver(imu_config)
         driver.start()
-        assert driver.available
-        assert driver.identity == "MPU-9250"
+        try:
+            assert driver.available
+            assert driver.identity == "MPU-9250"
+        finally:
+            driver.stop()
 
     def test_start_mpu9255(self, imu_config, mock_smbus):
         mock_smbus.read_byte_data.return_value = 0x73
         driver = ImuDriver(imu_config)
         driver.start()
-        assert driver.identity == "MPU-9255"
+        try:
+            assert driver.identity == "MPU-9255"
+        finally:
+            driver.stop()
 
     def test_start_unknown_who_am_i(self, imu_config, mock_smbus):
         mock_smbus.read_byte_data.return_value = 0x00
         driver = ImuDriver(imu_config)
         driver.start()
-        assert driver.available  # Still usable
-        assert "Unknown" in driver.identity
+        try:
+            assert driver.available  # Still usable
+            assert "Unknown" in driver.identity
+        finally:
+            driver.stop()
 
     def test_double_start_ignored(self, imu_config, mock_smbus):
         driver = ImuDriver(imu_config)
         driver.start()
-        driver.start()  # Should not raise
-        assert driver.available
+        try:
+            driver.start()  # Should not raise
+            assert driver.available
+        finally:
+            driver.stop()
 
     def test_stop_closes_bus(self, imu_config, mock_smbus):
         driver = ImuDriver(imu_config)
@@ -223,42 +253,46 @@ class TestImuWithMockI2C:
     def test_read_sample_returns_imu_sample(self, imu_config, mock_smbus):
         driver = ImuDriver(imu_config)
         driver.start()
-        sample = driver.read_sample()
-        assert isinstance(sample, ImuSample)
-        assert len(sample.accel) == 3
-        assert len(sample.gyro) == 3
-        assert len(sample.orientation) == 4
+        try:
+            sample = driver.read_sample()
+            assert isinstance(sample, ImuSample)
+            assert len(sample.accel) == 3
+            assert len(sample.gyro) == 3
+            assert len(sample.orientation) == 4
+        finally:
+            driver.stop()
 
     def test_read_sample_with_mag_disabled(self, imu_config, mock_smbus):
         driver = ImuDriver(imu_config)
         driver.start()
-        driver.enable_magnetometer(False)
-        sample = driver.read_sample()
-        assert sample.mag is None
+        try:
+            driver.enable_magnetometer(False)
+            sample = driver.read_sample()
+            assert sample.mag is None
+        finally:
+            driver.stop()
 
     def test_enable_magnetometer_toggle(self, imu_config, mock_smbus):
         driver = ImuDriver(imu_config)
         driver.start()
-        driver.enable_magnetometer(False)
-        assert not driver._mag_enabled
-        driver.enable_magnetometer(True)
-        assert driver._mag_enabled
-
-    def test_ring_buffer_stores_samples(self, imu_config, mock_smbus):
-        # start() now also launches the sampling thread; under this fixture
-        # rover.imu.time is a bare MagicMock, so the thread's own pacing math
-        # hits a mock-vs-int comparison and self-terminates within a step or
-        # two, possibly recording a sample of its own first. Assert "at least
-        # the 5 manual reads" rather than an exact count that a second, real
-        # writer can no longer guarantee.
-        driver = ImuDriver(imu_config)
-        driver.start()
         try:
-            for _ in range(5):
-                driver.read_sample()
+            driver.enable_magnetometer(False)
+            assert not driver._mag_enabled
+            driver.enable_magnetometer(True)
+            assert driver._mag_enabled
         finally:
             driver.stop()
-        assert len(driver._ring_buffer) >= 5
+
+    def test_ring_buffer_stores_samples(self, imu_config, mock_smbus):
+        # Deliberately not started (no thread spawned): wire up availability
+        # by hand so read_sample() has exclusive ownership of the ring buffer
+        # and the count is exact, not "at least".
+        driver = ImuDriver(imu_config)
+        driver._available = True
+        driver._bus = mock_smbus
+        for _ in range(5):
+            driver.read_sample()
+        assert len(driver._ring_buffer) == 5
 
     def test_get_sample_at_empty(self, imu_config, mock_smbus):
         # Deliberately not started: get_sample_at only needs the ring buffer,
@@ -314,8 +348,11 @@ class TestImuWithMockI2C:
 
         driver = ImuDriver(imu_config)
         driver.start()
-        assert driver.available
-        assert not driver._mag_enabled
+        try:
+            assert driver.available
+            assert not driver._mag_enabled
+        finally:
+            driver.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -386,10 +423,51 @@ class TestImuSamplingThread:
             "dt must come from monotonic(), not a frozen/jumping wall clock"
         )
 
+    def test_read_one_dt_bookkeeping_is_atomic(self, imu_config, mock_smbus_realtime, monkeypatch):
+        """Finding 1: `read_sample()` from the test thread racing the sampling
+        thread must never observe a stale `_last_mono` (negative/duplicated
+        dt) or a filter update corrupted by interleaving — both are only
+        prevented by `_bus_lock` covering the dt bookkeeping and the
+        `MadgwickFilter.update()` call, not just the raw bus read."""
+        drv = ImuDriver(imu_config)
+        seen: list[float] = []
+        real_update = drv._filter.update
+
+        def spy(gx, gy, gz, ax, ay, az, dt, *mag):
+            seen.append(dt)
+            return real_update(gx, gy, gz, ax, ay, az, dt, *mag)
+
+        monkeypatch.setattr(drv._filter, "update", spy)
+        drv.start()
+        try:
+            for _ in range(50):
+                drv.read_sample()
+        finally:
+            drv.stop()
+        assert seen
+        assert all(dt > 0 for dt in seen), seen
+
     def test_sample_thread_stops_on_repeated_bus_errors(self, imu_config, mock_smbus_realtime):
         drv = ImuDriver(imu_config)
         drv.start()
         mock_smbus_realtime.read_i2c_block_data.side_effect = OSError(121, "Remote I/O error")
+        deadline = _time.monotonic() + 3.0
+        while drv.available and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        try:
+            assert drv.available is False
+            assert drv._thread is None or not drv._thread.is_alive()
+        finally:
+            drv.stop()
+
+    def test_sample_thread_stops_on_struct_error(self, imu_config, mock_smbus_realtime):
+        """Finding 2: a short/malformed I2C read raises struct.error, not
+        OSError — the thread must survive it the same way (count, shut down
+        after the threshold, never crash silently while `available` stays
+        True)."""
+        drv = ImuDriver(imu_config)
+        drv.start()
+        mock_smbus_realtime.read_i2c_block_data.return_value = [0] * 3  # too short
         deadline = _time.monotonic() + 3.0
         while drv.available and _time.monotonic() < deadline:
             _time.sleep(0.01)
