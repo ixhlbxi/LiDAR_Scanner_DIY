@@ -140,6 +140,7 @@ SCAN_IDLE = 0
 SCAN_SCANNING = 1
 SCAN_PAUSED = 2
 SCAN_ERROR = 3
+SCAN_REWINDING = 4  # mast returning home after a sweep; no data logged (DEC-015 amended)
 
 
 def encode_status_payload(
@@ -156,7 +157,7 @@ def encode_status_payload(
         sat_count: 0..255.
         hdop: Floating-point HDOP; encoded as round(hdop*100) clamped to uint16.
         battery_mv: 0..65535.
-        scan_state: 0..3 (see SCAN_* constants).
+        scan_state: 0..4 (see SCAN_* constants).
     """
     if not (0 <= fix_type <= 0xFF):
         raise ValueError(f"fix_type out of range: {fix_type}")

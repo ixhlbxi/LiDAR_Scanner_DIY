@@ -226,3 +226,13 @@ def test_crc_matches_binascii():
 
     for data in (b"", b"\x00", b"123456789", bytes(range(256))):
         assert crc16_ccitt(data) == binascii.crc_hqx(data, 0xFFFF)
+
+
+def test_scan_rewinding_state_encodes():
+    from rover.lora_protocol import SCAN_REWINDING, decode_status_payload, encode_status_payload
+
+    assert SCAN_REWINDING == 4
+    payload = encode_status_payload(
+        fix_type=5, sat_count=18, hdop=0.85, battery_mv=11800, scan_state=SCAN_REWINDING
+    )
+    assert decode_status_payload(payload)["scan_state"] == 4
