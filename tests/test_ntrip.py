@@ -255,6 +255,17 @@ class TestGga:
         fix = GnssFix(fix_type=4, lat=1.0, lon=1.0, sat_count=9)
         assert b",5,09," in build_gga(fix, when=time.gmtime(0))
 
+    @pytest.mark.parametrize(
+        ("fix_type", "expected_quality"),
+        [(0, 0), (1, 1), (2, 1), (3, 1), (4, 5), (5, 4)],
+    )
+    def test_build_gga_quality_mapping(self, fix_type, expected_quality):
+        """0=NONE 1=2D 2=3D 3=DGPS -> quality 1 (or 0 for NONE); RTK_FLOAT=4
+        -> quality 5; RTK_FIX=5 -> quality 4 (the wire-vs-internal swap)."""
+        fix = GnssFix(fix_type=fix_type, lat=1.0, lon=1.0, sat_count=5)
+        s = build_gga(fix, when=time.gmtime(0))
+        assert f",{expected_quality},05,".encode() in s
+
     def test_gga_sent_on_interval(self, tmp_path):
         caster = _FakeCaster(b"ICY 200 OK\r\n\r\n", body=b"\xd3\x00\x01", hold_open=1.5)
         fix = GnssFix(fix_type=5, lat=40.0, lon=-75.0, alt=1.0, sat_count=10, hdop=1.0)
@@ -278,6 +289,23 @@ class TestGga:
     def test_chunked_encoding_is_refused(self, tmp_path):
         caster = _FakeCaster(
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", body=b"5\r\nhello\r\n"
+        )
+        got: list[bytes] = []
+        c = _client(_cfg(tmp_path, "arm_group"), caster, sink=got.append)
+        c.start()
+        deadline = time.monotonic() + 3
+        while c.fatal_error is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        c.stop()
+        assert c.fatal_error and "chunked" in c.fatal_error
+        assert got == []
+
+    def test_chunked_encoding_odd_case_and_spacing_refused(self, tmp_path):
+        """A header parse must catch this, not a lowercase-substring search:
+        double space after the colon, mixed case, and a multi-valued line
+        (`gzip, chunked`) rather than a bare `chunked`."""
+        caster = _FakeCaster(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding:  Gzip, Chunked\r\n\r\n", body=b"5\r\nhello\r\n"
         )
         got: list[bytes] = []
         c = _client(_cfg(tmp_path, "arm_group"), caster, sink=got.append)

@@ -208,6 +208,22 @@ def parse_response_status(header_bytes: bytes) -> tuple[int, str]:
     return code, reason
 
 
+def _is_chunked_transfer_encoding(head: bytes) -> bool:
+    """True if *head* (the response status line + headers, no trailing blank
+    line) declares `Transfer-Encoding: chunked` — a real header-name match,
+    not a substring search, so it isn't fooled by an unrelated header whose
+    value happens to contain the word "chunked", and it still catches an
+    oddly-spaced or multi-valued line like `Transfer-Encoding:  gzip, chunked`.
+    """
+    for line in head.split(b"\r\n"):
+        name, sep, value = line.partition(b":")
+        if not sep:
+            continue
+        if name.strip().lower() == b"transfer-encoding" and b"chunked" in value.lower():
+            return True
+    return False
+
+
 def _nmea_checksum(body: str) -> str:
     """XOR checksum of the sentence body (everything between `$` and `*`)."""
     x = 0
@@ -246,7 +262,7 @@ def build_gga(fix: GnssFix, when: time.struct_time | None = None) -> bytes:
         when = time.gmtime()
     lat, ns = _to_nmea(fix.lat, True)
     lon, ew = _to_nmea(fix.lon, False)
-    quality = {5: 4, 4: 5}.get(fix.fix_type, 1 if fix.fix_type >= 2 else 0)
+    quality = {5: 4, 4: 5}.get(fix.fix_type, 1 if fix.fix_type >= 1 else 0)
     body = (
         f"GPGGA,{time.strftime('%H%M%S', when)}.00,{lat},{ns},{lon},{ew},{quality},"
         f"{fix.sat_count:02d},{fix.hdop:.1f},{fix.alt:.1f},M,0.0,M,,"
@@ -484,7 +500,7 @@ class NtripClient:
                 raise NtripError(f"caster does not serve mountpoint {self._cfg.mountpoint!r} (404)")
             if code != 200:
                 raise NtripError(f"caster returned HTTP {code} {reason!r}")
-            if b"transfer-encoding: chunked" in head.lower():
+            if _is_chunked_transfer_encoding(head):
                 raise NtripError("caster uses chunked transfer encoding, which is not supported")
 
             with self._stats_lock:
