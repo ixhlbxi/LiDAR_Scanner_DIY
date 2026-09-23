@@ -1040,6 +1040,70 @@ class TestHeadingModel:
         assert len(reuse_warnings) == 1
         assert "2" in reuse_warnings[0]
 
+    def test_missing_sweeps_with_no_earlier_sweep_reuse_nearest_later(self, caplog):
+        """Fix round 2 (item 1c, second half): the reuse rule's "no earlier
+        sweep -> take the nearest LATER sweep" branch (the `else` in
+        `yaw_ref[max(earlier)] if earlier else yaw_ref[min(yaw_ref)]`) had no
+        test — every prior missing-sweep case had an earlier known sweep to
+        fall back to.
+
+        Sweeps 0 and 1 have NO rest samples at all (nothing precedes them);
+        sweep 2's rest sample is NWU yaw 0 deg (-> ENU +Y forward, yaw_ref=90);
+        sweep 3's is NWU yaw -90 deg (-> ENU +X forward, yaw_ref=0), a
+        DIFFERENT value. Sweeps 0 and 1 must both take sweep 2's yaw (the
+        nearest LATER sweep, via `min(yaw_ref)`), not sweep 3's -- and
+        exactly one WARNING must name both missing sweeps."""
+        import math
+
+        def qz(deg):
+            half = math.radians(deg) / 2
+            return [math.cos(half), 0.0, 0.0, math.sin(half)]
+
+        def lidar(t, sweep):
+            return {
+                "type": "lidar",
+                "timestamp": t,
+                "mast_angle_deg": 0.0,
+                "angle": [0.0],
+                "distance": [1.0],
+                "intensity": [1],
+                "sweep": sweep,
+            }
+
+        imu = [
+            {"timestamp": 2.4, "orientation": qz(0.0), "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 4.4, "orientation": qz(-90.0), "mag": [1.0, 0.0, 0.0]},
+        ]
+        session = georef.SessionData(
+            metadata={},
+            lidar_records=[lidar(1.0, 0), lidar(2.0, 1), lidar(3.0, 2), lidar(5.0, 3)],
+            imu_records=imu,
+            gnss_records=[],
+            sweep_starts={0: 0.5, 1: 1.5, 2: 2.5, 3: 4.5},
+        )
+        imu_sorted = sorted(imu, key=lambda r: r["timestamp"])
+        rest = georef._rest_samples_by_sweep(session, imu_sorted)
+        assert rest[0] == []
+        assert rest[1] == []
+        assert [s["timestamp"] for s in rest[2]] == [2.4]
+        assert [s["timestamp"] for s in rest[3]] == [4.4]
+
+        with caplog.at_level("WARNING", logger="georef"):
+            xyz, _i, _o = georef.session_to_pointcloud(session)
+        # sweep 2's own point (ENU +Y): sweeps 0 and 1 must match it exactly,
+        # not sweep 3's (ENU +X).
+        np.testing.assert_allclose(xyz[0], [0.0, 1.0, 0.0], atol=1e-9)  # sweep 0, reused
+        np.testing.assert_allclose(xyz[1], [0.0, 1.0, 0.0], atol=1e-9)  # sweep 1, reused
+        np.testing.assert_allclose(xyz[2], [0.0, 1.0, 0.0], atol=1e-9)  # sweep 2, own rest
+        np.testing.assert_allclose(xyz[3], [1.0, 0.0, 0.0], atol=1e-9)  # sweep 3, own rest
+        reuse_warnings = [
+            r.message
+            for r in caplog.records
+            if r.levelname == "WARNING" and "rest heading" in r.message
+        ]
+        assert len(reuse_warnings) == 1
+        assert "[0, 1]" in reuse_warnings[0]
+
     def test_old_session_rest_end_falls_back_to_first_lidar_timestamp(self):
         """No sweep_start events at all (pre-stage-5 session): rest_end for
         sweep 0 must fall back to its FIRST lidar timestamp (10.0), not its
