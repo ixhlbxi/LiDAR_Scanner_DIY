@@ -9,11 +9,13 @@ from dataclasses import replace
 import pytest
 
 from rover.config import load_config
+from rover.gnss import GnssFix
 from rover.ntrip import (
     NTRIP_VERSION,
     USER_AGENT,
     NtripClient,
     NtripError,
+    build_gga,
     build_request,
     parse_response_status,
 )
@@ -139,7 +141,9 @@ mountpoint = "ARM_BASE"
 
 class _FakeCaster:
     """One-shot TCP caster on 127.0.0.1: answers with `response` then optionally
-    streams `body`."""
+    streams `body`. While `hold_open` remains after sending, keeps reading from
+    the connection (short-timeout poll loop) so a client that sends anything
+    back — e.g. periodic GGA sentences — can be observed in `received_after`."""
 
     def __init__(self, response: bytes, body: bytes = b"", hold_open: float = 0.0):
         self.srv = socket.socket()
@@ -148,6 +152,7 @@ class _FakeCaster:
         self.port = self.srv.getsockname()[1]
         self.response, self.body, self.hold_open = response, body, hold_open
         self.received = b""
+        self.received_after = b""
         self.t = threading.Thread(target=self._serve, daemon=True)
         self.t.start()
 
@@ -158,7 +163,18 @@ class _FakeCaster:
             self.received = conn.recv(4096)
             conn.sendall(self.response + self.body)
             if self.hold_open:
-                time.sleep(self.hold_open)
+                deadline = time.monotonic() + self.hold_open
+                conn.settimeout(0.1)
+                while time.monotonic() < deadline:
+                    try:
+                        chunk = conn.recv(4096)
+                    except TimeoutError:
+                        continue  # no data this tick — keep polling
+                    except OSError:
+                        break  # peer gone
+                    if not chunk:
+                        break
+                    self.received_after += chunk
         finally:
             conn.close()
             self.srv.close()
@@ -210,3 +226,65 @@ class TestFatalErrors:
         t0 = time.monotonic()
         c.stop()
         assert time.monotonic() - t0 < 2.0, "stop() must not wait out the 30 s read timeout"
+
+
+# ---------------------------------------------------------------------------
+# GGA upload, header-tail forwarding, chunked-encoding refusal
+# ---------------------------------------------------------------------------
+
+
+def _nmea_ok(sentence: bytes) -> bool:
+    s = sentence.decode().strip()
+    body, _, cs = s[1:].partition("*")
+    x = 0
+    for ch in body:
+        x ^= ord(ch)
+    return f"{x:02X}" == cs[:2]
+
+
+class TestGga:
+    def test_build_gga_valid_checksum_and_fields(self):
+        fix = GnssFix(
+            timestamp=0.0, fix_type=5, lat=40.7128, lon=-74.006, alt=10.5, hdop=0.8, sat_count=18
+        )
+        s = build_gga(fix, when=time.gmtime(0))
+        assert s.startswith(b"$GPGGA,000000.00,4042.7680,N,07400.3600,W,4,18,0.8,10.5,M,")
+        assert s.endswith(b"\r\n") and _nmea_ok(s)
+
+    def test_build_gga_float_quality(self):
+        fix = GnssFix(fix_type=4, lat=1.0, lon=1.0, sat_count=9)
+        assert b",5,09," in build_gga(fix, when=time.gmtime(0))
+
+    def test_gga_sent_on_interval(self, tmp_path):
+        caster = _FakeCaster(b"ICY 200 OK\r\n\r\n", body=b"\xd3\x00\x01", hold_open=1.5)
+        fix = GnssFix(fix_type=5, lat=40.0, lon=-75.0, alt=1.0, sat_count=10, hdop=1.0)
+        c = _client(
+            _cfg(tmp_path, extra="gga_send_interval_sec = 0.2"), caster, gga_source=lambda: fix
+        )
+        c.start()
+        time.sleep(1.0)
+        c.stop()
+        assert b"$GPGGA" in caster.received or b"$GPGGA" in getattr(caster, "received_after", b"")
+
+    def test_header_tail_forwarded_to_sink(self, tmp_path):
+        caster = _FakeCaster(b"ICY 200 OK\r\n\r\n", body=b"\xd3\x00\x13TAILBYTES", hold_open=0.5)
+        got: list[bytes] = []
+        c = _client(_cfg(tmp_path), caster, sink=got.append)
+        c.start()
+        time.sleep(0.6)
+        c.stop()
+        assert b"".join(got).startswith(b"\xd3\x00\x13TAILBYTES")
+
+    def test_chunked_encoding_is_refused(self, tmp_path):
+        caster = _FakeCaster(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", body=b"5\r\nhello\r\n"
+        )
+        got: list[bytes] = []
+        c = _client(_cfg(tmp_path, "arm_group"), caster, sink=got.append)
+        c.start()
+        deadline = time.monotonic() + 3
+        while c.fatal_error is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        c.stop()
+        assert c.fatal_error and "chunked" in c.fatal_error
+        assert got == []

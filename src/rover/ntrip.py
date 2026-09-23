@@ -15,8 +15,11 @@ If client_location = "esp32" the rover's ESP32 firmware does this job over WiFi
 The NTRIP request shape is the small subset of RFC 2616 needed to negotiate a
 mountpoint: an HTTP/1.1-style GET line, a User-Agent identifying us as an NTRIP
 client, an Ntrip-Version header, and Basic Auth from the env-var-supplied
-password. RTCM bytes arrive as the response body — no chunked encoding, no
-content-length — we read until the socket dies, then reconnect.
+password. RTCM bytes arrive as the response body — no content-length, we read
+until the socket dies, then reconnect. Chunked transfer encoding is refused
+outright (NtripError) rather than mis-parsed as raw RTCM — casters serving
+mountpoints are not expected to chunk, and silently forwarding chunk framing
+bytes to the F9P as if they were RTCM would corrupt the correction stream.
 
 Public API:
     NtripClient(config, rtcm_sink, status_sink=None, gga_source=None)
@@ -33,6 +36,8 @@ Public API:
         returned object never affects the client's own state
     .build_request(host, mountpoint, username, password, user_agent="...")
         — exposed for unit testing without a real caster
+    build_gga(fix, when=None) -> bytes
+        — module-level; builds the `$GPGGA` sentence NtripClient uploads
 
 The actual TCP I/O lives in a background thread (see NtripClient._run_loop) so the
 main acquisition loop doesn't block on caster reconnect.
@@ -51,6 +56,13 @@ Changelog:
                          per-second byte rate is computed from a monotonic
                          window instead of wall-clock second boundaries;
                          unused _device_name dropped.
+    0.11.1  2026-09-23  Periodic `$GPGGA` upload for VRS-style casters
+                         (`[ntrip].gga_send_interval_sec`, already read from
+                         config but never sent); body bytes bundled with the
+                         response headers in the same recv() chunk are now
+                         forwarded to the sink instead of silently dropped;
+                         chunked transfer encoding is refused with a fatal
+                         NtripError instead of being mis-forwarded as RTCM.
 """
 
 from __future__ import annotations
@@ -194,6 +206,52 @@ def parse_response_status(header_bytes: bytes) -> tuple[int, str]:
         raise NtripError(f"non-numeric status code: {code_str!r}")  # noqa: B904 — keep implicit exception chaining; revisited in stage 4
 
     return code, reason
+
+
+def _nmea_checksum(body: str) -> str:
+    """XOR checksum of the sentence body (everything between `$` and `*`)."""
+    x = 0
+    for ch in body:
+        x ^= ord(ch)
+    return f"{x:02X}"
+
+
+def _to_nmea(deg: float, is_lat: bool) -> tuple[str, str]:
+    """Decimal degrees -> (ddmm.mmmm or dddmm.mmmm, hemisphere letter)."""
+    hemi = ("N" if deg >= 0 else "S") if is_lat else ("E" if deg >= 0 else "W")
+    d = abs(deg)
+    whole = int(d)
+    minutes = (d - whole) * 60.0
+    width = 2 if is_lat else 3
+    return f"{whole:0{width}d}{minutes:07.4f}", hemi
+
+
+def build_gga(fix: GnssFix, when: time.struct_time | None = None) -> bytes:
+    """Build a `$GPGGA` sentence from *fix* for VRS-style casters.
+
+    Some casters (Virtual Reference Station networks) steer RTCM corrections
+    off the rover's own approximate position, and expect the client to send
+    its position back as periodic `$GPGGA` sentences — `[ntrip].gga_send_interval_sec`
+    controls the cadence (see NtripClient._stream_body).
+
+    Quality: 4 = RTK fix, 5 = RTK float, 1 = any other fix, 0 = none. Note the
+    same FIX/FLOAT swap documented on rover.gnss._GGA_QUALITY_TO_FIX: our
+    internal fix_type has FLOAT=4/FIX=5, but the GGA wire format we emit here
+    uses the standard NMEA quality indicator (FIXED=4/FLOAT=5) — we're
+    encoding back to the wire vocabulary, not echoing our internal enum.
+    Altitude is reported as MSL with a zero geoid separation (the F9P's own
+    sentence is not available here); casters use only lat/lon.
+    """
+    if when is None:
+        when = time.gmtime()
+    lat, ns = _to_nmea(fix.lat, True)
+    lon, ew = _to_nmea(fix.lon, False)
+    quality = {5: 4, 4: 5}.get(fix.fix_type, 1 if fix.fix_type >= 2 else 0)
+    body = (
+        f"GPGGA,{time.strftime('%H%M%S', when)}.00,{lat},{ns},{lon},{ew},{quality},"
+        f"{fix.sat_count:02d},{fix.hdop:.1f},{fix.alt:.1f},M,0.0,M,,"
+    )
+    return f"${body}*{_nmea_checksum(body)}\r\n".encode("ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -410,9 +468,13 @@ class NtripClient:
             )
             sock.sendall(request)
 
-            # Read response headers (small; terminated by \r\n\r\n)
+            # Read response headers (small; terminated by \r\n\r\n). recv()
+            # reads in chunks, so whatever arrived past the terminator in the
+            # same chunk is already-received body — a "tail" that must be
+            # forwarded, not dropped (it was previously silently lost here).
             header_buf = self._read_until(sock, b"\r\n\r\n", limit=4096)
-            code, reason = parse_response_status(header_buf)
+            head, _, tail = header_buf.partition(b"\r\n\r\n")
+            code, reason = parse_response_status(head)
             if code == 401:
                 raise NtripError(
                     f"caster rejected credentials (401) for mountpoint "
@@ -422,6 +484,8 @@ class NtripClient:
                 raise NtripError(f"caster does not serve mountpoint {self._cfg.mountpoint!r} (404)")
             if code != 200:
                 raise NtripError(f"caster returned HTTP {code} {reason!r}")
+            if b"transfer-encoding: chunked" in head.lower():
+                raise NtripError("caster uses chunked transfer encoding, which is not supported")
 
             with self._stats_lock:
                 self._stats.connected = True
@@ -436,7 +500,7 @@ class NtripClient:
             )
 
             # Stream RTCM until close
-            self._stream_body(sock)
+            self._stream_body(sock, tail)
         finally:
             try:
                 sock.close()
@@ -460,7 +524,7 @@ class NtripClient:
             buf += chunk
         return buf
 
-    def _stream_body(self, sock: socket.socket) -> None:
+    def _stream_body(self, sock: socket.socket, tail: bytes = b"") -> None:
         """Read RTCM bytes from socket and dispatch them to the sink.
 
         The caster simply streams bytes — there's no chunked encoding, no
@@ -468,13 +532,52 @@ class NtripClient:
         parse on its own. The received-bytes-per-second stat is computed from
         a monotonic window rather than wall-clock second boundaries, so it
         isn't skewed by a clock step.
+
+        *tail* is body bytes that arrived bundled with the response headers
+        in the same recv() chunk during the handshake (see _one_connection) —
+        dispatched to the sink first, exactly as if they had arrived here.
+
+        When `[ntrip].gga_send_interval_sec` > 0 and a gga_source was
+        supplied, this also uploads a `$GPGGA` sentence on that cadence —
+        required by VRS-style casters that steer corrections off the rover's
+        own position. The socket read timeout is shortened to the GGA
+        interval so the loop wakes up on schedule even with no RTCM traffic;
+        that shortened per-tick timeout is not itself treated as a stall —
+        only going _READ_TIMEOUT_SEC with zero bytes of any kind triggers a
+        reconnect.
         """
         self._window_start = time.monotonic()
         self._window_bytes = 0
+        interval = self._cfg.gga_send_interval_sec
+        if interval > 0:
+            sock.settimeout(min(_READ_TIMEOUT_SEC, interval))
+        next_gga = time.monotonic()  # send one immediately, then every interval
+        last_byte = time.monotonic()
+
+        if tail:
+            last_byte = time.monotonic()
+            self._dispatch_chunk(tail)
+
         while not self._stop_event.is_set():
+            if interval > 0 and self._gga_source is not None and time.monotonic() >= next_gga:
+                fix = self._gga_source()
+                if fix is not None and fix.fix_type >= 2:
+                    try:
+                        sock.sendall(build_gga(fix))
+                    except OSError as e:
+                        logger.info("NTRIP GGA send failed: %s", e)
+                        with self._stats_lock:
+                            self._stats.bytes_received_this_sec = 0
+                        return
+                next_gga = time.monotonic() + interval
+
             try:
                 chunk = sock.recv(_READ_CHUNK_SIZE)
             except TimeoutError:
+                if interval > 0 and time.monotonic() - last_byte < _READ_TIMEOUT_SEC:
+                    # Just the shortened per-tick timeout that lets us send
+                    # GGA on schedule — not a real stall.
+                    continue
                 logger.info("NTRIP read timeout; will reconnect")
                 with self._stats_lock:
                     self._stats.bytes_received_this_sec = 0
@@ -485,25 +588,30 @@ class NtripClient:
                     self._stats.bytes_received_this_sec = 0
                 return
 
+            last_byte = time.monotonic()
+            self._dispatch_chunk(chunk)
+
+    def _dispatch_chunk(self, chunk: bytes) -> None:
+        """Forward one chunk of RTCM bytes to the sink and fold it into stats."""
+        with self._stats_lock:
+            self._stats.bytes_received_total += len(chunk)
+            self._stats.last_byte_epoch = time.time()
+
+        try:
+            self._rtcm_sink(chunk)
+        except Exception as e:
+            # Sink errors should not kill the NTRIP loop — log and keep going
+            logger.warning("RTCM sink raised: %s", e)
+
+        now = time.monotonic()
+        self._window_bytes += len(chunk)
+        if now - self._window_start >= 1.0:
             with self._stats_lock:
-                self._stats.bytes_received_total += len(chunk)
-                self._stats.last_byte_epoch = time.time()
-
-            try:
-                self._rtcm_sink(chunk)
-            except Exception as e:
-                # Sink errors should not kill the NTRIP loop — log and keep going
-                logger.warning("RTCM sink raised: %s", e)
-
-            now = time.monotonic()
-            self._window_bytes += len(chunk)
-            if now - self._window_start >= 1.0:
-                with self._stats_lock:
-                    self._stats.bytes_received_this_sec = int(
-                        self._window_bytes / (now - self._window_start)
-                    )
-                self._window_start, self._window_bytes = now, 0
-                self._publish_stats()
+                self._stats.bytes_received_this_sec = int(
+                    self._window_bytes / (now - self._window_start)
+                )
+            self._window_start, self._window_bytes = now, 0
+            self._publish_stats()
 
     def _publish_stats(self) -> None:
         if self._status_sink is None:
@@ -519,6 +627,7 @@ __all__ = [
     "NtripStats",
     "NtripError",
     "build_request",
+    "build_gga",
     "parse_response_status",
     "USER_AGENT",
     "NTRIP_VERSION",

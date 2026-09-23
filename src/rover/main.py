@@ -44,6 +44,9 @@ Changelog:
                          later, mid-session, sets SCAN_ERROR and logs once
                          instead of aborting a session that already has valid
                          data logged.
+    0.11.3  2026-09-23  NtripClient now gets gga_source=sensors.gnss.latest_fix
+                         so VRS-style casters that require periodic $GPGGA
+                         uploads receive them.
 """
 
 from __future__ import annotations
@@ -615,7 +618,11 @@ def run(
             and sensors.gnss is not None
         ):
             try:
-                ntrip_client = NtripClient(config, rtcm_sink=sensors.gnss.write_rtcm)
+                ntrip_client = NtripClient(
+                    config,
+                    rtcm_sink=sensors.gnss.write_rtcm,
+                    gga_source=sensors.gnss.latest_fix,
+                )
                 ntrip_client.start()
             except Exception as e:
                 logger.warning("NtripClient start failed: %s — RTK degraded", e)
