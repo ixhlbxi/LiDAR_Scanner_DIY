@@ -34,6 +34,9 @@ Changelog:
                          batched imu records from ImuDriver.drain() in
                          place of one-sample read_sample(); DEC-013
                          magnetometer gating around each stepper move.
+    0.11.1  2026-09-23  Lidar record timestamp captured immediately after
+                         read_scan() returns instead of later alongside
+                         other records' `now`.
 """
 
 from __future__ import annotations
@@ -366,9 +369,15 @@ def _scan_loop(
 
         # --- LiDAR ---
         lidar_scan: LidarScan | None = None
+        # Captured immediately after read_scan() returns (not later, alongside
+        # the other records' `now`) so the logged timestamp reflects when the
+        # revolution actually finished, not whenever IMU/camera work after it
+        # happens to wrap up.
+        scan_wall_time: float | None = None
         if sensors.lidar is not None and sensors.lidar.available and not lidar_gate.tripped:
             try:
                 lidar_scan = sensors.lidar.read_scan(discard_stale=stepped)
+                scan_wall_time = time.time()
                 lidar_gate.record_success()
             except _SENSOR_ERRORS as e:
                 if lidar_gate.record_failure(e):
@@ -408,7 +417,7 @@ def _scan_loop(
             session_logger.write(
                 {
                     "type": "lidar",
-                    "timestamp": now,
+                    "timestamp": scan_wall_time if scan_wall_time is not None else now,
                     "step_index": step_index,
                     "mast_angle_deg": mast_angle_deg,
                     "lidar_ms_start": lidar_scan.lidar_ms_start,

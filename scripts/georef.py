@@ -36,8 +36,11 @@ Failure modes:
     * `numpy` missing → script exits with a clear install hint.
     * `laspy` missing → LAS export is skipped with a warning; PLY still emitted.
     * `pyproj` missing AND target_crs != 0 → script aborts with install hint.
+    * `target_crs` names a geographic (not projected) CRS → script aborts;
+      a point cloud needs planar coordinates.
     * Session has no GNSS records → emits points in raw LiDAR frame and warns;
-      useful for indoor / no-fix scans.
+      useful for indoor / no-fix scans. The exported LAS carries no CRS in
+      this case either, for the same reason.
 
 Decision references: DEC-014, DEC-022, DEC-024, DEC-034.
 
@@ -45,6 +48,15 @@ Dependencies: numpy (required); laspy + pyproj (optional, install via `[post]`
 extra).
 
 Changelog:
+    0.12.0  2026-09-23  project_to_crs() returns (xyz, epsg_to_embed) so a LAS
+                        file never carries a CRS its coordinates aren't
+                        actually in (no GNSS fix, geographic target, or a
+                        units/CRS mismatch); rejects geographic target CRSs;
+                        export_las() catches any add_crs() failure, not just
+                        AttributeError; yaw stripped from IMU orientation when
+                        no session record ever supplied a magnetometer sample;
+                        session_to_pointcloud() warns when the mast angle
+                        never changes (planar/continuous-mode output).
     0.11.0  2026-09-22  Rotation-aware session load (rotated scan/gnss segments,
                         columnar lidar, batched IMU); mount + mast rotation applied
                         before the IMU quaternion; Z scaled to the target CRS's
@@ -163,7 +175,7 @@ class SessionData:
     gnss_records: list[dict]
 
 
-_SEGMENT_RE = re.compile(r"^(scan|gnss)(?:_(\d{3}))?\.jsonl$")
+_SEGMENT_RE = re.compile(r"^(scan|gnss)(?:_(\d+))?\.jsonl$")
 
 
 def _segment_files(session_dir: Path, stem: str) -> list[Path]:
@@ -294,6 +306,59 @@ def _quat_to_rotmat(q):
     )
 
 
+def _rotmat_to_quat(r):
+    """Convert a 3x3 rotation matrix to a scalar-first quaternion [w, x, y, z].
+
+    Standard trace-based extraction (Shepperd's method), picking the largest
+    of the four denominators to stay numerically stable near any singularity.
+    Inverse of _quat_to_rotmat.
+    """
+    np = _require_numpy()
+    trace = r[0, 0] + r[1, 1] + r[2, 2]
+    if trace > 0:
+        s = 0.5 / math.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (r[2, 1] - r[1, 2]) * s
+        y = (r[0, 2] - r[2, 0]) * s
+        z = (r[1, 0] - r[0, 1]) * s
+    elif r[0, 0] > r[1, 1] and r[0, 0] > r[2, 2]:
+        s = 2.0 * math.sqrt(1.0 + r[0, 0] - r[1, 1] - r[2, 2])
+        w = (r[2, 1] - r[1, 2]) / s
+        x = 0.25 * s
+        y = (r[0, 1] + r[1, 0]) / s
+        z = (r[0, 2] + r[2, 0]) / s
+    elif r[1, 1] > r[2, 2]:
+        s = 2.0 * math.sqrt(1.0 + r[1, 1] - r[0, 0] - r[2, 2])
+        w = (r[0, 2] - r[2, 0]) / s
+        x = (r[0, 1] + r[1, 0]) / s
+        y = 0.25 * s
+        z = (r[1, 2] + r[2, 1]) / s
+    else:
+        s = 2.0 * math.sqrt(1.0 + r[2, 2] - r[0, 0] - r[1, 1])
+        w = (r[1, 0] - r[0, 1]) / s
+        x = (r[0, 2] + r[2, 0]) / s
+        y = (r[1, 2] + r[2, 1]) / s
+        z = 0.25 * s
+    return np.array([w, x, y, z])
+
+
+def _strip_yaw(q):
+    """Remove the yaw (rotation about world/body Z) component of a
+    quaternion, keeping roll and pitch.
+
+    Method: convert q to a rotation matrix, read the yaw angle off its
+    upper-left 2x2 block (standard Z-first Euler extraction), then
+    left-multiply the matrix by R_z(-yaw) to cancel it —
+    R_z(-yaw) @ R(q) keeps R(q)'s roll/pitch while zeroing its heading.
+    Used by session_to_pointcloud() when no magnetometer data is present in
+    the session (see its docstring / the INFO log it emits).
+    """
+    r = _quat_to_rotmat(q)
+    yaw = math.atan2(float(r[1, 0]), float(r[0, 0]))
+    r_no_yaw = _rot_z(-math.degrees(yaw)) @ r
+    return _rotmat_to_quat(r_no_yaw)
+
+
 def orientation_at(t_scan: float, imu_records: list[dict]):
     """Find IMU samples bracketing *t_scan* and return slerp'd quaternion.
 
@@ -392,6 +457,24 @@ def session_to_pointcloud(session: SessionData):
         key=lambda r: r["timestamp"],
     )
 
+    if len(session.lidar_records) > 1:
+        mast_angles = {rec.get("mast_angle_deg", 0.0) for rec in session.lidar_records}
+        if len(mast_angles) == 1:
+            logger.warning("mast angle never changed: output is planar (continuous mode?)")
+
+    # DEC-013 / DEC-012: a 6-DOF Madgwick filter (no magnetometer) has no
+    # absolute heading reference, so its yaw is pure gyro-integration drift —
+    # meaningless on a rover that is stationary between scans. When nothing in
+    # the session ever supplied a magnetometer sample, strip yaw from every
+    # orientation and let the commanded mast angle (already applied in
+    # lidar_points_to_local via _rot_z) stand in for heading instead.
+    strip_yaw = not any(r.get("mag") is not None for r in session.imu_records)
+    if strip_yaw:
+        logger.info(
+            "no magnetometer data: using IMU roll/pitch only; yaw from the "
+            "commanded mast angle (6-DOF gyro yaw drifts on a static rover)"
+        )
+
     if not gnss_sorted:
         logger.warning(
             "Session has no GNSS fix records — output will be in raw LiDAR ENU "
@@ -414,6 +497,8 @@ def session_to_pointcloud(session: SessionData):
     chunks_int = []
     for rec in session.lidar_records:
         quat = orientation_at(rec["timestamp"], imu_sorted)
+        if strip_yaw:
+            quat = _strip_yaw(quat)
         pts_local, intens = lidar_points_to_local(rec, quat)
         if pts_local.size == 0:
             continue
@@ -471,19 +556,42 @@ def project_to_crs(xyz, origin_lat_lon_alt, target_epsg: int, units: str):
     is scaled to the CRS's horizontal unit so all three axes agree; if ``units``
     then disagrees with the CRS unit, all three axes are converted (ft-US ↔ m)
     and the choice is logged.
+
+    Returns:
+        (xyz_out, epsg_to_embed) — a LAS file must never carry a CRS label its
+        coordinates aren't actually in, so ``epsg_to_embed`` is 0 whenever that
+        would be true: no GNSS origin, no CRS requested, or a unit mismatch
+        forced a conversion away from the CRS's native unit. Only when the
+        output truly is in ``target_epsg`` does ``epsg_to_embed`` equal it.
+
+    Raises:
+        SystemExit: pyproj is missing and a conversion was requested, or
+            ``target_epsg`` names a geographic (not projected) CRS — a LAS/PLY
+            point cloud needs planar coordinates, and a geographic CRS (e.g.
+            EPSG:4326) would silently hand back lat/lon-shaped numbers instead.
     """
     np = _require_numpy()
-    if target_epsg == 0 or origin_lat_lon_alt[0] is None:
-        return xyz / US_SURVEY_FOOT_M if units == "ft" else xyz
+    if origin_lat_lon_alt[0] is None:
+        if target_epsg != 0:
+            logger.warning("no GNSS fix: exporting local ENU, LAS will carry no CRS")
+        out = xyz / US_SURVEY_FOOT_M if units == "ft" else xyz
+        return out, 0
+
+    if target_epsg == 0:
+        out = xyz / US_SURVEY_FOOT_M if units == "ft" else xyz
+        return out, 0
 
     pyproj = _optional_import("pyproj")
     if pyproj is None:
         raise SystemExit(
             'pyproj is required when target_crs_epsg != 0 — install via `pip install -e ".[post]"`'
         )
+    crs = pyproj.CRS.from_epsg(target_epsg)
+    if not crs.is_projected:
+        raise SystemExit(f"target CRS must be projected; EPSG:{target_epsg} is geographic")
+
     lat0, lon0, alt0 = origin_lat_lon_alt
     lats, lons, alts = geodetic_from_enu(xyz[:, 0], xyz[:, 1], xyz[:, 2], lat0, lon0, alt0)
-    crs = pyproj.CRS.from_epsg(target_epsg)
     transformer = pyproj.Transformer.from_crs("EPSG:4326", crs, always_xy=True)
     xs, ys = transformer.transform(lons, lats)
 
@@ -493,15 +601,22 @@ def project_to_crs(xyz, origin_lat_lon_alt, target_epsg: int, units: str):
     out = np.column_stack([xs, ys, zs])
 
     crs_is_ft = abs(unit_m - US_SURVEY_FOOT_M) < 1e-9 or abs(unit_m - 0.3048) < 1e-9
+    epsg_to_embed = target_epsg
     if units == "m" and crs_is_ft:
-        logger.info("Converting EPSG:%d output from feet to metres per --units m", target_epsg)
+        logger.warning(
+            "--units m on a ftUS CRS: values converted, LAS written without CRS; "
+            "pick the metric sibling CRS to keep the label"
+        )
         out = out * unit_m
+        epsg_to_embed = 0
     elif units == "ft" and not crs_is_ft:
-        logger.info(
-            "Converting EPSG:%d output from metres to US survey feet per --units ft", target_epsg
+        logger.warning(
+            "--units ft on a metric CRS: values converted, LAS written without CRS; "
+            "pick the ftUS sibling CRS to keep the label"
         )
         out = out / US_SURVEY_FOOT_M
-    return out
+        epsg_to_embed = 0
+    return out, epsg_to_embed
 
 
 # ---------------------------------------------------------------------------
@@ -552,12 +667,16 @@ def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
     if target_epsg > 0:
         try:
             header.add_crs(f"EPSG:{target_epsg}")
-        except AttributeError:
-            # Older laspy versions name this differently
+        except Exception as e:
+            # Broad on purpose: an older/incompatible laspy version, a pyproj
+            # error surfacing through add_crs(), or anything else that can go
+            # wrong embedding the CRS must still leave the LAS file written —
+            # the geometry is correct even when the label isn't embeddable.
             logger.warning(
-                "laspy %s cannot embed CRS EPSG:%d — LAS written without CRS",
+                "laspy %s cannot embed CRS EPSG:%d — LAS written without CRS (%s)",
                 getattr(laspy, "__version__", "?"),
                 target_epsg,
+                e,
             )
 
     las = laspy.LasData(header)
@@ -643,14 +762,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("No points to export")
         return 1
 
+    epsg_to_embed = target_epsg
     if target_epsg != 0 or units == "ft":
-        xyz = project_to_crs(xyz, origin, target_epsg, units)
+        xyz, epsg_to_embed = project_to_crs(xyz, origin, target_epsg, units)
 
     prefix = args.out_prefix or session_dir.name
     out_dir = session_dir / "export"
     export_ply(out_dir / f"{prefix}.ply", xyz, intensity)
     if not args.no_las:
-        export_las(out_dir / f"{prefix}.las", xyz, intensity, target_epsg)
+        export_las(out_dir / f"{prefix}.las", xyz, intensity, epsg_to_embed)
 
     logger.info("Export complete: %s", out_dir)
     return 0

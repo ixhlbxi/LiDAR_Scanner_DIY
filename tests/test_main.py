@@ -7,6 +7,7 @@ sensor init failures.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from pathlib import Path
@@ -14,6 +15,16 @@ from pathlib import Path
 import pytest
 
 from rover import main as main_mod
+
+# Make scripts/ importable as `scripts.georef` for the round-trip test below
+# (mirrors tests/test_georef.py's own sys.path setup). Importing georef.py
+# itself never requires numpy — only the functions the round-trip test calls
+# do, which is why that test guards with pytest.importorskip("numpy").
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from scripts import georef  # noqa: E402
 
 
 def _write_all_disabled_config(tmp_path: Path) -> Path:
@@ -612,7 +623,7 @@ def test_records_are_columnar_with_mast_angle_and_imu_batches(tmp_path: Path, mo
     monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
     monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
     monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
-    assert main_mod.run(config_path=_stage3_config(tmp_path), duration_sec=0.6) == 0
+    assert main_mod.run(config_path=_stage3_config(tmp_path), duration_sec=1.5) == 0
 
     session = next((tmp_path / "data").glob("s3_*"))
     recs = [json.loads(line) for line in (session / "scan.jsonl").read_text().splitlines() if line]
@@ -627,6 +638,7 @@ def test_records_are_columnar_with_mast_angle_and_imu_batches(tmp_path: Path, mo
     assert "points" not in r
     assert len(lidar) >= 2 and lidar[1]["mast_angle_deg"] == pytest.approx(2.25)
     # IMU batches
+    assert imu, "no imu records"
     b = imu[0]
     assert b["t"] == [1.0, 1.005] and b["mag"] == [None, [1, 2, 3]]
     assert b["orientation"][0] == [1, 0, 0, 0]
@@ -634,3 +646,25 @@ def test_records_are_columnar_with_mast_angle_and_imu_batches(tmp_path: Path, mo
     assert _FakeImu.mag_calls[:2] == [False, True]
     # stale discard after a step
     assert _StaticLidar.calls and all(_StaticLidar.calls)
+
+
+def test_round_trip_produces_points(tmp_path: Path, monkeypatch) -> None:
+    """End-to-end: run() writes a real session with the stage 3 fakes, then
+    scripts/georef.py must load it and assemble a nonzero point cloud whose
+    lidar record count matches what was actually captured during the run."""
+    pytest.importorskip("numpy")
+
+    _StaticLidar.calls = []
+    _FakeImu.mag_calls = []
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
+    monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
+    assert main_mod.run(config_path=_stage3_config(tmp_path), duration_sec=1.0) == 0
+
+    session = next((tmp_path / "data").glob("s3_*"))
+    session_data = georef.load_session(session)
+    xyz, intensity, _origin = georef.session_to_pointcloud(session_data)
+
+    assert len(xyz) > 0
+    assert len(intensity) == len(xyz)
+    assert len(session_data.lidar_records) == len(_StaticLidar.calls)

@@ -32,6 +32,12 @@ Changelog:
     0.11.1  2026-09-22  Fix round 1: dt bookkeeping + filter update atomic
                          under the bus lock, sampling thread also survives
                          struct.error, stop() warns on a stuck thread
+    0.11.2  2026-09-23  Fix round 2: sampling thread try/finally guards
+                         `available` against ANY exit path; magnetometer
+                         axis mapping to the body frame (datasheet figure);
+                         enable_magnetometer() is change-only and gated on
+                         a successfully-initialised chip; short-mag-read
+                         guard
 """
 
 from __future__ import annotations
@@ -287,6 +293,12 @@ class ImuDriver:
         self._available = False
         self._started = False
         self._mag_enabled = config.use_magnetometer
+        # True once _init_ak8963() has actually run successfully (start()
+        # only calls it when use_magnetometer is set). enable_magnetometer()
+        # folds this in so a caller asking for magnetometer readings before
+        # (or without) a working chip is quietly declined rather than
+        # setting a flag the sampling thread cannot act on.
+        self._mag_present = False
         self._bus = None
         self._filter = MadgwickFilter(beta=config.fusion_beta, mag_offset=mag_offset)
         self._identity: str | None = None
@@ -436,6 +448,7 @@ class ImuDriver:
         time.sleep(0.01)
         self._bus.write_byte_data(_AK8963_ADDR, _AK8963_REG_CNTL1, 0x16)
         time.sleep(0.01)
+        self._mag_present = True
 
     def stop(self) -> None:
         """Stop the sampling thread and close the I2C bus."""
@@ -518,36 +531,54 @@ class ImuDriver:
         return sample
 
     def _sample_loop(self) -> None:
-        """Sampling-thread body: reads at config.sample_rate_hz until stopped."""
+        """Sampling-thread body: reads at config.sample_rate_hz until stopped.
+
+        Wrapped in try/finally so that ANY way this loop ends without stop()
+        having asked it to — the OSError/struct.error threshold trip, or an
+        exception neither of those `except` clauses names — leaves
+        `available` False. Without the finally guard, an unanticipated
+        exception type could kill the thread silently while `available`
+        stayed True, so callers would keep trusting a dead sensor.
+        """
         period = 1.0 / self._config.sample_rate_hz
         next_t = time.monotonic()
-        while not self._stop_event.is_set():
-            try:
-                sample = self._read_one()
-            except (OSError, struct.error) as e:
-                self._consecutive_errors += 1
-                if self._consecutive_errors >= _IMU_MAX_CONSECUTIVE_ERRORS:
-                    logger.warning(
-                        "IMU: %d consecutive %s errors — sampling stopped, subsystem unavailable (last: %s)",
-                        self._consecutive_errors,
-                        type(e).__name__,
-                        e,
-                    )
-                    self._available = False
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    sample = self._read_one()
+                except (OSError, struct.error) as e:
+                    self._consecutive_errors += 1
+                    if self._consecutive_errors >= _IMU_MAX_CONSECUTIVE_ERRORS:
+                        logger.warning(
+                            "IMU: %d consecutive %s errors — sampling stopped, subsystem unavailable (last: %s)",
+                            self._consecutive_errors,
+                            type(e).__name__,
+                            e,
+                        )
+                        self._available = False
+                        return
+                    self._stop_event.wait(period)
+                    continue
+                except Exception as e:
+                    logger.error("IMU sampling thread died: %r", e)
                     return
-                self._stop_event.wait(period)
-                continue
-            self._consecutive_errors = 0
-            with self._state_lock:
-                self._ring_buffer.append(sample)
-                self._pending.append(sample)
-                self._latest = sample
-            next_t += period
-            delay = next_t - time.monotonic()
-            if delay > 0:
-                self._stop_event.wait(delay)
-            else:
-                next_t = time.monotonic()  # fell behind; do not try to catch up
+                self._consecutive_errors = 0
+                with self._state_lock:
+                    self._ring_buffer.append(sample)
+                    self._pending.append(sample)
+                    self._latest = sample
+                next_t += period
+                delay = next_t - time.monotonic()
+                if delay > 0:
+                    self._stop_event.wait(delay)
+                else:
+                    next_t = time.monotonic()  # fell behind; do not try to catch up
+        finally:
+            if not self._stop_event.is_set():
+                # The loop ended on its own (error threshold or an
+                # unanticipated exception), not via stop() — the subsystem
+                # is no longer sampling, so it must not read as available.
+                self._available = False
 
     def drain(self) -> list[ImuSample]:
         """Return and clear every sample recorded since the previous drain."""
@@ -574,25 +605,55 @@ class ImuDriver:
         )
 
     def _read_mag(self) -> tuple[float, float, float] | None:
-        """Read magnetometer (µT) from AK8963. Returns None if not ready."""
+        """Read magnetometer (µT) from AK8963, mapped into the accel/gyro body frame.
+
+        Returns None if not ready (bus error, a short/malformed read, or an
+        overflow flag).
+
+        Axis mapping: the AK8963 die inside the MPU-9250 is mounted rotated
+        relative to the accel/gyro die. Per the MPU-9250 datasheet's
+        magnetometer orientation figure (RM-MPU-9250A-00, §9.2): X_mag =
+        Y_accel/gyro, Y_mag = X_accel/gyro, Z_mag = -Z_accel/gyro. Swapping
+        X/Y and negating Z below means every consumer of this value already
+        receives it in the body frame. `mag_offset` ([calibration] section)
+        is documented as a body-frame hard-iron offset and is applied
+        downstream of this mapping, in MadgwickFilter.update() — not here.
+        """
         try:
             raw = self._bus.read_i2c_block_data(_AK8963_ADDR, _AK8963_REG_HXL, 7)
         except OSError:
+            return None
+
+        if len(raw) < 7:
             return None
 
         # ST2 (byte 6) must be read to signal end of measurement
         if raw[6] & 0x08:  # Overflow
             return None
 
-        # AK8963 is little-endian
+        # AK8963 is little-endian (chip frame)
         mx, my, mz = struct.unpack("<3h", bytes(raw[:6]))
 
-        return (mx * _MAG_SCALE_16BIT, my * _MAG_SCALE_16BIT, mz * _MAG_SCALE_16BIT)
+        # Chip frame -> body frame (see docstring): X<->Y swap, Z negated.
+        return (my * _MAG_SCALE_16BIT, mx * _MAG_SCALE_16BIT, -mz * _MAG_SCALE_16BIT)
 
     def enable_magnetometer(self, enable: bool) -> None:
-        """Enable or disable magnetometer readings (DEC-013)."""
-        self._mag_enabled = enable
-        logger.info("Magnetometer %s", "enabled" if enable else "disabled")
+        """Enable or disable magnetometer readings (DEC-013).
+
+        A no-op unless it actually changes something: `target` folds in
+        whether the AK8963 was ever successfully initialised
+        (`_mag_present`), so asking for magnetometer readings without a
+        present chip is quietly declined instead of setting a flag the
+        sampling thread cannot act on. Logged at DEBUG, not INFO — the
+        acquisition loop calls this twice per stepper step (DEC-013 EMI
+        gating), and most of those calls are now this no-op.
+        """
+        target = enable and self._mag_present
+        if target == self._mag_enabled:
+            return
+        with self._bus_lock:
+            self._mag_enabled = target
+        logger.debug("Magnetometer %s", "enabled" if target else "disabled")
 
     def get_sample_at(self, timestamp: float) -> ImuSample | None:
         """Find the closest sample in the ring buffer to the given timestamp.

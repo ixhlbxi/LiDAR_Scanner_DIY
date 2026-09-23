@@ -17,12 +17,16 @@ Usage:
 
 Changelog:
     0.1.0  2026-03-22  Initial implementation (Task 1, Phase 3)
+    0.1.1  2026-09-23  mag_offset rejects bool/non-finite values; step_interval_deg
+                        error names both integer-multiple neighbours instead of
+                        rounding (which could suggest 0)
 """
 
 from __future__ import annotations
 
 import copy
 import logging
+import math
 import tomllib
 from dataclasses import asdict, dataclass, fields
 from difflib import get_close_matches
@@ -467,10 +471,16 @@ def _validate(raw: dict) -> None:
     per_step = 360.0 / st["steps_per_rev"]
     ratio = st["step_interval_deg"] / per_step
     if abs(ratio - round(ratio)) > 1e-9:
+        # Name both integer-multiple neighbours rather than the nearest one
+        # rounded — round() can land on 0 for a step_interval_deg smaller
+        # than one microstep, and "e.g. 0°" is not a usable suggestion (0
+        # steps is not a move). Floor is clamped to 1 microstep instead.
+        floor_n = max(1, math.floor(ratio))
+        ceil_n = max(floor_n + 1, math.ceil(ratio))
         raise ValueError(
             f"[stepper] step_interval_deg ({st['step_interval_deg']}) must be an integer "
             f"multiple of {per_step:g}° (360 / steps_per_rev = {st['steps_per_rev']}); "
-            f"e.g. {round(ratio) * per_step:g}"
+            f"nearest valid values are {floor_n * per_step:g}° and {ceil_n * per_step:g}°"
         )
     for pin_key in ("direction_pin", "step_pin", "enable_pin"):
         _require_type("stepper", pin_key, st[pin_key], int)
@@ -662,6 +672,20 @@ def _validate(raw: dict) -> None:
                 raise ValueError(f"[calibration] {key}: must be [x, y, z] (3 floats), got {v!r}")
             if not all(isinstance(x, (int, float)) for x in v):
                 raise ValueError(f"[calibration] {key}: all values must be numeric, got {v!r}")
+
+    # mag_offset gets an extra, stricter pass: isinstance(True, int) is True in
+    # Python, so the generic numeric check above silently accepts a stray
+    # `true`/`false` in the TOML list as 1/0; and a hard-iron offset of NaN or
+    # +/-inf would poison every downstream MadgwickFilter.update() call.
+    if "mag_offset" in cal and cal["mag_offset"] is not None:
+        for x in cal["mag_offset"]:
+            if isinstance(x, bool):
+                raise ValueError(
+                    f"[calibration] mag_offset: values must be numeric, got bool {x!r}"
+                )
+            if not math.isfinite(x):
+                raise ValueError(f"[calibration] mag_offset: values must be finite, got {x!r}")
+
     if "lidar_to_imu_rotation" in cal and cal["lidar_to_imu_rotation"] is not None:
         v = cal["lidar_to_imu_rotation"]
         if not isinstance(v, list) or len(v) != 4:

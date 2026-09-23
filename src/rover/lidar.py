@@ -20,6 +20,9 @@ Changelog:
     0.1.0  2026-03-22  Stub
     0.2.0  2026-03-22  Full implementation
     0.11.0  2026-09  Seam carry-over, stale discard, LidarScan with LD19 timestamps, one-byte resync
+    0.11.1  2026-09-23  Shared _is_wrap() helper between the discard-skip and
+                        assembly loops; read_scan() docstring notes the
+                        shared timeout budget
 """
 
 from __future__ import annotations
@@ -383,6 +386,15 @@ _SCAN_TIMEOUT_SEC = 5.0
 _WRAP_THRESHOLD_DEG = 10.0
 
 
+def _is_wrap(start: float, prev: float | None) -> bool:
+    """True when `start` reveals a 360deg->0deg wrap relative to `prev` (the
+    previous packet's start_angle). `prev is None` means there is no
+    previous packet yet, so no wrap is possible. Shared by both the
+    discard_stale skip-to-wrap loop and the revolution-assembly loop in
+    read_scan() so the two can't drift onto different wrap definitions."""
+    return prev is not None and start < prev - _WRAP_THRESHOLD_DEG
+
+
 class LidarScanner:
     """LD19 LiDAR scanner driver.
 
@@ -532,6 +544,13 @@ class LidarScanner:
                 slice. When false, continue from the packet carried over from the
                 previous call (the one that revealed its wrap).
 
+        A single `_SCAN_TIMEOUT_SEC` deadline, set once at the top of this call,
+        covers BOTH phases when discard_stale is true — the skip-to-wrap discard
+        loop and the revolution-assembly loop share it rather than each getting
+        their own budget. A slow or stalled stream can spend the whole deadline
+        discarding and leave nothing for the actual scan; that surfaces as the
+        same TimeoutError either way, not a distinguishable failure mode.
+
         Raises:
             RuntimeError: If the scanner is not available.
             TimeoutError: If no full revolution arrives within the timeout.
@@ -552,7 +571,7 @@ class LidarScanner:
             prev = None
             while True:
                 pkt = self._next_packet(deadline)
-                if prev is not None and pkt["start_angle"] < prev - _WRAP_THRESHOLD_DEG:
+                if _is_wrap(pkt["start_angle"], prev):
                     break
                 prev = pkt["start_angle"]
             first = pkt
@@ -569,7 +588,7 @@ class LidarScanner:
 
         while True:
             pkt = self._next_packet(deadline)
-            if pkt["start_angle"] < prev - _WRAP_THRESHOLD_DEG:
+            if _is_wrap(pkt["start_angle"], prev):
                 self._carry = pkt  # opens the next revolution
                 return LidarScan(points=points, lidar_ms_start=ms_start, lidar_ms_end=ms_end)
             prev = pkt["start_angle"]

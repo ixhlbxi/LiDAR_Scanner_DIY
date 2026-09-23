@@ -1,13 +1,26 @@
 """Unit tests for rover.imu — runs anywhere, no hardware required."""
 
 import math
+import struct
 import time as _time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from rover.config import ImuConfig
-from rover.imu import ImuDriver, ImuSample, MadgwickFilter
+from rover.imu import _MAG_SCALE_16BIT, ImuDriver, ImuSample, MadgwickFilter
+
+
+def _poll_drain(drv, deadline_sec: float = 2.0):
+    """Poll drv.drain() until it returns a non-empty batch or the deadline passes."""
+    deadline = _time.monotonic() + deadline_sec
+    batch: list = []
+    while _time.monotonic() < deadline:
+        batch = drv.drain()
+        if batch:
+            return batch
+        _time.sleep(0.01)
+    return batch
 
 
 @pytest.fixture
@@ -276,6 +289,11 @@ class TestImuWithMockI2C:
         driver = ImuDriver(imu_config)
         driver.start()
         try:
+            # imu_config has use_magnetometer=False, so _init_ak8963() never ran
+            # during start() and _mag_present is still False; simulate a chip
+            # that was successfully initialised so enable_magnetometer(True)
+            # below isn't declined.
+            driver._mag_present = True
             driver.enable_magnetometer(False)
             assert not driver._mag_enabled
             driver.enable_magnetometer(True)
@@ -355,6 +373,26 @@ class TestImuWithMockI2C:
             driver.stop()
 
 
+class TestReadMag:
+    def test_read_mag_short_read_returns_none(self, imu_config):
+        driver = ImuDriver(imu_config)
+        driver._bus = MagicMock()
+        driver._bus.read_i2c_block_data.return_value = [0] * 6  # too short (need 7)
+        assert driver._read_mag() is None
+
+    def test_read_mag_maps_axes_to_body_frame(self, imu_config):
+        """Chip frame (mx, my, mz) must come back as body frame
+        (my, mx, -mz) per the MPU-9250 datasheet's magnetometer orientation
+        figure."""
+        driver = ImuDriver(imu_config)
+        driver._bus = MagicMock()
+        raw = list(struct.pack("<3h", 100, 200, 300)) + [0]  # ST2 byte, no overflow
+        driver._bus.read_i2c_block_data.return_value = raw
+        result = driver._read_mag()
+        s = _MAG_SCALE_16BIT
+        assert result == pytest.approx((200 * s, 100 * s, -300 * s))
+
+
 # ---------------------------------------------------------------------------
 # ImuDriver sampling thread tests
 # ---------------------------------------------------------------------------
@@ -396,8 +434,10 @@ class TestImuSamplingThread:
             batch = drv.drain()
         finally:
             drv.stop()
-        # 200 Hz × 0.5 s = 100 nominal; accept a loaded CI box
-        assert 40 <= len(batch) <= 130, len(batch)
+        # 200 Hz × 0.5 s = 100 nominal; accept a loaded CI box (a Windows host's
+        # ~15.6 ms time.monotonic() resolution on Python <=3.12 can push the
+        # floor much lower than a Linux CI box would).
+        assert 10 <= len(batch) <= 130, len(batch)
         assert drv.drain() == []  # drained
         assert drv.latest() is not None
         assert all(isinstance(s, ImuSample) for s in batch)
@@ -439,13 +479,22 @@ class TestImuSamplingThread:
 
         monkeypatch.setattr(drv._filter, "update", spy)
         drv.start()
+        start_mono = _time.monotonic()
         try:
             for _ in range(50):
                 drv.read_sample()
         finally:
             drv.stop()
+        elapsed_monotonic = _time.monotonic() - start_mono
         assert seen
-        assert all(dt > 0 for dt in seen), seen
+        # >= 0, not > 0: on Python <=3.12 Windows, time.monotonic()'s ~15.6 ms
+        # resolution can return the SAME value on two back-to-back calls, so a
+        # strict > 0 is not guaranteed even though the bookkeeping is correct.
+        assert all(dt >= 0 for dt in seen), seen
+        # The sum of every reported dt cannot exceed the real wall-clock time
+        # the loop actually took (plus a small margin) — that would mean dt
+        # bookkeeping double-counted an interval.
+        assert sum(seen) <= elapsed_monotonic + 0.05
 
     def test_sample_thread_stops_on_repeated_bus_errors(self, imu_config, mock_smbus_realtime):
         drv = ImuDriver(imu_config)
@@ -477,19 +526,40 @@ class TestImuSamplingThread:
         finally:
             drv.stop()
 
+    def test_sample_thread_marks_unavailable_on_unexpected_exception(
+        self, imu_config, mock_smbus_realtime
+    ):
+        """An exception type neither the OSError/struct.error branch nor the
+        error-threshold logic anticipates must still leave `available` False —
+        the try/finally guard around _sample_loop's body is the only thing
+        that can catch a case like this."""
+        drv = ImuDriver(imu_config)
+        drv.start()
+        mock_smbus_realtime.read_i2c_block_data.side_effect = RuntimeError("unexpected failure")
+        deadline = _time.monotonic() + 3.0
+        while drv.available and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        try:
+            assert drv.available is False
+            assert drv._thread is None or not drv._thread.is_alive()
+        finally:
+            drv.stop()
+
     def test_enable_magnetometer_is_honoured_by_thread(self, imu_config, mock_smbus_realtime):
         drv = ImuDriver(imu_config)
         drv.start()
+        # imu_config has use_magnetometer=False, so _init_ak8963() never ran;
+        # simulate a successfully-initialised chip so enable_magnetometer(True)
+        # below is honoured instead of quietly declined.
+        drv._mag_present = True
         try:
             drv.enable_magnetometer(False)
             drv.drain()
-            _time.sleep(0.1)
-            batch = drv.drain()
+            batch = _poll_drain(drv)
             assert batch and all(s.mag is None for s in batch)
             drv.enable_magnetometer(True)
             drv.drain()
-            _time.sleep(0.1)
-            batch = drv.drain()
+            batch = _poll_drain(drv)
             assert batch and any(s.mag is not None for s in batch)
         finally:
             drv.stop()

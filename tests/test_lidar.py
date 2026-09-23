@@ -438,3 +438,46 @@ class TestReadScanRevolutions:
         monkeypatch.setattr("rover.lidar._SCAN_TIMEOUT_SEC", 0.2)
         with pytest.raises(TimeoutError):
             s.read_scan(discard_stale=False)
+
+    def test_discard_after_carry_ignores_carried_packet(self, lidar_config, mock_serial):
+        """discard_stale=True after a prior discard_stale=False call must not
+        resume from the packet that call carried into `_carry` — the carry
+        (and anything else buffered) is discarded, not silently reused as the
+        start of the next scan."""
+        rev0 = _revolution_packets(0, 1000)
+        rev1 = _revolution_packets(1, 2000)  # becomes the carry after the first call
+        rev2 = _revolution_packets(2, 5000)  # discarded whole by the skip-to-wrap loop
+        rev3 = _revolution_packets(3, 6000)  # becomes the second scan
+        rev4 = _revolution_packets(4, 7000)  # reveals the closing wrap
+
+        state: dict = {"phase2_data": None}
+
+        def read_after_reset(n):
+            if state["phase2_data"] is not None:
+                data, state["phase2_data"] = state["phase2_data"], None
+                return data
+            return b""
+
+        def reset_input_buffer():
+            # Simulates fresh packets only starting to arrive once the mast has
+            # settled: the NEXT read() after this reset delivers rev2..rev4.
+            mock_serial.read.side_effect = read_after_reset
+            state["phase2_data"] = b"".join(rev2 + rev3 + rev4)
+
+        mock_serial.in_waiting = 1
+        mock_serial.read.side_effect = [b"".join(rev0 + rev1)] + [b""] * 10_000
+        mock_serial.reset_input_buffer.side_effect = reset_input_buffer
+
+        s = LidarScanner(lidar_config)
+        s.start()
+
+        first = s.read_scan(discard_stale=False)
+        assert first.lidar_ms_start == 1000
+        assert s._carry is not None
+        carried_ms = s._carry["timestamp_ms"]
+        assert carried_ms == 2000
+
+        second = s.read_scan(discard_stale=True)
+        mock_serial.reset_input_buffer.assert_called_once()
+        assert second.lidar_ms_start == 6000
+        assert second.lidar_ms_start != carried_ms
