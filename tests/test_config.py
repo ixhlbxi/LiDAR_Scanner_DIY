@@ -1,6 +1,5 @@
 """Unit tests for rover.config — runs anywhere, no hardware required."""
 
-import textwrap
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -10,19 +9,6 @@ from rover.config import (
     RoverConfig,
     load_config,
 )
-
-
-@pytest.fixture
-def tmp_toml(tmp_path):
-    """Helper: write TOML content to a temp file and return its path."""
-
-    def _write(content: str) -> Path:
-        p = tmp_path / "test_config.toml"
-        p.write_text(textwrap.dedent(content))
-        return p
-
-    return _write
-
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -42,8 +28,6 @@ class TestDefaults:
         assert cfg.stepper.steps_per_rev == 3200
         assert cfg.imu.address == 0x68
         assert cfg.camera.resolution == (1920, 1080)
-        assert cfg.logging.format == "jsonl"
-        assert cfg.power.low_battery_mv == 10500
 
     def test_calibration_defaults_are_none(self):
         cfg = load_config()
@@ -93,7 +77,6 @@ class TestFileLoading:
         """)
         cfg = load_config(p)
         assert cfg.watchdog.enabled is True
-        assert cfg.power.monitor_battery is True
 
 
 # ---------------------------------------------------------------------------
@@ -220,15 +203,6 @@ class TestRangeValidation:
         with pytest.raises(ValueError, match="baud"):
             load_config(p)
 
-    def test_critical_battery_above_low(self, tmp_toml):
-        p = tmp_toml("""
-            [power]
-            low_battery_mv = 10000
-            critical_battery_mv = 11000
-        """)
-        with pytest.raises(ValueError, match="critical_battery_mv"):
-            load_config(p)
-
 
 # ---------------------------------------------------------------------------
 # Enum validation
@@ -242,14 +216,6 @@ class TestEnumValidation:
             log_level = "VERBOSE"
         """)
         with pytest.raises(ValueError, match="log_level"):
-            load_config(p)
-
-    def test_invalid_rtcm_profile(self, tmp_toml):
-        p = tmp_toml("""
-            [gnss]
-            rtcm_profile = "ultra"
-        """)
-        with pytest.raises(ValueError, match="rtcm_profile"):
             load_config(p)
 
     def test_invalid_coding_rate(self, tmp_toml):
@@ -267,22 +233,6 @@ class TestEnumValidation:
         """)
         with pytest.raises(ValueError, match="bandwidth_khz"):
             load_config(p)
-
-    def test_invalid_format(self, tmp_toml):
-        p = tmp_toml("""
-            [logging]
-            format = "parquet"
-        """)
-        with pytest.raises(ValueError, match="format"):
-            load_config(p)
-
-    def test_csv_format_accepted(self, tmp_toml):
-        p = tmp_toml("""
-            [logging]
-            format = "csv"
-        """)
-        cfg = load_config(p)
-        assert cfg.logging.format == "csv"
 
 
 # ---------------------------------------------------------------------------
@@ -450,3 +400,104 @@ class TestStage3Config:
         assert cfg.stepper.step_interval_deg / per_step == pytest.approx(
             round(cfg.stepper.step_interval_deg / per_step)
         )
+
+    def test_step_interval_error_names_both_neighbors(self, tmp_toml):
+        """step_interval_deg error message should name both integer-multiple neighbours."""
+        p = tmp_toml("""
+            [stepper]
+            steps_per_rev = 3200
+            step_interval_deg = 1.5
+        """)
+        with pytest.raises(ValueError) as exc_info:
+            load_config(p)
+        error_msg = str(exc_info.value)
+        # The per-step is 360/3200 = 0.1125
+        # 1.5 / 0.1125 = 13.333...
+        # floor_n = 13, ceil_n = 14
+        # Valid values: 13 * 0.1125 = 1.4625, 14 * 0.1125 = 1.575
+        assert "1.4625" in error_msg
+        assert "1.575" in error_msg
+
+    def test_mag_offset_rejects_bool_value(self, tmp_toml):
+        """mag_offset must not accept bool values (even though isinstance(True, int) is True)."""
+        p = tmp_toml("""
+            [calibration]
+            mag_offset = [1.0, true, 2.0]
+        """)
+        with pytest.raises(ValueError, match=r"\[calibration\] mag_offset.*bool"):
+            load_config(p)
+
+    def test_mag_offset_rejects_infinite_value(self, tmp_toml):
+        """mag_offset must not accept inf or nan."""
+        p = tmp_toml("""
+            [calibration]
+            mag_offset = [0.0, 0.0, inf]
+        """)
+        with pytest.raises(ValueError, match=r"\[calibration\] mag_offset.*finite"):
+            load_config(p)
+
+
+# ---------------------------------------------------------------------------
+# Dead Config Removal (T1-041)
+# ---------------------------------------------------------------------------
+
+
+class TestDeadConfigRemoved:
+    def test_power_section_is_unknown(self, tmp_toml):
+        """[power] section should be rejected as unknown."""
+        p = tmp_toml("""
+            [power]
+            monitor_battery = true
+        """)
+        with pytest.raises(ValueError, match="power"):
+            load_config(p)
+
+    def test_gnss_survey_in_duration_is_unknown(self, tmp_toml):
+        """[gnss] survey_in_duration_sec should be rejected as unknown."""
+        p = tmp_toml("""
+            [gnss]
+            survey_in_duration_sec = 300
+        """)
+        with pytest.raises(ValueError, match="survey_in_duration_sec"):
+            load_config(p)
+
+    def test_gnss_survey_in_accuracy_is_unknown(self, tmp_toml):
+        """[gnss] survey_in_accuracy_m should be rejected as unknown."""
+        p = tmp_toml("""
+            [gnss]
+            survey_in_accuracy_m = 0.02
+        """)
+        with pytest.raises(ValueError, match="survey_in_accuracy_m"):
+            load_config(p)
+
+    def test_gnss_rtcm_profile_is_unknown(self, tmp_toml):
+        """[gnss] rtcm_profile should be rejected as unknown."""
+        p = tmp_toml("""
+            [gnss]
+            rtcm_profile = "robust"
+        """)
+        with pytest.raises(ValueError, match="rtcm_profile"):
+            load_config(p)
+
+    def test_imu_fusion_output_hz_is_unknown(self, tmp_toml):
+        """[imu] fusion_output_hz should be rejected as unknown."""
+        p = tmp_toml("""
+            [imu]
+            fusion_output_hz = 100
+        """)
+        with pytest.raises(ValueError, match="fusion_output_hz"):
+            load_config(p)
+
+    def test_logging_format_is_unknown(self, tmp_toml):
+        """[logging] format should be rejected as unknown."""
+        p = tmp_toml("""
+            [logging]
+            format = "jsonl"
+        """)
+        with pytest.raises(ValueError, match="format"):
+            load_config(p)
+
+    def test_no_power_attribute(self):
+        """RoverConfig should not have a .power attribute."""
+        cfg = load_config()
+        assert not hasattr(cfg, "power")

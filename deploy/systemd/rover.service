@@ -33,6 +33,10 @@ Environment=PYTHONPATH=/opt/rover/src
 Environment=LG_WD=/tmp
 
 Restart=on-failure
+# 2 = config load failed (run()); 4 = NTRIP fatal auth/mountpoint rejection in
+# arm_group, BASE_STATION_INTEGRATION.md §7 — neither is transient, so don't
+# keep restarting into the same failure (final review I2).
+RestartPreventExitStatus=2 4
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

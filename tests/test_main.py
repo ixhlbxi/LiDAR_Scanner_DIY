@@ -30,7 +30,7 @@ from scripts import georef  # noqa: E402
 def _write_all_disabled_config(tmp_path: Path) -> Path:
     """Write a TOML that disables every sensor and every telemetry channel.
 
-    This is the minimal valid config for an off-Pi bench run.
+    Keeps only keys that differ from defaults.
     """
     cfg = tmp_path / "rover_all_disabled.toml"
     cfg.write_text(
@@ -41,76 +41,28 @@ log_level = "WARNING"
 
 [lidar]
 enabled = false
-port = "/dev/null"
-baud = 230400
-scan_rate_hz = 10
 
 [stepper]
 enabled = false
-steps_per_rev = 3200
-rpm = 1.0
-step_interval_deg = 1.575
-direction_pin = 17
-step_pin = 27
-enable_pin = 22
 
 [imu]
 enabled = false
-bus = 1
-address = 0x68
-sample_rate_hz = 200
-fusion_output_hz = 100
-use_magnetometer = false
-fusion_beta = 0.1
 
 [gnss]
 enabled = false
-port = "/dev/null"
-baud = 115200
-rtcm_profile = "robust"
-survey_in_duration_sec = 300
-survey_in_accuracy_m = 0.02
-
-[ntrip]
-enabled = false
-client_location = "pi"
-
-[lora]
-enabled = false
-port = "/dev/null"
-role = "disabled"
-
-[base_station_integration]
-enabled = false
-
-[telemetry]
-http_enabled = false
 
 [camera]
 enabled = false
-resolution = [640, 480]
-capture_cadence = 1
-jpeg_quality = 85
-output_folder = "images"
+
+[lora]
+enabled = false
+
+[watchdog]
+enabled = false
 
 [logging]
 output_dir = "{(tmp_path / "data").as_posix()}"
 session_prefix = "test"
-format = "jsonl"
-flush_interval_sec = 1.0
-rotate_size_mb = 0
-save_images = false
-
-[watchdog]
-enabled = false
-timeout_sec = 30
-heartbeat_interval_sec = 5
-
-[power]
-monitor_battery = false
-battery_adc_channel = 0
-low_battery_mv = 10500
-critical_battery_mv = 10000
 """
     )
     return cfg
@@ -206,9 +158,6 @@ enabled = false
 [logging]
 output_dir = "{(tmp_path / "data").as_posix()}"
 session_prefix = "boomtest"
-
-[power]
-monitor_battery = false
 """
     )
 
@@ -395,7 +344,6 @@ def test_save_images_false_prevents_capture(tmp_path: Path, monkeypatch) -> None
     """[logging].save_images = false must stop captures, not just skip a mkdir (T1-031)."""
     _CountingCamera.captures = 0
     monkeypatch.setattr(main_mod, "Camera", _CountingCamera)
-    monkeypatch.setattr(main_mod, "_CAMERA_IMPORT_OK", True)
     monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 0.05)  # many iterations in 1 s
     cfg = tmp_path / "cam.toml"
     cfg.write_text(
@@ -440,7 +388,6 @@ def test_save_images_true_captures_and_logs(tmp_path: Path, monkeypatch) -> None
 
     _CountingCamera.captures = 0
     monkeypatch.setattr(main_mod, "Camera", _CountingCamera)
-    monkeypatch.setattr(main_mod, "_CAMERA_IMPORT_OK", True)
     monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 0.05)  # many iterations in 1 s
     cfg = tmp_path / "cam.toml"
     cfg.write_text(
@@ -668,3 +615,245 @@ def test_round_trip_produces_points(tmp_path: Path, monkeypatch) -> None:
     assert len(xyz) > 0
     assert len(intensity) == len(xyz)
     assert len(session_data.lidar_records) == len(_StaticLidar.calls)
+
+
+def test_run_aborts_on_401_in_arm_group(tmp_path: Path, monkeypatch) -> None:
+    """BASE_STATION_INTEGRATION §7: refuse to start in arm_group on a 401 (T1-004)."""
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def _serve():
+        conn, _ = srv.accept()
+        conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 401 Unauthorized\r\n\r\n")
+        conn.close()
+        srv.close()
+
+    threading.Thread(target=_serve, daemon=True).start()
+
+    class _FakeGnss:
+        def __init__(self, *_a, **_kw): ...
+        @property
+        def available(self):
+            return True
+
+        def start(self): ...
+        def stop(self): ...
+        def latest_fix(self):
+            return None
+
+        def write_rtcm(self, b): ...
+
+    monkeypatch.setattr(main_mod, "GnssReceiver", _FakeGnss)
+    cfg = tmp_path / "ag.toml"
+    cfg.write_text(
+        f"""
+[session]
+profile = "arm_group"
+project_code = "TEST"
+target_crs_epsg = 6346
+[base_station_integration]
+enabled = true
+status_json_path = "{(tmp_path / "status.json").as_posix()}"
+[gnss]
+enabled = true
+[ntrip]
+enabled = true
+client_location = "pi"
+caster_host = "127.0.0.1"
+caster_port = {port}
+mountpoint = "ARM_BASE"
+[lidar]
+enabled = false
+[stepper]
+enabled = false
+[imu]
+enabled = false
+[camera]
+enabled = false
+[lora]
+enabled = false
+role = "disabled"
+[telemetry]
+http_enabled = false
+[watchdog]
+enabled = false
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "ag"
+"""
+    )
+    assert main_mod.run(config_path=cfg, duration_sec=5.0) == 4
+
+
+class _BrokenStepper(_FakeStepper):
+    fails = 0
+
+    def step(self, steps: int) -> None:
+        type(self).fails += 1
+        raise RuntimeError("stall")
+
+
+def test_stepper_failures_are_gated_and_still_publish(tmp_path: Path, monkeypatch) -> None:
+    """A failing stepper must not spam warnings forever nor skip telemetry (S2-R3)."""
+    import json
+
+    _BrokenStepper.fails = 0
+    published: list = []
+    monkeypatch.setattr(main_mod, "StepperMotor", _BrokenStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
+
+    real_router = main_mod.TelemetryRouter
+
+    class _SpyRouter(real_router):
+        def publish(self, status):
+            published.append(status.scan_state)
+            return super().publish(status)
+
+    monkeypatch.setattr(main_mod, "TelemetryRouter", _SpyRouter)
+    assert main_mod.run(config_path=_stage3_config(tmp_path), duration_sec=4.0) == 0
+    assert _BrokenStepper.fails == 5, "gate must stop retrying after 5 failures"
+    assert any(s == main_mod.SCAN_ERROR for s in published), "SCAN_ERROR must be published"
+    session = next((tmp_path / "data").glob("s3_*"))
+    events = [
+        json.loads(line)["event"]
+        for line in (session / "scan.jsonl").read_text().splitlines()
+        if '"event"' in line
+    ]
+    assert "sensor_disabled" in events
+
+
+def test_scan_constants_come_from_lora_protocol():
+    from rover import lora_protocol
+
+    assert main_mod.SCAN_ERROR is lora_protocol.SCAN_ERROR
+
+
+# ---------------------------------------------------------------------------
+# Final review I4 — scan_state must persist through a mid-session NTRIP fatal
+# ---------------------------------------------------------------------------
+
+
+class _LateFatalNtrip:
+    """Fakes NtripClient: healthy through the startup grace check, then
+    fatal_error flips non-None partway through the scan loop — a caster
+    rejection discovered mid-session, not at connect time."""
+
+    def __init__(self, config, rtcm_sink=None, gga_source=None) -> None:
+        from rover.ntrip import NtripStats
+
+        self.stats = NtripStats(connected=True)
+        self._go_fatal_at: float | None = None
+
+    def start(self) -> None:
+        self._go_fatal_at = time.monotonic() + 0.35
+
+    def stop(self) -> None:
+        pass
+
+    @property
+    def fatal_error(self):
+        if self._go_fatal_at is not None and time.monotonic() >= self._go_fatal_at:
+            return "401 Unauthorized (simulated mid-session)"
+        return None
+
+
+class _FakeGnssMinimal:
+    def __init__(self, *_a, **_kw) -> None: ...
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def latest_fix(self):
+        return None
+
+    def write_rtcm(self, b) -> None: ...
+
+
+def test_scan_state_persists_through_mid_session_ntrip_fatal(tmp_path: Path, monkeypatch) -> None:
+    """scan_state must be derived each iteration from persistent conditions
+    (tripped stepper gate OR an NTRIP fatal error), not left as whatever the
+    per-step logic set: previously, once the stepper resumed succeeding, the
+    next healthy step reset scan_state to SCAN_SCANNING and silently cleared
+    an unresolved NTRIP fatal that had only been logged once (final review
+    I4)."""
+    monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
+    monkeypatch.setattr(main_mod, "GnssReceiver", _FakeGnssMinimal)
+    monkeypatch.setattr(main_mod, "NtripClient", _LateFatalNtrip)
+    monkeypatch.setattr(main_mod, "_NTRIP_FATAL_GRACE_SEC", 0.02)
+
+    published: list = []
+    real_router = main_mod.TelemetryRouter
+
+    class _SpyRouter(real_router):
+        def publish(self, status):
+            published.append(status.scan_state)
+            return super().publish(status)
+
+    monkeypatch.setattr(main_mod, "TelemetryRouter", _SpyRouter)
+
+    cfg = tmp_path / "i4.toml"
+    cfg.write_text(
+        f"""
+[stepper]
+enabled = true
+steps_per_rev = 3200
+step_interval_deg = 1.125
+
+[lidar]
+enabled = false
+[imu]
+enabled = false
+[camera]
+enabled = false
+
+[gnss]
+enabled = true
+
+[ntrip]
+enabled = true
+client_location = "pi"
+caster_host = "127.0.0.1"
+caster_port = 1
+mountpoint = "ARM_BASE"
+
+[lora]
+enabled = false
+role = "disabled"
+
+[base_station_integration]
+enabled = false
+
+[telemetry]
+http_enabled = false
+
+[watchdog]
+enabled = false
+
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "i4"
+"""
+    )
+
+    exit_code = main_mod.run(config_path=cfg, duration_sec=1.3)
+    assert exit_code == 0  # a mid-session fatal does not abort the run
+
+    assert main_mod.SCAN_ERROR in published, f"SCAN_ERROR must be published: {published}"
+    first_error_idx = published.index(main_mod.SCAN_ERROR)
+    tail = published[first_error_idx:]
+    assert len(tail) >= 3, f"expected SCAN_ERROR to persist across several iterations: {published}"
+    assert all(s == main_mod.SCAN_ERROR for s in tail), (
+        f"a healthy step must not clear an unresolved NTRIP fatal: {published}"
+    )

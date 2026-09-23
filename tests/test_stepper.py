@@ -292,3 +292,46 @@ class TestStepperWithMockGPIO:
         motor = StepperMotor(stepper_config)
         motor.start()
         assert not motor.available
+
+
+# ---------------------------------------------------------------------------
+# GPIO backend detection (DEC-029)
+# ---------------------------------------------------------------------------
+
+
+def test_backend_detection_names_lgpio():
+    """The real rpi-lgpio 0.6 wheel installs at the SAME path as legacy
+    RPi.GPIO (RPi/GPIO/__init__.py) — both fixtures below use that identical
+    path, distinguished only by the `lgpio` attribute the real wheel's
+    module-level `import lgpio` leaves behind (final review C1)."""
+    from rover import stepper
+
+    legacy = type(
+        "G",
+        (),
+        {"__file__": "/usr/lib/python3/dist-packages/RPi/GPIO/__init__.py"},
+    )()
+    assert stepper._detect_backend(legacy) == "RPi.GPIO"
+
+    lgpio_module = type("LgpioModule", (), {})()
+    rpi_lgpio = type(
+        "G",
+        (),
+        {
+            "__file__": "/usr/lib/python3/dist-packages/RPi/GPIO/__init__.py",
+            "lgpio": lgpio_module,
+        },
+    )()
+    assert stepper._detect_backend(rpi_lgpio) == "rpi-lgpio"
+    assert stepper._detect_backend(None) == "none"
+
+
+def test_start_refuses_legacy_backend(stepper_config, monkeypatch):
+    from rover import stepper
+
+    monkeypatch.setattr(stepper, "_GPIO_AVAILABLE", True)
+    monkeypatch.setattr(stepper, "GPIO", __import__("unittest.mock").mock.MagicMock())
+    monkeypatch.setattr(stepper, "GPIO_BACKEND", "RPi.GPIO")
+    m = stepper.StepperMotor(stepper_config)
+    m.start()
+    assert m.available is False

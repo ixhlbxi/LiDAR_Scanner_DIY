@@ -33,6 +33,15 @@ def test_units_conflict_with_each_other() -> None:
     assert re.search(r"^Conflicts=rover\.service$", telemetry, re.M)
 
 
+def test_rover_service_does_not_restart_on_config_or_ntrip_fatal_exit() -> None:
+    """rover.main.run() returns 2 for a config load failure and 4 for an
+    NTRIP fatal auth/mountpoint rejection (BASE_STATION_INTEGRATION.md §7) —
+    neither is transient, so systemd must not keep restarting into the same
+    failure (final review I2)."""
+    text = (REPO / "deploy/systemd/rover.service").read_text(encoding="utf-8")
+    assert re.search(r"^RestartPreventExitStatus=2 4$", text, re.M), text
+
+
 @pytest.mark.parametrize(
     "toml_path, expected",
     EXPECTED_OUTPUT_DIRS,
@@ -56,3 +65,14 @@ def test_install_sh_installs_configs_without_overwriting() -> None:
     assert "rover-telemetry.service" in after_reload, "both units restarted"
     assert "/var/lib/rover/data" in after_reload, "closing message names the scan folder"
     assert "/var/lib/rover/bench" in after_reload, "closing message names the bench folder"
+
+
+def test_install_sh_checks_gpio_backend() -> None:
+    """Probe by the `lgpio` attribute (rpi-lgpio 0.6 shares RPi.GPIO's import
+    path, so __file__ can't distinguish them) and warn only on "legacy"
+    (final review C1)."""
+    sh = (REPO / "deploy/install.sh").read_text(encoding="utf-8")
+    assert "getattr(g, 'lgpio', None) is not None" in sh
+    assert '"$gpio_check" == "legacy"' in sh
+    assert "import RPi.GPIO" in sh
+    assert "python3-rpi-lgpio" in sh

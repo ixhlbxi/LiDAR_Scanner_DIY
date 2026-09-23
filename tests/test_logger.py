@@ -21,7 +21,6 @@ def cfg(tmp_path):
 [logging]
 output_dir = "{tmp_path.as_posix()}"
 session_prefix = "test"
-format = "jsonl"
 flush_interval_sec = 60.0
 rotate_size_mb = 0
 save_images = true
@@ -184,9 +183,11 @@ class TestJSONLWriting:
             assert len(gnss_lines) == 1
             assert json.loads(gnss_lines[0])["type"] == "gnss"
 
-            # Should also appear in scan.jsonl (all records go there)
-            scan_lines = (session_dir / "scan.jsonl").read_text().strip().split("\n")
-            assert len(scan_lines) == 1
+            # Must NOT be mirrored into scan.jsonl (T1-053) — gnss*.jsonl is
+            # now the sole source of GNSS records; inverted from the old
+            # stage-2 expectation that every record landed in both files.
+            scan_content = (session_dir / "scan.jsonl").read_text().strip()
+            assert scan_content == ""
         finally:
             lg.stop()
 
@@ -563,8 +564,8 @@ def test_stop_closes_files_when_metadata_write_fails(cfg, monkeypatch):
     lg.stop()  # must not raise
 
     assert lg.degraded is True
-    assert lg._scan_file is None or lg._scan_file.closed
-    assert lg._gnss_file is None or lg._gnss_file.closed
+    assert lg._scan.file is None or lg._scan.file.closed
+    assert lg._gnss.file is None or lg._gnss.file.closed
 
 
 def test_write_drop_only_counts_real_drops(cfg, monkeypatch):
@@ -597,3 +598,173 @@ def test_write_drop_only_counts_real_drops(cfg, monkeypatch):
         assert lg._queue.get_nowait()["event"] == "raced"
     finally:
         lg.stop()
+
+
+# ---------------------------------------------------------------------------
+# Task 9 — single GNSS stream, generic rotation, counted losses, unblocked
+# producer (T1-053, S2-R4, S3-R4)
+# ---------------------------------------------------------------------------
+
+
+def test_gnss_records_only_in_gnss_file(cfg):
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.write({"type": "gnss", "lat": 1.0})
+    lg.write({"type": "lidar", "angle": []})
+    lg.stop()
+    scan = (lg.session_dir / "scan.jsonl").read_text()
+    gnss = (lg.session_dir / "gnss.jsonl").read_text()
+    assert '"gnss"' not in scan and '"gnss"' in gnss
+
+
+def test_lost_records_counted_on_flush_failure(fast_flush_cfg, monkeypatch):
+    config, path = fast_flush_cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    monkeypatch.setattr(lg, "_write_record", lambda r: (_ for _ in ()).throw(OSError(28, "full")))
+    for i in range(3):
+        lg.write({"type": "event", "i": i})
+    deadline = time.monotonic() + 3
+    while lg.lost_records < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    lg.stop()
+    assert lg.lost_records == 3
+
+
+def test_fsync_does_not_race_close_files(cfg, monkeypatch):
+    """_fsync_files() and _close_files() must share `_lock` so they can never
+    interleave: without it, _close_files() could close `stream.file` between
+    _fsync_files()'s not-closed check and its `os.fsync()` call, raising
+    ValueError on the now-closed file and marking a perfectly clean stop()
+    falsely degraded (final review M4)."""
+    import os as os_mod
+
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.write({"type": "event", "event": "x"})
+    lg._flush()  # a real record on disk, so there is something to fsync
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_fsync = os_mod.fsync
+
+    def _pausing_fsync(fd):
+        entered.set()
+        release.wait(2)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os_mod, "fsync", _pausing_fsync)
+
+    fsync_thread = threading.Thread(target=lg._fsync_files)
+    fsync_thread.start()
+    assert entered.wait(2), "_fsync_files() never reached os.fsync()"
+
+    close_thread = threading.Thread(target=lg._close_files)
+    close_thread.start()
+    time.sleep(0.1)
+    assert close_thread.is_alive(), (
+        "_close_files() must block behind _lock until _fsync_files() finishes, not race it"
+    )
+
+    release.set()
+    fsync_thread.join(2)
+    close_thread.join(2)
+
+    assert not fsync_thread.is_alive()
+    assert not close_thread.is_alive()
+    assert lg._scan.file is None
+    assert lg._gnss.file is None
+    assert lg.degraded is False
+
+
+def test_write_does_not_block_behind_flush(cfg):
+    """Drop-oldest must not wait on the flush lock (S2-R4)."""
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    from rover import logger as logger_mod
+
+    for i in range(logger_mod._QUEUE_MAX):
+        lg.write({"type": "event", "i": i})
+    lg._lock.acquire()  # simulate a flush stalled on disk
+    try:
+        t0 = time.monotonic()
+        lg.write({"type": "event", "i": -1})
+        assert time.monotonic() - t0 < 0.5
+        assert lg.dropped_records == 1
+    finally:
+        lg._lock.release()
+        lg.stop()
+
+
+def test_stop_synchronizes_with_a_racing_schedule_flush(fast_flush_cfg, monkeypatch):
+    """S3-R4 fix round 1: `_schedule_flush()`'s stopping/running check and its
+    Timer publish must be ONE atomic step under `_lock`, and `stop()` must
+    grab `_stopping` + the current timer under that same lock (the
+    `cancel()` call itself stays outside it). Deterministic reproduction of
+    the TOCTOU window the earlier flag-only design left open:
+
+    - The SECOND `_schedule_flush()` call ever made (the first natural
+      periodic reschedule, after the Timer `start()` creates from `.start()`
+      has fired once) has its Timer's interval forced to 3600s, so it can
+      never fire mid-test regardless of scheduling jitter — no matter how
+      long this test pauses it, it cannot spawn an uncontrolled third
+      thread.
+    - Control is paused right after `Timer.start()` (the timer thread is
+      live) but before that Timer object is published to
+      `self._flush_timer` — exactly the old race window.
+    - `stop()` runs on its OWN thread, never the paused one: if it ran
+      synchronously on the thread doing the pausing, a real `_lock`-holding
+      pause (which the fix requires) would deadlock the test against the
+      FIXED code, not just expose a bug in the old one.
+
+    Against the old (unsynchronized) design this reliably leaves
+    `lg._flush_timer` as the freshly-published, live 3600s Timer even
+    though `stop()` already ran to completion — verified by reasoning above
+    and by temporarily reverting the `with self._lock:` guards in both
+    methods locally, which reproduces exactly that. Against the fixed code,
+    `stop()` blocks on `_lock` until the pause is released, so it always
+    observes (and cancels) the Timer this test publishes, leaving
+    `lg._flush_timer is None`.
+    """
+    config, path = fast_flush_cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.write({"type": "event", "i": 0})
+
+    real_timer_cls = threading.Timer
+    entered = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    class _PausingTimer(real_timer_cls):
+        def __init__(self, interval, function, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                interval = 3600.0  # never actually fires during the test
+            super().__init__(interval, function, *args, **kwargs)
+
+        def start(self):
+            super().start()
+            if calls["n"] == 1:
+                entered.set()
+                release.wait(2)
+
+    # Patched AFTER lg.start(), so the logger's very first Timer (already
+    # created+started) is untouched — only the periodic reschedule that
+    # fires next goes through _PausingTimer, and it's the first (and only)
+    # construction through this class, hence calls["n"] == 1.
+    monkeypatch.setattr(threading, "Timer", _PausingTimer)
+
+    assert entered.wait(2), "the racing _schedule_flush() call never ran"
+
+    stop_thread = threading.Thread(target=lg.stop)
+    stop_thread.start()
+    time.sleep(0.05)  # give stop() a head start reading/clearing _flush_timer
+    release.set()
+    stop_thread.join(2)
+
+    assert not stop_thread.is_alive()
+    assert lg._flush_timer is None

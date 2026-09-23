@@ -56,6 +56,3 @@ save_images = false
 
 [watchdog]
 enabled = true                    # exercise sd_notify / WATCHDOG=1 path
-
-[power]
-monitor_battery = false

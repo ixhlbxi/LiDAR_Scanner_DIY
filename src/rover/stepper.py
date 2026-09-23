@@ -23,6 +23,11 @@ Dependencies:
 Changelog:
     0.1.0  2026-03-22  Stub
     0.2.0  2026-03-22  Full implementation
+    0.2.1  2026-09-23  _detect_backend() now keys off the `lgpio` module
+                        attribute instead of `__file__` path-sniffing — the
+                        real rpi-lgpio 0.6 wheel installs at the SAME path as
+                        legacy RPi.GPIO (RPi/GPIO/__init__.py) and the two
+                        were indistinguishable by path alone (final review C1).
 """
 
 from __future__ import annotations
@@ -38,6 +43,21 @@ logger = logging.getLogger(__name__)
 # Suppress lgpio temp file clutter (DEC-029) — must be set before import
 os.environ.setdefault("LG_WD", "/tmp")
 
+
+def _detect_backend(gpio_module: object) -> str:
+    """'rpi-lgpio' (DEC-029 drop-in), 'RPi.GPIO' (legacy, broken on Bookworm), or 'none'.
+
+    The real rpi-lgpio 0.6 wheel installs at the SAME import path as legacy
+    RPi.GPIO (RPi/GPIO/__init__.py) and executes `import lgpio` at module
+    load time, so the resulting module object carries an `lgpio` attribute;
+    legacy RPi.GPIO does not. `__file__` path-sniffing cannot tell the two
+    apart — detect by that attribute instead (final review C1).
+    """
+    if gpio_module is None:
+        return "none"
+    return "rpi-lgpio" if getattr(gpio_module, "lgpio", None) is not None else "RPi.GPIO"
+
+
 try:
     import RPi.GPIO as GPIO  # rpi-lgpio is a drop-in replacement
 
@@ -45,6 +65,14 @@ try:
 except ImportError:
     GPIO = None  # type: ignore[assignment]
     _GPIO_AVAILABLE = False
+
+GPIO_BACKEND = _detect_backend(GPIO)
+if GPIO_BACKEND == "RPi.GPIO":
+    logger.warning(
+        "Legacy RPi.GPIO backend detected (%s) — broken on Bookworm (DEC-029); "
+        "install rpi-lgpio: sudo apt remove python3-rpi.gpio && sudo apt install python3-rpi-lgpio",
+        getattr(GPIO, "__file__", "?"),
+    )
 
 
 class StepperMotor:
@@ -100,6 +128,10 @@ class StepperMotor:
 
         if not _GPIO_AVAILABLE:
             logger.warning("Cannot start stepper: GPIO unavailable")
+            return
+
+        if GPIO_BACKEND == "RPi.GPIO":
+            logger.warning("Refusing to drive the stepper on the legacy RPi.GPIO backend (DEC-029)")
             return
 
         if self._started:

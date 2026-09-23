@@ -1,25 +1,18 @@
 """Shared pytest fixtures for rover tests."""
 
+import textwrap
 from pathlib import Path
 
 import pytest
 
 
 @pytest.fixture
-def tmp_dir(tmp_path: Path) -> Path:
-    """Provide a temporary directory for test output."""
-    return tmp_path
+def tmp_toml(tmp_path: Path):
+    """Helper: write TOML content to a temp file and return its path."""
 
+    def _write(content: str) -> Path:
+        p = tmp_path / "test_config.toml"
+        p.write_text(textwrap.dedent(content))
+        return p
 
-@pytest.fixture
-def sample_toml(tmp_path: Path) -> Path:
-    """Write a minimal valid TOML config and return its path."""
-    config_path = tmp_path / "test_config.toml"
-    config_path.write_text('[general]\ndevice_name = "test-rover"\nlog_level = "DEBUG"\n')
-    return config_path
-
-
-@pytest.fixture
-def default_toml_path() -> Path:
-    """Return path to the project's default.toml."""
-    return Path(__file__).resolve().parent.parent / "config" / "default.toml"
+    return _write

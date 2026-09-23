@@ -20,6 +20,10 @@ Changelog:
     0.1.1  2026-09-23  mag_offset rejects bool/non-finite values; step_interval_deg
                         error names both integer-multiple neighbours instead of
                         rounding (which could suggest 0)
+    0.1.2  2026-09-23  base_station_integration.status_schema_version default
+                        changed 1 -> 0 ("0 = use the code constant") and its
+                        validation loosened from "must be positive" to ">= 0"
+                        (telemetry schema v2, T1-030).
 """
 
 from __future__ import annotations
@@ -114,7 +118,6 @@ class ImuConfig:
     bus: int
     address: int
     sample_rate_hz: int
-    fusion_output_hz: int
     use_magnetometer: bool
     fusion_beta: float
 
@@ -124,9 +127,6 @@ class GnssConfig:
     enabled: bool
     port: str
     baud: int
-    rtcm_profile: str
-    survey_in_duration_sec: int
-    survey_in_accuracy_m: float
 
 
 @dataclass(frozen=True)
@@ -155,7 +155,6 @@ class CameraConfig:
 class LoggingConfig:
     output_dir: str
     session_prefix: str
-    format: str
     flush_interval_sec: float
     rotate_size_mb: int
     save_images: bool
@@ -166,14 +165,6 @@ class WatchdogConfig:
     enabled: bool
     timeout_sec: int
     heartbeat_interval_sec: int
-
-
-@dataclass(frozen=True)
-class PowerConfig:
-    monitor_battery: bool
-    battery_adc_channel: int
-    low_battery_mv: int
-    critical_battery_mv: int
 
 
 @dataclass(frozen=True)
@@ -201,7 +192,6 @@ class RoverConfig:
     camera: CameraConfig
     logging: LoggingConfig
     watchdog: WatchdogConfig
-    power: PowerConfig
     calibration: CalibrationConfig
 
     def to_dict(self) -> dict:
@@ -250,7 +240,6 @@ _DEFAULTS: dict = {
         "bus": 1,
         "address": 0x68,
         "sample_rate_hz": 200,
-        "fusion_output_hz": 100,
         "use_magnetometer": False,
         "fusion_beta": 0.1,
     },
@@ -260,9 +249,6 @@ _DEFAULTS: dict = {
         # Pre-deploy fallback: /dev/ttyACM0.
         "port": "/dev/rover-f9p",
         "baud": 115200,
-        "rtcm_profile": "robust",
-        "survey_in_duration_sec": 300,
-        "survey_in_accuracy_m": 0.02,
     },
     "ntrip": {
         "enabled": False,
@@ -290,7 +276,7 @@ _DEFAULTS: dict = {
     "base_station_integration": {
         "enabled": False,
         "status_json_path": "/run/rover/status.json",
-        "status_schema_version": 1,
+        "status_schema_version": 0,  # 0 = use the code constant (telemetry.STATUS_SCHEMA_VERSION)
         "publish_interval_sec": 1.0,
     },
     "telemetry": {
@@ -308,7 +294,6 @@ _DEFAULTS: dict = {
     "logging": {
         "output_dir": "/var/lib/rover/data",
         "session_prefix": "scan",
-        "format": "jsonl",
         "flush_interval_sec": 5.0,
         "rotate_size_mb": 100,
         "save_images": True,
@@ -317,12 +302,6 @@ _DEFAULTS: dict = {
         "enabled": True,
         "timeout_sec": 30,
         "heartbeat_interval_sec": 5,
-    },
-    "power": {
-        "monitor_battery": True,
-        "battery_adc_channel": 0,
-        "low_battery_mv": 10500,
-        "critical_battery_mv": 10000,
     },
     "calibration": {},
 }
@@ -345,7 +324,6 @@ _SECTION_DATACLASS: dict[str, type] = {
     "camera": CameraConfig,
     "logging": LoggingConfig,
     "watchdog": WatchdogConfig,
-    "power": PowerConfig,
     "calibration": CalibrationConfig,
 }
 
@@ -500,8 +478,6 @@ def _validate(raw: dict) -> None:
     _require_type("imu", "address", im["address"], int)
     _require_type("imu", "sample_rate_hz", im["sample_rate_hz"], int)
     _require_positive("imu", "sample_rate_hz", im["sample_rate_hz"])
-    _require_type("imu", "fusion_output_hz", im["fusion_output_hz"], int)
-    _require_positive("imu", "fusion_output_hz", im["fusion_output_hz"])
     _require_type("imu", "use_magnetometer", im["use_magnetometer"], bool)
     _require_type("imu", "fusion_beta", im["fusion_beta"], (int, float))
     _require_range("imu", "fusion_beta", im["fusion_beta"], 0.0, 1.0)
@@ -513,13 +489,6 @@ def _validate(raw: dict) -> None:
     _require_type("gnss", "port", gn["port"], str)
     _require_type("gnss", "baud", gn["baud"], int)
     _require_positive("gnss", "baud", gn["baud"])
-    _require_type("gnss", "rtcm_profile", gn["rtcm_profile"], str)
-    _require_in("gnss", "rtcm_profile", gn["rtcm_profile"], {"robust", "low_bandwidth"})
-    _require_type("gnss", "survey_in_duration_sec", gn["survey_in_duration_sec"], int)
-    _require_positive("gnss", "survey_in_duration_sec", gn["survey_in_duration_sec"])
-    _require_type("gnss", "survey_in_accuracy_m", gn["survey_in_accuracy_m"], (int, float))
-    _require_positive("gnss", "survey_in_accuracy_m", gn["survey_in_accuracy_m"])
-    gn["survey_in_accuracy_m"] = float(gn["survey_in_accuracy_m"])
 
     # -- ntrip (DEC-031, DEC-032) --
     nt = raw["ntrip"]
@@ -572,9 +541,11 @@ def _validate(raw: dict) -> None:
     _require_type(
         "base_station_integration", "status_schema_version", bsi["status_schema_version"], int
     )
-    _require_positive(
-        "base_station_integration", "status_schema_version", bsi["status_schema_version"]
-    )
+    if bsi["status_schema_version"] < 0:
+        raise ValueError(
+            "[base_station_integration] status_schema_version: must be >= 0 "
+            f"(0 = use the code constant), got {bsi['status_schema_version']}"
+        )
     _require_type(
         "base_station_integration",
         "publish_interval_sec",
@@ -611,8 +582,6 @@ def _validate(raw: dict) -> None:
     lg = raw["logging"]
     _require_type("logging", "output_dir", lg["output_dir"], str)
     _require_type("logging", "session_prefix", lg["session_prefix"], str)
-    _require_type("logging", "format", lg["format"], str)
-    _require_in("logging", "format", lg["format"], {"jsonl", "csv"})
     _require_type("logging", "flush_interval_sec", lg["flush_interval_sec"], (int, float))
     _require_positive("logging", "flush_interval_sec", lg["flush_interval_sec"])
     lg["flush_interval_sec"] = float(lg["flush_interval_sec"])
@@ -628,24 +597,6 @@ def _validate(raw: dict) -> None:
     _require_positive("watchdog", "timeout_sec", wd["timeout_sec"])
     _require_type("watchdog", "heartbeat_interval_sec", wd["heartbeat_interval_sec"], int)
     _require_positive("watchdog", "heartbeat_interval_sec", wd["heartbeat_interval_sec"])
-
-    # -- power --
-    pw = raw["power"]
-    _require_type("power", "monitor_battery", pw["monitor_battery"], bool)
-    _require_type("power", "battery_adc_channel", pw["battery_adc_channel"], int)
-    if pw["battery_adc_channel"] < 0:
-        raise ValueError(
-            f"[power] battery_adc_channel: must be >= 0, got {pw['battery_adc_channel']}"
-        )
-    _require_type("power", "low_battery_mv", pw["low_battery_mv"], int)
-    _require_positive("power", "low_battery_mv", pw["low_battery_mv"])
-    _require_type("power", "critical_battery_mv", pw["critical_battery_mv"], int)
-    _require_positive("power", "critical_battery_mv", pw["critical_battery_mv"])
-    if pw["critical_battery_mv"] >= pw["low_battery_mv"]:
-        raise ValueError(
-            f"[power] critical_battery_mv ({pw['critical_battery_mv']}) "
-            f"must be less than low_battery_mv ({pw['low_battery_mv']})"
-        )
 
     # -- cross-section: arm_group profile constraints (DEC-030) --
     if se["profile"] == "arm_group":
@@ -726,7 +677,6 @@ def _build_config(raw: dict) -> RoverConfig:
         ),
         logging=LoggingConfig(**raw["logging"]),
         watchdog=WatchdogConfig(**raw["watchdog"]),
-        power=PowerConfig(**raw["power"]),
         calibration=CalibrationConfig(
             lidar_to_imu_translation=cal_raw.get("lidar_to_imu_translation"),
             lidar_to_imu_rotation=cal_raw.get("lidar_to_imu_rotation"),

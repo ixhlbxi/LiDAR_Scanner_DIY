@@ -35,7 +35,6 @@ enabled = true
 bus = 1                           # I2C bus number
 address = 0x68                    # MPU-9250 address (or 0x69)
 sample_rate_hz = 200              # IMU polling rate
-fusion_output_hz = 100            # Madgwick output rate
 use_magnetometer = false          # 9-DOF needs [calibration].mag_offset first (stage 3); DEC-013 gating applies when true
 fusion_beta = 0.1                 # Madgwick filter gain
 
@@ -45,9 +44,6 @@ enabled = true
 # fallback: "/dev/ttyACM0" (default F9P enumeration).
 port = "/dev/rover-f9p"
 baud = 115200                     # Default F9P baud
-rtcm_profile = "robust"           # "robust" or "low_bandwidth"
-survey_in_duration_sec = 300      # Base station survey-in time
-survey_in_accuracy_m = 0.02       # Target accuracy (2 cm)
 
 [ntrip]                           # DEC-031, DEC-032 — primary RTK transport
 enabled = false                   # default off; enable per-session for arm_group
@@ -68,17 +64,17 @@ enabled = true
 # fallback: "/dev/ttyUSB1" (whichever CP2102 enumerates second).
 port = "/dev/rover-esp32"
 baud = 115200
-spreading_factor = 7              # SF7 matches Base-Station Heltec defaults
-bandwidth_khz = 125               # 125, 250, or 500
-coding_rate = "4/5"               # "4/5", "4/6", "4/7", "4/8"
-sync_word = 0x12                  # private; matches Heltec/T-Deck firmware
+spreading_factor = 7              # documentation only — must match firmware/esp32-rover/platformio.ini build_flags
+bandwidth_khz = 125               # documentation only — must match firmware/esp32-rover/platformio.ini build_flags
+coding_rate = "4/5"               # documentation only — must match firmware/esp32-rover/platformio.ini build_flags
+sync_word = 0x12                  # documentation only — must match firmware/esp32-rover/platformio.ini build_flags
 telemetry_interval_sec = 1.0      # STATUS/LINK Tx cadence
 role = "rtcm_rx+status_tx"        # "rtcm_rx+status_tx" | "status_tx_only" | "disabled"
 
 [base_station_integration]        # DEC-033 channel A
 enabled = false                   # true in arm_group profile
 status_json_path = "/run/rover/status.json"
-status_schema_version = 1
+status_schema_version = 0  # 0 = use the code constant (STATUS_SCHEMA_VERSION)
 publish_interval_sec = 1.0
 
 [telemetry]                       # DEC-033 channel B
@@ -96,7 +92,6 @@ output_folder = "images"          # Relative to session folder
 [logging]
 output_dir = "/var/lib/rover/data"  # systemd StateDirectory (see deploy/systemd/rover.service); override per project
 session_prefix = "scan"           # Session folder prefix
-format = "jsonl"                  # "jsonl" or "csv"
 flush_interval_sec = 5.0          # Force flush interval
 rotate_size_mb = 100              # Rotate log at this size (0 = no rotate)
 save_images = true                # Save camera images
@@ -105,12 +100,6 @@ save_images = true                # Save camera images
 enabled = true
 timeout_sec = 30                  # Restart if no heartbeat
 heartbeat_interval_sec = 5        # Internal heartbeat rate
-
-[power]
-monitor_battery = true
-battery_adc_channel = 0           # ADC channel for voltage divider
-low_battery_mv = 10500            # Warning threshold (mV)
-critical_battery_mv = 10000       # Shutdown threshold (mV)
 
 [calibration]
 # Extrinsic calibration — TBD, measured during v1.1 calibration procedure

@@ -17,6 +17,19 @@ Changelog:
     0.1.0  2026-03-22  Initial implementation (Task 3, Phase 3)
     0.1.1  2026-09-23  _schedule_flush() starts the Timer before publishing
                         it to self._flush_timer
+    0.1.2  2026-09-23  GNSS records go ONLY to gnss*.jsonl, never mirrored
+                        into scan*.jsonl (T1-053); generic _Stream + _rotate()
+                        replace the two-branch _rotate_file(); lost_records
+                        counts records drained but not written on a failed
+                        flush; write()'s drop-oldest path uses a dedicated
+                        _count_lock and never waits on the flush lock
+                        (S2-R4); stop() sets _stopping before cancelling the
+                        timer so a racing _schedule_flush() cannot leave a
+                        stray live Timer behind (S3-R4)
+    0.1.3  2026-09-23  _fsync_files() and _close_files() now both run under
+                        `_lock` so a periodic-flush fsync can no longer race
+                        stop()'s file close and raise on a closed fd (final
+                        review M4).
 """
 
 from __future__ import annotations
@@ -28,6 +41,7 @@ import os
 import queue
 import shutil
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -40,6 +54,16 @@ logger = logging.getLogger(__name__)
 
 _QUEUE_MAX = 10_000  # records buffered between flushes before dropping oldest
 _FSYNC_EVERY = 10  # periodic flushes between fsync calls
+
+
+@dataclass
+class _Stream:
+    """Per-stream (scan / gnss) file state, rotated generically by _rotate()."""
+
+    stem: str
+    path: Path | None = None
+    file: TextIO | None = None
+    index: int = 0
 
 
 class SessionLogger:
@@ -61,15 +85,9 @@ class SessionLogger:
         self._session_dir: Path | None = None
         self._start_time: datetime | None = None
 
-        # File handles
-        self._scan_file: TextIO | None = None
-        self._gnss_file: TextIO | None = None
-        self._scan_path: Path | None = None
-        self._gnss_path: Path | None = None
-
-        # Rotation state
-        self._scan_index: int = 0
-        self._gnss_index: int = 0
+        # Per-stream file state (T1-053: gnss records live ONLY in self._gnss)
+        self._scan = _Stream("scan")
+        self._gnss = _Stream("gnss")
 
         # Thread-safe write queue
         self._queue: queue.Queue[dict] = queue.Queue(maxsize=_QUEUE_MAX)
@@ -78,9 +96,15 @@ class SessionLogger:
         self._flush_timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._running = False
+        self._stopping = False
 
+        # Counters — guarded by _count_lock, which is never held across disk
+        # I/O, so a stalled flush (holding _lock) can't block a producer's
+        # drop-oldest path (S2-R4).
+        self._count_lock = threading.Lock()
         self._degraded = False
         self._dropped = 0
+        self._lost = 0
         self._flush_count = 0
 
     # ------------------------------------------------------------------
@@ -101,6 +125,11 @@ class SessionLogger:
     def dropped_records(self) -> int:
         """Records discarded because the queue was full."""
         return self._dropped
+
+    @property
+    def lost_records(self) -> int:
+        """Records drained from the queue but never written, due to a failed flush."""
+        return self._lost
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -130,14 +159,12 @@ class SessionLogger:
         self._copy_config()
 
         # Open log files
-        self._scan_path = self._session_dir / "scan.jsonl"
-        self._scan_file = open(self._scan_path, "a", encoding="utf-8")
-        self._scan_index = 0
+        self._scan = _Stream("scan")
+        self._gnss = _Stream("gnss")
+        self._open_stream(self._scan)
+        self._open_stream(self._gnss)
 
-        self._gnss_path = self._session_dir / "gnss.jsonl"
-        self._gnss_file = open(self._gnss_path, "a", encoding="utf-8")
-        self._gnss_index = 0
-
+        self._stopping = False
         self._running = True
         self._schedule_flush()
 
@@ -158,30 +185,46 @@ class SessionLogger:
         try:
             self._queue.put_nowait(record)
         except queue.Full:
-            # Drop the oldest so a stalled disk cannot eat all memory. The whole
-            # recovery is locked so a concurrent _flush() draining the queue
-            # between our get_nowait() and put_nowait() can't cause a phantom
-            # drop count (Empty means nothing of ours was actually lost) or an
-            # uncounted real drop (Full again means our put really did fail).
-            with self._lock:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    pass
-                else:
-                    self._note_dropped()
-                try:
-                    self._queue.put_nowait(record)
-                except queue.Full:
-                    # Another producer refilled it since we made room for
-                    # ourselves — drop this record instead.
-                    self._note_dropped()
+            # Drop the oldest so a stalled disk cannot eat all memory. This
+            # must NEVER wait on `_lock` — `_flush()` holds that lock across
+            # disk I/O, so a stalled disk must not block the producer
+            # (S2-R4). `queue.Queue`'s own internal lock already makes each
+            # get_nowait()/put_nowait() call atomic, so no extra lock is
+            # needed around them: a get_nowait() that raises Empty means a
+            # concurrent _flush() already drained the queue for us (nothing
+            # of ours was actually lost); one that returns an item means a
+            # real record was discarded, and a subsequent Full on put_nowait
+            # means our own record was the one that didn't fit. `_count_lock`
+            # only protects the counters themselves, never blocking on I/O.
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                self._note_dropped()
+            try:
+                self._queue.put_nowait(record)
+            except queue.Full:
+                # Another producer refilled it since we made room for
+                # ourselves — drop this record instead.
+                self._note_dropped()
 
     def _note_dropped(self) -> None:
         """Increment the drop counter and warn at a decaying frequency."""
-        self._dropped += 1
-        if self._dropped in (1, 100, 1000) or self._dropped % 10_000 == 0:
-            logger.warning("SessionLogger queue full — dropped %d records so far", self._dropped)
+        with self._count_lock:
+            self._dropped += 1
+            dropped = self._dropped
+        if dropped in (1, 100, 1000) or dropped % 10_000 == 0:
+            logger.warning("SessionLogger queue full — dropped %d records so far", dropped)
+
+    def _note_lost(self, n: int) -> None:
+        """Count records drained from the queue but never written (failed flush)."""
+        if n <= 0:
+            return
+        with self._count_lock:
+            self._lost += n
+            lost = self._lost
+        logger.error("SessionLogger flush failed — %d record(s) lost (total %d)", n, lost)
 
     def stop(self, metadata: dict[str, Any] | None = None) -> None:
         """Flush remaining records, write metadata, and close files.
@@ -195,11 +238,24 @@ class SessionLogger:
             return
 
         self._running = False
-
-        # Cancel pending flush timer
-        if self._flush_timer is not None:
-            self._flush_timer.cancel()
+        # S3-R4 fix round 1: setting `_stopping` and capturing the current
+        # timer must be ONE atomic step with `_schedule_flush()`'s own
+        # check-then-publish, under `_lock` — otherwise a `_schedule_flush()`
+        # that already passed its flag check and is mid-way through
+        # creating+starting a new Timer can publish it to `self._flush_timer`
+        # *after* this method reads/clears that attribute, leaving a live
+        # stray Timer behind even though `_stopping` was set first. The
+        # `cancel()` call itself (and any join) stays OUTSIDE the lock: it's
+        # the only part that can take real time, and a timer thread parked
+        # on `_lock` inside `_schedule_flush()` must never be able to
+        # deadlock against a `stop()` that's holding the lock across it.
+        with self._lock:
+            self._stopping = True
+            timer = self._flush_timer
             self._flush_timer = None
+
+        if timer is not None:
+            timer.cancel()
 
         # Final drain
         try:
@@ -246,18 +302,27 @@ class SessionLogger:
     def _schedule_flush(self) -> None:
         """Schedule the next periodic flush.
 
-        Builds the Timer into a local and starts it BEFORE publishing it to
+        The stopping/running check and the Timer publish are one atomic step
+        under `_lock` (S3-R4 fix round 1) — otherwise `stop()` can read
+        `self._flush_timer` in the gap between this method deciding to
+        proceed and it actually publishing the new (already-started) Timer,
+        and the fresh Timer survives `stop()` as a stray live one. Builds the
+        Timer into a local and starts it BEFORE publishing it to
         `self._flush_timer` — publishing an unstarted Timer first leaves a
         window where a concurrent reader (e.g. a test asserting
         `is_alive()`) can observe a Timer object that exists but hasn't
-        actually started running yet.
+        actually started running yet. `threading.Timer.start()` itself is
+        cheap (it only launches a thread), so holding `_lock` across it does
+        not meaningfully compete with `_flush()`'s disk-I/O-bound hold of the
+        same lock.
         """
-        if not self._running:
-            return
-        timer = threading.Timer(self._lc.flush_interval_sec, self._periodic_flush)
-        timer.daemon = True
-        timer.start()
-        self._flush_timer = timer
+        with self._lock:
+            if not self._running or self._stopping:
+                return
+            timer = threading.Timer(self._lc.flush_interval_sec, self._periodic_flush)
+            timer.daemon = True
+            timer.start()
+            self._flush_timer = timer
 
     def _periodic_flush(self) -> None:
         """Called by timer: flush, then ALWAYS reschedule (T1-011)."""
@@ -274,7 +339,13 @@ class SessionLogger:
             self._schedule_flush()
 
     def _flush(self) -> None:
-        """Drain the queue and write all records to disk."""
+        """Drain the queue and write all records to disk.
+
+        If `_write_record` raises partway through the drained batch, the
+        records that were never written are counted as lost (not silently
+        dropped) via `_note_lost`, then the exception is re-raised so
+        `_periodic_flush` marks the logger degraded, same as before.
+        """
         with self._lock:
             records: list[dict] = []
             while True:
@@ -283,30 +354,42 @@ class SessionLogger:
                 except queue.Empty:
                     break
 
-            for record in records:
-                self._write_record(record)
+            written = 0
+            try:
+                for record in records:
+                    self._write_record(record)
+                    written += 1
+            except Exception:
+                self._note_lost(len(records) - written)
+                raise
 
             # Flush file buffers
-            if self._scan_file is not None and not self._scan_file.closed:
-                self._scan_file.flush()
-            if self._gnss_file is not None and not self._gnss_file.closed:
-                self._gnss_file.flush()
+            if self._scan.file is not None and not self._scan.file.closed:
+                self._scan.file.flush()
+            if self._gnss.file is not None and not self._gnss.file.closed:
+                self._gnss.file.flush()
 
             # Check rotation
             self._maybe_rotate()
 
     def _write_record(self, record: dict) -> None:
-        """Write a single record to the appropriate file."""
+        """Write a single record to its stream — GNSS records go ONLY to
+        gnss*.jsonl (T1-053); everything else goes to scan*.jsonl."""
         line = json.dumps(record, separators=(",", ":")) + "\n"
-
-        if record.get("type") == "gnss" and self._gnss_file is not None:
-            self._gnss_file.write(line)
-        if self._scan_file is not None:
-            self._scan_file.write(line)
+        stream = self._gnss if record.get("type") == "gnss" else self._scan
+        if stream.file is not None:
+            stream.file.write(line)
 
     # ------------------------------------------------------------------
     # Internal — rotation
     # ------------------------------------------------------------------
+
+    def _open_stream(self, stream: _Stream) -> None:
+        """Open (or re-open) a stream's base file, `<stem>.jsonl`."""
+        assert self._session_dir is not None
+        stream.path = self._session_dir / f"{stream.stem}.jsonl"
+        stream.file = open(stream.path, "a", encoding="utf-8")
+        stream.index = 0
 
     def _maybe_rotate(self) -> None:
         """Rotate log files if they exceed the configured size limit."""
@@ -315,16 +398,13 @@ class SessionLogger:
 
         limit_bytes = self._lc.rotate_size_mb * 1024 * 1024
 
-        if self._scan_path is not None and self._scan_path.exists():
-            if self._scan_path.stat().st_size >= limit_bytes:
-                self._rotate_file("scan")
+        for stream in (self._scan, self._gnss):
+            if stream.path is not None and stream.path.exists():
+                if stream.path.stat().st_size >= limit_bytes:
+                    self._rotate(stream)
 
-        if self._gnss_path is not None and self._gnss_path.exists():
-            if self._gnss_path.stat().st_size >= limit_bytes:
-                self._rotate_file("gnss")
-
-    def _rotate_file(self, which: str) -> None:
-        """Open a new numbered file, then close and swap out the current one.
+    def _rotate(self, stream: _Stream) -> None:
+        """Open a new numbered segment, then close and swap out the current one.
 
         Opens the new segment FIRST. If that ``open()`` fails (ENOSPC,
         EROFS, ...), the current file handle is never touched and the index
@@ -335,38 +415,21 @@ class SessionLogger:
         """
         assert self._session_dir is not None
 
-        if which == "scan":
-            next_index = self._scan_index + 1
-            next_path = self._session_dir / f"scan_{next_index:03d}.jsonl"
-            try:
-                new_file = open(next_path, "a", encoding="utf-8")
-            except OSError as e:
-                if not self._degraded:
-                    logger.error("Rotation of scan log to %s failed: %s", next_path.name, e)
-                self._degraded = True
-                return
-            if self._scan_file is not None and not self._scan_file.closed:
-                self._scan_file.close()
-            self._scan_index = next_index
-            self._scan_path = next_path
-            self._scan_file = new_file
-            logger.info("Rotated scan log to %s", self._scan_path.name)
-        elif which == "gnss":
-            next_index = self._gnss_index + 1
-            next_path = self._session_dir / f"gnss_{next_index:03d}.jsonl"
-            try:
-                new_file = open(next_path, "a", encoding="utf-8")
-            except OSError as e:
-                if not self._degraded:
-                    logger.error("Rotation of gnss log to %s failed: %s", next_path.name, e)
-                self._degraded = True
-                return
-            if self._gnss_file is not None and not self._gnss_file.closed:
-                self._gnss_file.close()
-            self._gnss_index = next_index
-            self._gnss_path = next_path
-            self._gnss_file = new_file
-            logger.info("Rotated gnss log to %s", self._gnss_path.name)
+        next_index = stream.index + 1
+        next_path = self._session_dir / f"{stream.stem}_{next_index:03d}.jsonl"
+        try:
+            new_file = open(next_path, "a", encoding="utf-8")
+        except OSError as e:
+            if not self._degraded:
+                logger.error("Rotation of %s log to %s failed: %s", stream.stem, next_path.name, e)
+            self._degraded = True
+            return
+        if stream.file is not None and not stream.file.closed:
+            stream.file.close()
+        stream.index = next_index
+        stream.path = next_path
+        stream.file = new_file
+        logger.info("Rotated %s log to %s", stream.stem, stream.path.name)
 
     # ------------------------------------------------------------------
     # Internal — metadata and cleanup
@@ -394,6 +457,7 @@ class SessionLogger:
             "config_hash": config_hash,
             "logger_degraded": self._degraded,
             "dropped_records": self._dropped,
+            "lost_records": self._lost,
             "session": {
                 "profile": sess.profile,
                 "project_code": sess.project_code,
@@ -427,15 +491,35 @@ class SessionLogger:
         return None
 
     def _fsync_files(self) -> None:
-        for f in (self._scan_file, self._gnss_file):
-            if f is not None and not f.closed:
-                f.flush()
-                os.fsync(f.fileno())
+        """Flush and fsync every open stream.
+
+        Shares `_lock` with `_close_files()` (M4): without it, this method's
+        own not-closed check and its `os.fsync()` call are not atomic with
+        respect to a concurrent `_close_files()` — `stop()` calls
+        `_fsync_files()` then `_close_files()` back to back, but
+        `_periodic_flush()` (background timer thread) can call
+        `_fsync_files()` at the same moment, and the file could be closed
+        out from under it in the gap between the check and the syscall,
+        raising ValueError/OSError on a closed fd and marking a perfectly
+        clean stop() falsely degraded. Safe to add here: unlike the
+        drop-oldest path in `write()` (which must NEVER wait on this lock —
+        see its comment), nothing on that path calls `_fsync_files()` or
+        `_close_files()`, so this cannot introduce the stall S2-R4 avoids.
+        """
+        with self._lock:
+            for stream in (self._scan, self._gnss):
+                f = stream.file
+                if f is not None and not f.closed:
+                    f.flush()
+                    os.fsync(f.fileno())
 
     def _close_files(self) -> None:
-        """Close all open file handles."""
-        for f in (self._scan_file, self._gnss_file):
-            if f is not None and not f.closed:
-                f.close()
-        self._scan_file = None
-        self._gnss_file = None
+        """Close all open file handles.
+
+        Under `_lock` for the same reason as `_fsync_files()` above (M4).
+        """
+        with self._lock:
+            for stream in (self._scan, self._gnss):
+                if stream.file is not None and not stream.file.closed:
+                    stream.file.close()
+                stream.file = None

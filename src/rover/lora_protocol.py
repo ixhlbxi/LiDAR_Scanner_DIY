@@ -29,6 +29,7 @@ Changelog:
 
 from __future__ import annotations
 
+import binascii
 import struct
 
 FRAME_VERSION: int = 0x02
@@ -51,21 +52,8 @@ class FrameError(ValueError):
 
 
 def crc16_ccitt(data: bytes) -> int:
-    """CRC16-CCITT, poly 0x1021, init 0xFFFF, no final XOR.
-
-    Matches the polynomial used by every Heltec/T-Deck firmware in
-    arm-drone-lidar-workflow. Implemented bit-by-bit — perf is not relevant
-    at the byte volumes we push.
-    """
-    crc = 0xFFFF
-    for byte in data:
-        crc ^= byte << 8
-        for _ in range(8):
-            if crc & 0x8000:
-                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
-            else:
-                crc = (crc << 1) & 0xFFFF
-    return crc
+    """CRC16-CCITT, poly 0x1021, init 0xFFFF, no final XOR — exactly ``binascii.crc_hqx``."""
+    return binascii.crc_hqx(data, 0xFFFF)
 
 
 def encode_frame(packet_type: int, sequence: int, payload: bytes) -> bytes:

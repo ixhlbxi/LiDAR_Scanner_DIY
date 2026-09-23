@@ -95,6 +95,16 @@ if [[ "$DRY_RUN" == false ]] && ! command -v rsync >/dev/null 2>&1; then
     echo "  REFUSED: rsync not found — apt install rsync"
     fail=1
 fi
+# rpi-lgpio 0.6 installs at the SAME path as legacy RPi.GPIO
+# (RPi/GPIO/__init__.py), so __file__ can no longer tell them apart — probe
+# the `lgpio` attribute the real wheel's module-level `import lgpio` leaves
+# behind instead (final review C1; matches rover.stepper._detect_backend).
+gpio_check=$(python3 -c "import RPi.GPIO as g; print('lgpio' if getattr(g, 'lgpio', None) is not None else 'legacy')" 2>/dev/null || true)
+if [[ "$gpio_check" == "legacy" ]]; then
+    gpio_file=$(python3 -c "import RPi.GPIO as g; print(g.__file__)" 2>/dev/null || true)
+    echo "  WARNING: legacy RPi.GPIO backend at $gpio_file (DEC-029) — the stepper will refuse to run."
+    echo "           Fix: sudo apt remove python3-rpi.gpio && sudo apt install python3-rpi-lgpio"
+fi
 if [[ $fail -ne 0 ]]; then
     exit 3
 fi

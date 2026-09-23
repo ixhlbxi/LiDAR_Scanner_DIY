@@ -37,6 +37,44 @@ Changelog:
     0.11.1  2026-09-23  Lidar record timestamp captured immediately after
                          read_scan() returns instead of later alongside
                          other records' `now`.
+    0.11.2  2026-09-23  run() aborts with exit 4 when NtripClient reports a
+                         fatal caster rejection (401/404 in arm_group) within
+                         _NTRIP_FATAL_GRACE_SEC of start
+                         (BASE_STATION_INTEGRATION.md §7); a fatal discovered
+                         later, mid-session, sets SCAN_ERROR and logs once
+                         instead of aborting a session that already has valid
+                         data logged.
+    0.11.3  2026-09-23  NtripClient now gets gga_source=sensors.gnss.latest_fix
+                         so VRS-style casters that require periodic $GPGGA
+                         uploads receive them.
+    0.11.4  2026-09-23  telemetry.publish(status) now called every loop
+                         iteration instead of self-cadenced here — schema v2's
+                         TelemetryRouter applies its own per-channel cadence
+                         (T1-025/T1-030); status.pdop fed from GnssFix.pdop;
+                         status.sensors_disabled/logger_degraded fed from the
+                         sensor gates / SessionLogger.degraded each iteration
+                         (S2-R2).
+    0.11.5  2026-09-23  Stepper failures are now gated like every other
+                         sensor (_SensorGate("stepper")) instead of warning
+                         forever and `continue`-ing past the telemetry
+                         publish — SCAN_ERROR now actually reaches the wire;
+                         after 5 consecutive failures the stepper is skipped
+                         and the session continues in continuous mode with
+                         mast_angle_deg frozen (S2-R3, T1-046). SCAN_* is now
+                         imported from rover.lora_protocol instead of
+                         re-declared here. The module-level camera import
+                         guard is gone in favour of camera.py's own
+                         picamera2 guard. The SIGTERM nested try and the
+                         `# noqa: F821` are gone.
+    0.11.6  2026-09-23  _scan_loop's scan_state is now derived each
+                         iteration from persistent conditions (tripped
+                         stepper gate OR ntrip_client.fatal_error set)
+                         instead of being left as whatever the per-step
+                         success/failure logic set — a healthy step
+                         previously reset scan_state to SCAN_SCANNING and
+                         silently cleared an unresolved mid-session NTRIP
+                         fatal after just one SCAN_ERROR publish (final
+                         review I4).
 """
 
 from __future__ import annotations
@@ -50,37 +88,19 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from rover.camera import Camera
 from rover.config import RoverConfig, load_config
 from rover.gnss import GnssFix, GnssReceiver
 from rover.imu import ImuDriver
 from rover.lidar import LidarScan, LidarScanner
 from rover.logger import SessionLogger
+from rover.lora_protocol import SCAN_ERROR, SCAN_SCANNING
 from rover.ntrip import NtripClient
 from rover.stepper import StepperMotor
 from rover.telemetry import TelemetryRouter, status_from_config
 from rover.watchdog import Watchdog
 
-# Optional import — Camera depends on picamera2 which may not be importable off-Pi.
-# Failure to import is treated the same as the device being absent: the camera
-# subsystem is unavailable, but the rest of the system runs.
-try:
-    from rover.camera import Camera
-
-    _CAMERA_IMPORT_OK = True
-except Exception as _e:  # pragma: no cover — import-time only
-    Camera = None  # type: ignore[assignment]
-    _CAMERA_IMPORT_OK = False
-    _CAMERA_IMPORT_ERROR = _e
-
 logger = logging.getLogger(__name__)
-
-
-# Scan state constants — kept in sync with lora_protocol.SCAN_* values so the
-# numeric we put in RoverStatus.scan_state lines up with the wire encoding.
-SCAN_IDLE = 0
-SCAN_SCANNING = 1
-SCAN_PAUSED = 2
-SCAN_ERROR = 3
 
 # Loop pace when there is no stepper to settle behind (bench / telemetry-only).
 # Module-level so tests can shrink it.
@@ -92,6 +112,20 @@ _IDLE_SETTLE_SEC = 1.0
 # RuntimeError/TimeoutError catch previously let them escape and crash the
 # process. Module-level so it documents itself next to _IDLE_SETTLE_SEC.
 _SENSOR_ERRORS = (RuntimeError, TimeoutError, OSError)
+
+# How long to wait, right after NtripClient.start(), for a fatal caster
+# rejection (401/404 in the arm_group profile) before proceeding — long
+# enough for the connect + handshake round trip, short enough that a healthy
+# caster doesn't visibly delay scan start. BASE_STATION_INTEGRATION.md §7.
+_NTRIP_FATAL_GRACE_SEC = 3.0
+
+
+class _FatalStartupError(RuntimeError):
+    """Raised to abort run() before the acquisition loop starts.
+
+    Distinct from the generic Exception catch further down so run() can map
+    it to its own exit code (4) instead of the generic crash code (1).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -182,19 +216,15 @@ def _init_sensors(config: RoverConfig) -> _Sensors:
         except Exception as e:
             logger.warning("IMU init failed: %s — subsystem disabled", e)
 
-    if config.camera.enabled and _CAMERA_IMPORT_OK:
+    if config.camera.enabled:
         try:
             sensors.camera = Camera(config.camera)
         except Exception as e:
             logger.warning("Camera init failed: %s — subsystem disabled", e)
-    elif config.camera.enabled and not _CAMERA_IMPORT_OK:
-        logger.warning(
-            "Camera enabled but picamera2 import failed (%s) — subsystem disabled",
-            _CAMERA_IMPORT_ERROR,
-        )
 
     if config.gnss.enabled:
         try:
+            # takes the whole config: it needs [gnss] and [ntrip].client_location
             sensors.gnss = GnssReceiver(config)
         except Exception as e:
             logger.warning("GNSS init failed: %s — subsystem disabled", e)
@@ -307,13 +337,14 @@ def _scan_loop(
 
     The loop is robust to all-sensors-disabled — in that case it idles on a
     1Hz heartbeat + telemetry publish. That's the bench/test mode.
+
+    telemetry.publish(status) is called once per iteration; TelemetryRouter
+    itself decides, per channel, whether enough time has passed to actually
+    send (schema v2 per-channel cadence — see rover.telemetry).
     """
     status = status_from_config(config)
     status.scan_state = SCAN_SCANNING
 
-    # Cadence bookkeeping
-    publish_interval = config.base_station_integration.publish_interval_sec or 1.0
-    last_publish = 0.0
     last_logged_fix_ts: float = -1.0
 
     # Steps-per-increment derived from stepper geometry
@@ -332,6 +363,11 @@ def _scan_loop(
     lidar_gate = _SensorGate("lidar")
     imu_gate = _SensorGate("imu")
     camera_gate = _SensorGate("camera")
+    stepper_gate = _SensorGate("stepper")
+    # Local list (not individual names) so sensors_disabled below reflects
+    # every gate without needing its own per-gate wiring.
+    gates = [lidar_gate, imu_gate, camera_gate, stepper_gate]
+    ntrip_fatal_noted = False
 
     while not stop_event.is_set():
         # Honor duration timeout for bench runs
@@ -347,19 +383,30 @@ def _scan_loop(
 
         # --- Step + settle ---
         stepped = False
-        if sensors.stepper is not None and sensors.stepper.available and steps_per_increment > 0:
+        step_ok = True
+        if (
+            sensors.stepper is not None
+            and sensors.stepper.available
+            and steps_per_increment > 0
+            and not stepper_gate.tripped
+        ):
             if sensors.imu is not None and sensors.imu.available:
                 sensors.imu.enable_magnetometer(False)  # DEC-013: stepper EMI
             try:
                 sensors.stepper.step(steps_per_increment)
                 stepped = True
+                stepper_gate.record_success()
+                status.scan_state = SCAN_SCANNING
             except Exception as e:
-                logger.warning("Stepper step failed: %s — pausing scan", e)
+                step_ok = False
+                if stepper_gate.record_failure(e):
+                    _note_gate_trip(session_logger, stepper_gate, e)
                 status.scan_state = SCAN_ERROR
-                stop_event.wait(0.5)
-                continue
-        stop_event.wait(settle_sec)
-        if stepped and sensors.imu is not None and sensors.imu.available:
+        if step_ok:
+            stop_event.wait(settle_sec)
+        else:
+            stop_event.wait(0.5)
+        if sensors.imu is not None and sensors.imu.available:
             sensors.imu.enable_magnetometer(config.imu.use_magnetometer)
         mast_angle_deg = (
             sensors.stepper.current_angle
@@ -374,7 +421,12 @@ def _scan_loop(
         # revolution actually finished, not whenever IMU/camera work after it
         # happens to wrap up.
         scan_wall_time: float | None = None
-        if sensors.lidar is not None and sensors.lidar.available and not lidar_gate.tripped:
+        if (
+            step_ok
+            and sensors.lidar is not None
+            and sensors.lidar.available
+            and not lidar_gate.tripped
+        ):
             try:
                 lidar_scan = sensors.lidar.read_scan(discard_stale=stepped)
                 scan_wall_time = time.time()
@@ -385,7 +437,7 @@ def _scan_loop(
 
         # --- IMU ---
         imu_batch: list = []
-        if sensors.imu is not None and sensors.imu.available and not imu_gate.tripped:
+        if step_ok and sensors.imu is not None and sensors.imu.available and not imu_gate.tripped:
             try:
                 imu_batch = sensors.imu.drain()
                 imu_gate.record_success()
@@ -396,7 +448,8 @@ def _scan_loop(
         # --- Camera (cadence-gated) ---
         image_relpath: str | None = None
         if (
-            sensors.camera is not None
+            step_ok
+            and sensors.camera is not None
             and config.logging.save_images
             and sensors.camera.available
             and sensors.camera.should_capture(step_index)
@@ -467,6 +520,7 @@ def _scan_loop(
                     "alt": gnss_fix.alt,
                     "hdop": gnss_fix.hdop,
                     "vdop": gnss_fix.vdop,
+                    "pdop": gnss_fix.pdop,
                     "sat_count": gnss_fix.sat_count,
                     "rtk_age": gnss_fix.rtk_age,
                 }
@@ -475,21 +529,44 @@ def _scan_loop(
             status.fix_type = gnss_fix.fix_type
             status.sat_count = gnss_fix.sat_count
             status.hdop = gnss_fix.hdop
+            status.pdop = gnss_fix.pdop
             status.lat = gnss_fix.lat
             status.lon = gnss_fix.lon
             status.alt_m = gnss_fix.alt
             status.rtk_age_s = gnss_fix.rtk_age
 
-        # --- Telemetry publish (cadenced) ---
-        now_monotonic = time.monotonic()
-        if now_monotonic - last_publish >= publish_interval:
-            status.timestamp_epoch = now
-            if ntrip_client is not None:
-                ntrip_stats = ntrip_client.stats
-                status.ntrip_connected = ntrip_stats.connected
-                status.ntrip_bytes_per_sec = ntrip_stats.bytes_received_this_sec
-            telemetry.publish(status)
-            last_publish = now_monotonic
+        # --- Telemetry publish (every iteration; TelemetryRouter applies its
+        # own per-channel cadence — see rover.telemetry.TelemetryRouter) ---
+        status.timestamp_epoch = now
+        status.sensors_disabled = [g.name for g in gates if g.tripped]
+        status.logger_degraded = session_logger.degraded
+        if ntrip_client is not None:
+            ntrip_stats = ntrip_client.stats
+            status.ntrip_connected = ntrip_stats.connected
+            status.ntrip_bytes_per_sec = ntrip_stats.bytes_received_this_sec
+            # A fatal rejection discovered after startup (e.g. the caster
+            # reboots into a bad auth state mid-session) is not grounds to
+            # abort — the data already logged is still valid — but it must
+            # be visible, once, rather than silently degrading to no RTCM.
+            if ntrip_client.fatal_error is not None and not ntrip_fatal_noted:
+                ntrip_fatal_noted = True
+                logger.error(
+                    "NTRIP fatal mid-session (continuing scan without RTK corrections): %s",
+                    ntrip_client.fatal_error,
+                )
+        # scan_state is derived from persistent conditions here rather than
+        # left as whatever the per-step logic above set: a tripped stepper
+        # gate or an NTRIP fatal error must keep publishing SCAN_ERROR even
+        # once the stepper resumes succeeding on a later iteration — the
+        # per-step logic on its own resets scan_state to SCAN_SCANNING on
+        # every healthy step, which previously erased an unresolved NTRIP
+        # fatal (that block above only logs it once) after a single
+        # SCAN_ERROR publish (final review I4).
+        if stepper_gate.tripped or (
+            ntrip_client is not None and ntrip_client.fatal_error is not None
+        ):
+            status.scan_state = SCAN_ERROR
+        telemetry.publish(status)
 
         step_index += 1
 
@@ -530,17 +607,13 @@ def run(
 
     def _handle_signal(signum: int, _frame) -> None:
         logger.info("Received signal %d — shutting down", signum)
-        stop_event.set()  # noqa: F821 — captured
+        stop_event.set()
 
     if owns_signals:
         # Only the main thread can install signal handlers.
         try:
             signal.signal(signal.SIGINT, _handle_signal)
-            try:
-                signal.signal(signal.SIGTERM, _handle_signal)
-            except (AttributeError, ValueError):
-                # SIGTERM absent on some platforms; that's fine
-                pass
+            signal.signal(signal.SIGTERM, _handle_signal)
         except ValueError:
             # Not in main thread (e.g. test runner) — caller must drive stop_event
             logger.debug("Signal handlers not installed (not main thread)")
@@ -582,11 +655,26 @@ def run(
             and sensors.gnss is not None
         ):
             try:
-                ntrip_client = NtripClient(config, rtcm_sink=sensors.gnss.write_rtcm)
+                ntrip_client = NtripClient(
+                    config,
+                    rtcm_sink=sensors.gnss.write_rtcm,
+                    gga_source=sensors.gnss.latest_fix,
+                )
                 ntrip_client.start()
             except Exception as e:
                 logger.warning("NtripClient start failed: %s — RTK degraded", e)
                 ntrip_client = None
+
+            if ntrip_client is not None:
+                # A caster rejection in arm_group must stop the session before any
+                # scan data is written (BASE_STATION_INTEGRATION.md §7).
+                deadline = time.monotonic() + _NTRIP_FATAL_GRACE_SEC
+                while time.monotonic() < deadline and ntrip_client.fatal_error is None:
+                    if stop_event.wait(0.05):
+                        break
+                if ntrip_client.fatal_error is not None:
+                    logger.error("Aborting: %s", ntrip_client.fatal_error)
+                    raise _FatalStartupError(ntrip_client.fatal_error)
 
         # --- Watchdog (always constructed: start() sends READY=1; the monitor
         # thread only runs when enabled; heartbeat() always pings systemd) ---
@@ -608,6 +696,10 @@ def run(
             stop_event=stop_event,
             duration_sec=duration_sec,
         )
+    except _FatalStartupError:
+        # Already logged with full context at the raise site; a bare ERROR
+        # line here would duplicate it without adding anything.
+        exit_code = 4
     except Exception as e:
         logger.exception("Acquisition setup or loop crashed: %s", e)
         exit_code = 1

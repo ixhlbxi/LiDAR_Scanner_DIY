@@ -28,5 +28,6 @@ Each line is pass/fail. Record the outcome and date in the audit report row name
     `rpi_lgpio` or `lgpio`, not `RPi/GPIO`. If it does not (`pip install
     rpi-lgpio` fails on Bookworm under PEP 668): `sudo apt remove
     python3-rpi.gpio` (if the wrong backend was found) then `sudo apt install
-    python3-rpi-lgpio`. (T1-033; stage 4 adds a code guard)
+    python3-rpi-lgpio`. The installer now warns if the legacy backend is detected;
+    the driver will refuse to start on it (T1-033).
 11. `sudo deploy/install.sh` a second time → prints `kept /etc/rover/config.toml`.

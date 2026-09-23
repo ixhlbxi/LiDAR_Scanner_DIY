@@ -4,7 +4,6 @@ integration, telemetry HTTP. No hardware required.
 See DEC-030 through DEC-034 in docs/DECISIONS.md.
 """
 
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -17,17 +16,6 @@ from rover.config import (
     TelemetryConfig,
     load_config,
 )
-
-
-@pytest.fixture
-def tmp_toml(tmp_path):
-    def _write(content: str) -> Path:
-        p = tmp_path / "test_config.toml"
-        p.write_text(textwrap.dedent(content))
-        return p
-
-    return _write
-
 
 # ---------------------------------------------------------------------------
 # Session (DEC-030)
@@ -312,14 +300,26 @@ class TestBaseStationIntegration:
         cfg = load_config()
         assert isinstance(cfg.base_station_integration, BaseStationIntegrationConfig)
         assert cfg.base_station_integration.enabled is False
-        assert cfg.base_station_integration.status_schema_version == 1
+        # 0 = "use the code constant" (telemetry.STATUS_SCHEMA_VERSION) — schema v2.
+        assert cfg.base_station_integration.status_schema_version == 0
         assert cfg.base_station_integration.publish_interval_sec == 1.0
+
+    def test_schema_version_zero_is_valid(self, tmp_toml):
+        """0 means "use the code constant" — it is the default, not an error."""
+        p = tmp_toml(
+            """
+            [base_station_integration]
+            status_schema_version = 0
+            """
+        )
+        cfg = load_config(p)
+        assert cfg.base_station_integration.status_schema_version == 0
 
     def test_negative_schema_version(self, tmp_toml):
         p = tmp_toml(
             """
             [base_station_integration]
-            status_schema_version = 0
+            status_schema_version = -1
             """
         )
         with pytest.raises(ValueError, match="status_schema_version"):
@@ -373,7 +373,6 @@ class TestRoverConfigComposition:
             "camera",
             "logging",
             "watchdog",
-            "power",
             "calibration",
         ):
             assert hasattr(cfg, name), f"missing section {name}"

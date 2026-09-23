@@ -200,3 +200,24 @@ class TestLinkPayload:
         parsed = decode_link_payload(decoded_payload)
         assert parsed["rssi_dbm"] == -60
         assert parsed["snr_db"] == 12
+
+
+# Checked-in hex of a STATUS frame from the CURRENT bit-by-bit implementation.
+# The firmware quotes the same bytes (T1-042); see firmware/esp32-rover/src/main.cpp.
+GOLDEN_STATUS_FRAME_HEX = "020134120a0005125000182e01000000d199"
+
+
+def test_golden_status_frame_is_stable():
+    """Checked-in hex of a STATUS frame; the firmware quotes the same bytes (T1-042)."""
+    payload = encode_status_payload(
+        fix_type=5, sat_count=18, hdop=0.8, battery_mv=11800, scan_state=1
+    )
+    frame = encode_frame(TYPE_STATUS, 0x1234, payload)
+    assert frame.hex() == GOLDEN_STATUS_FRAME_HEX
+
+
+def test_crc_matches_binascii():
+    import binascii
+
+    for data in (b"", b"\x00", b"123456789", bytes(range(256))):
+        assert crc16_ccitt(data) == binascii.crc_hqx(data, 0xFFFF)
