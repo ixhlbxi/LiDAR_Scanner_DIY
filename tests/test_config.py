@@ -406,3 +406,47 @@ class TestToDict:
         d = cfg.to_dict()
         assert isinstance(d["camera"]["resolution"], list)
         assert d["camera"]["resolution"] == [1920, 1080]
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 Config (T1-041, T1-007)
+# ---------------------------------------------------------------------------
+
+
+class TestStage3Config:
+    def test_mag_offset_parsed(self, tmp_toml):
+        p = tmp_toml("""
+            [calibration]
+            mag_offset = [12.5, -3.0, 40.0]
+        """)
+        cfg = load_config(p)
+        assert cfg.calibration.mag_offset == [12.5, -3.0, 40.0]
+
+    def test_mag_offset_rejects_wrong_length(self, tmp_toml):
+        p = tmp_toml("""
+            [calibration]
+            mag_offset = [1.0, 2.0]
+        """)
+        with pytest.raises(ValueError, match=r"\[calibration\] mag_offset"):
+            load_config(p)
+
+    def test_default_magnetometer_off_until_calibrated(self):
+        cfg = load_config()
+        assert cfg.imu.use_magnetometer is False
+        assert cfg.calibration.mag_offset is None
+
+    def test_step_interval_must_be_multiple_of_microstep(self, tmp_toml):
+        p = tmp_toml("""
+            [stepper]
+            steps_per_rev = 3200
+            step_interval_deg = 1.5
+        """)
+        with pytest.raises(ValueError, match=r"step_interval_deg.*multiple of 0\.1125"):
+            load_config(p)
+
+    def test_default_step_interval_is_exact(self):
+        cfg = load_config()
+        per_step = 360.0 / cfg.stepper.steps_per_rev
+        assert cfg.stepper.step_interval_deg / per_step == pytest.approx(
+            round(cfg.stepper.step_interval_deg / per_step)
+        )

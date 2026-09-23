@@ -165,7 +165,10 @@ def _init_sensors(config: RoverConfig) -> _Sensors:
 
     if config.imu.enabled:
         try:
-            sensors.imu = ImuDriver(config.imu)
+            mag_offset = (
+                tuple(config.calibration.mag_offset) if config.calibration.mag_offset else None
+            )
+            sensors.imu = ImuDriver(config.imu, mag_offset=mag_offset)
         except Exception as e:
             logger.warning("IMU init failed: %s — subsystem disabled", e)
 

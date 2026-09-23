@@ -25,7 +25,7 @@ scan_rate_hz = 10                 # Target scan rate (1–20)
 enabled = true
 steps_per_rev = 3200              # With 1/16 microstepping (DEC-017)
 rpm = 1.0                         # Rotation speed
-step_interval_deg = 1.5           # Degrees per step
+step_interval_deg = 1.575         # 14 microsteps at 3200/rev; MUST be a multiple of 0.1125°
 direction_pin = 17                # BCM GPIO
 step_pin = 27                     # BCM GPIO
 enable_pin = 22                   # BCM GPIO (active low)
@@ -36,7 +36,7 @@ bus = 1                           # I2C bus number
 address = 0x68                    # MPU-9250 address (or 0x69)
 sample_rate_hz = 200              # IMU polling rate
 fusion_output_hz = 100            # Madgwick output rate
-use_magnetometer = true           # Enable mag (disable during motor — DEC-013)
+use_magnetometer = false          # 9-DOF needs [calibration].mag_offset first (stage 3); DEC-013 gating applies when true
 fusion_beta = 0.1                 # Madgwick filter gain
 
 [gnss]
@@ -117,3 +117,4 @@ critical_battery_mv = 10000       # Shutdown threshold (mV)
 # lidar_to_imu_translation = [0.0, 0.0, 0.05]    # [x, y, z] meters
 # lidar_to_imu_rotation = [1.0, 0.0, 0.0, 0.0]   # [w, x, y, z] quaternion
 # imu_to_gnss_translation = [0.0, 0.0, 0.30]      # [x, y, z] meters
+# mag_offset = [0.0, 0.0, 0.0]                   # hard-iron offset, µT, body frame — measure before enabling use_magnetometer

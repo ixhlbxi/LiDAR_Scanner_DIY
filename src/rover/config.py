@@ -177,6 +177,9 @@ class CalibrationConfig:
     lidar_to_imu_translation: list[float] | None = None
     lidar_to_imu_rotation: list[float] | None = None
     imu_to_gnss_translation: list[float] | None = None
+    mag_offset: list[float] | None = (
+        None  # hard-iron offset (x, y, z) in µT, body frame; None = uncalibrated
+    )
 
 
 @dataclass(frozen=True)
@@ -233,7 +236,7 @@ _DEFAULTS: dict = {
         "enabled": True,
         "steps_per_rev": 3200,
         "rpm": 1.0,
-        "step_interval_deg": 1.5,
+        "step_interval_deg": 1.575,
         "direction_pin": 17,
         "step_pin": 27,
         "enable_pin": 22,
@@ -244,7 +247,7 @@ _DEFAULTS: dict = {
         "address": 0x68,
         "sample_rate_hz": 200,
         "fusion_output_hz": 100,
-        "use_magnetometer": True,
+        "use_magnetometer": False,
         "fusion_beta": 0.1,
     },
     "gnss": {
@@ -461,6 +464,14 @@ def _validate(raw: dict) -> None:
     _require_type("stepper", "step_interval_deg", st["step_interval_deg"], (int, float))
     _require_positive("stepper", "step_interval_deg", st["step_interval_deg"])
     st["step_interval_deg"] = float(st["step_interval_deg"])
+    per_step = 360.0 / st["steps_per_rev"]
+    ratio = st["step_interval_deg"] / per_step
+    if abs(ratio - round(ratio)) > 1e-9:
+        raise ValueError(
+            f"[stepper] step_interval_deg ({st['step_interval_deg']}) must be an integer "
+            f"multiple of {per_step:g}° (360 / steps_per_rev = {st['steps_per_rev']}); "
+            f"e.g. {round(ratio) * per_step:g}"
+        )
     for pin_key in ("direction_pin", "step_pin", "enable_pin"):
         _require_type("stepper", pin_key, st[pin_key], int)
         _require_range("stepper", pin_key, st[pin_key], 0, 27)
@@ -644,7 +655,7 @@ def _validate(raw: dict) -> None:
 
     # -- calibration (all optional) --
     cal = raw.get("calibration", {})
-    for key in ("lidar_to_imu_translation", "imu_to_gnss_translation"):
+    for key in ("lidar_to_imu_translation", "imu_to_gnss_translation", "mag_offset"):
         if key in cal and cal[key] is not None:
             v = cal[key]
             if not isinstance(v, list) or len(v) != 3:
@@ -696,6 +707,7 @@ def _build_config(raw: dict) -> RoverConfig:
             lidar_to_imu_translation=cal_raw.get("lidar_to_imu_translation"),
             lidar_to_imu_rotation=cal_raw.get("lidar_to_imu_rotation"),
             imu_to_gnss_translation=cal_raw.get("imu_to_gnss_translation"),
+            mag_offset=cal_raw.get("mag_offset"),
         ),
     )
 
