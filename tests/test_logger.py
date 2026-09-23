@@ -652,17 +652,72 @@ def test_write_does_not_block_behind_flush(cfg):
         lg.stop()
 
 
-def test_stop_leaves_no_live_timer(cfg):
-    """S3-R4: stop() must not race a concurrently-rescheduled flush Timer,
-    leaving one stray live Timer behind after stop() returns."""
-    config, path = cfg
+def test_stop_synchronizes_with_a_racing_schedule_flush(fast_flush_cfg, monkeypatch):
+    """S3-R4 fix round 1: `_schedule_flush()`'s stopping/running check and its
+    Timer publish must be ONE atomic step under `_lock`, and `stop()` must
+    grab `_stopping` + the current timer under that same lock (the
+    `cancel()` call itself stays outside it). Deterministic reproduction of
+    the TOCTOU window the earlier flag-only design left open:
+
+    - The SECOND `_schedule_flush()` call ever made (the first natural
+      periodic reschedule, after the Timer `start()` creates from `.start()`
+      has fired once) has its Timer's interval forced to 3600s, so it can
+      never fire mid-test regardless of scheduling jitter — no matter how
+      long this test pauses it, it cannot spawn an uncontrolled third
+      thread.
+    - Control is paused right after `Timer.start()` (the timer thread is
+      live) but before that Timer object is published to
+      `self._flush_timer` — exactly the old race window.
+    - `stop()` runs on its OWN thread, never the paused one: if it ran
+      synchronously on the thread doing the pausing, a real `_lock`-holding
+      pause (which the fix requires) would deadlock the test against the
+      FIXED code, not just expose a bug in the old one.
+
+    Against the old (unsynchronized) design this reliably leaves
+    `lg._flush_timer` as the freshly-published, live 3600s Timer even
+    though `stop()` already ran to completion — verified by reasoning above
+    and by temporarily reverting the `with self._lock:` guards in both
+    methods locally, which reproduces exactly that. Against the fixed code,
+    `stop()` blocks on `_lock` until the pause is released, so it always
+    observes (and cancels) the Timer this test publishes, leaving
+    `lg._flush_timer is None`.
+    """
+    config, path = fast_flush_cfg
     lg = SessionLogger(config, config_path=path)
     lg.start()
     lg.write({"type": "event", "i": 0})
-    lg.stop()
-    deadline = time.monotonic() + 1
-    while time.monotonic() < deadline:
-        if lg._flush_timer is None or not lg._flush_timer.is_alive():
-            break
-        time.sleep(0.01)
-    assert lg._flush_timer is None or not lg._flush_timer.is_alive()
+
+    real_timer_cls = threading.Timer
+    entered = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    class _PausingTimer(real_timer_cls):
+        def __init__(self, interval, function, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                interval = 3600.0  # never actually fires during the test
+            super().__init__(interval, function, *args, **kwargs)
+
+        def start(self):
+            super().start()
+            if calls["n"] == 1:
+                entered.set()
+                release.wait(2)
+
+    # Patched AFTER lg.start(), so the logger's very first Timer (already
+    # created+started) is untouched — only the periodic reschedule that
+    # fires next goes through _PausingTimer, and it's the first (and only)
+    # construction through this class, hence calls["n"] == 1.
+    monkeypatch.setattr(threading, "Timer", _PausingTimer)
+
+    assert entered.wait(2), "the racing _schedule_flush() call never ran"
+
+    stop_thread = threading.Thread(target=lg.stop)
+    stop_thread.start()
+    time.sleep(0.05)  # give stop() a head start reading/clearing _flush_timer
+    release.set()
+    stop_thread.join(2)
+
+    assert not stop_thread.is_alive()
+    assert lg._flush_timer is None

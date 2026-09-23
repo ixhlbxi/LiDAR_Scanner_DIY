@@ -234,19 +234,24 @@ class SessionLogger:
             return
 
         self._running = False
-        # Set BEFORE cancelling the timer: a concurrent _periodic_flush()
-        # that already passed the `_running` check in _schedule_flush() and
-        # is mid-way through creating+starting a new Timer (start-then-publish,
-        # T1-041) has not yet published it to `self._flush_timer` — cancel()
-        # below could then miss it. `_stopping` closes that window: any
-        # `_schedule_flush()` call that hasn't started its Timer yet will see
-        # this flag and return without creating one (S3-R4).
-        self._stopping = True
-
-        # Cancel pending flush timer
-        if self._flush_timer is not None:
-            self._flush_timer.cancel()
+        # S3-R4 fix round 1: setting `_stopping` and capturing the current
+        # timer must be ONE atomic step with `_schedule_flush()`'s own
+        # check-then-publish, under `_lock` — otherwise a `_schedule_flush()`
+        # that already passed its flag check and is mid-way through
+        # creating+starting a new Timer can publish it to `self._flush_timer`
+        # *after* this method reads/clears that attribute, leaving a live
+        # stray Timer behind even though `_stopping` was set first. The
+        # `cancel()` call itself (and any join) stays OUTSIDE the lock: it's
+        # the only part that can take real time, and a timer thread parked
+        # on `_lock` inside `_schedule_flush()` must never be able to
+        # deadlock against a `stop()` that's holding the lock across it.
+        with self._lock:
+            self._stopping = True
+            timer = self._flush_timer
             self._flush_timer = None
+
+        if timer is not None:
+            timer.cancel()
 
         # Final drain
         try:
@@ -293,18 +298,27 @@ class SessionLogger:
     def _schedule_flush(self) -> None:
         """Schedule the next periodic flush.
 
-        Builds the Timer into a local and starts it BEFORE publishing it to
+        The stopping/running check and the Timer publish are one atomic step
+        under `_lock` (S3-R4 fix round 1) — otherwise `stop()` can read
+        `self._flush_timer` in the gap between this method deciding to
+        proceed and it actually publishing the new (already-started) Timer,
+        and the fresh Timer survives `stop()` as a stray live one. Builds the
+        Timer into a local and starts it BEFORE publishing it to
         `self._flush_timer` — publishing an unstarted Timer first leaves a
         window where a concurrent reader (e.g. a test asserting
         `is_alive()`) can observe a Timer object that exists but hasn't
-        actually started running yet.
+        actually started running yet. `threading.Timer.start()` itself is
+        cheap (it only launches a thread), so holding `_lock` across it does
+        not meaningfully compete with `_flush()`'s disk-I/O-bound hold of the
+        same lock.
         """
-        if not self._running or self._stopping:
-            return
-        timer = threading.Timer(self._lc.flush_interval_sec, self._periodic_flush)
-        timer.daemon = True
-        timer.start()
-        self._flush_timer = timer
+        with self._lock:
+            if not self._running or self._stopping:
+                return
+            timer = threading.Timer(self._lc.flush_interval_sec, self._periodic_flush)
+            timer.daemon = True
+            timer.start()
+            self._flush_timer = timer
 
     def _periodic_flush(self) -> None:
         """Called by timer: flush, then ALWAYS reschedule (T1-011)."""

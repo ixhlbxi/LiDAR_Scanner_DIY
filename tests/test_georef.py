@@ -178,6 +178,51 @@ class TestLoadSession:
         data = georef.load_session(sess)
         assert [r["timestamp"] for r in data.gnss_records] == [100.05]
 
+    def test_load_session_gnss_file_wins_timestamp_tie_over_scan_embedded(self, tmp_path):
+        """Fix round 1, item 3: gnss*.jsonl is the authoritative source — on
+        a timestamp tie against a legacy scan-embedded record, the
+        gnss-file record's data must survive the dedup, not whichever one
+        happened to sort first."""
+        sess = _make_session(tmp_path)  # scan.jsonl embeds one gnss record @ 100.05, lat=40.7128
+        (sess / "gnss.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "gnss",
+                    "timestamp": 100.05,
+                    "fix_type": 5,
+                    "lat": 41.0,  # deliberately different from the scan-embedded 40.7128
+                    "lon": -75.0,
+                    "alt": 20.0,
+                }
+            )
+            + "\n"
+        )
+        data = georef.load_session(sess)
+        assert len(data.gnss_records) == 1
+        assert data.gnss_records[0]["lat"] == 41.0
+
+    def test_load_session_does_not_dedup_none_timestamp_gnss_records(self, tmp_path):
+        """Fix round 1, item 4: two GNSS records that both lack a timestamp
+        are not duplicates of each other — only equal, non-None timestamps
+        collapse."""
+        sess = tmp_path / "notimestamp"
+        sess.mkdir()
+        (sess / "metadata.json").write_text(
+            json.dumps({"session": {"profile": "personal", "target_crs_epsg": 0, "units": "m"}})
+        )
+        (sess / "scan.jsonl").write_text("")
+        (sess / "gnss.jsonl").write_text(
+            "\n".join(
+                json.dumps(
+                    {"type": "gnss", "timestamp": None, "fix_type": 5, "lat": lat, "lon": -74.0}
+                )
+                for lat in (1.0, 2.0)
+            )
+            + "\n"
+        )
+        data = georef.load_session(sess)
+        assert len(data.gnss_records) == 2
+
 
 # ---------------------------------------------------------------------------
 # Quaternion + orientation_at

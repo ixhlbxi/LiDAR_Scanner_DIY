@@ -48,6 +48,11 @@ Dependencies: numpy (required); laspy + pyproj (optional, install via `[post]`
 extra).
 
 Changelog:
+    0.13.1  2026-09-23  load_session() dedup fix round 1: gnss*.jsonl records
+                        now sort ahead of scan-embedded ones so a timestamp
+                        tie keeps the authoritative gnss-file version, and
+                        records with a missing/None timestamp are never
+                        treated as duplicates of one another.
     0.13.0  2026-09-23  load_session() reads gnss*.jsonl unconditionally (the
                         logger no longer mirrors GNSS into scan*.jsonl,
                         T1-053) and merges it with any legacy GNSS records
@@ -232,7 +237,7 @@ def load_session(session_dir: Path) -> SessionData:
 
     lidar: list[dict] = []
     imu: list[dict] = []
-    gnss: list[dict] = []
+    scan_gnss: list[dict] = []
     for rec in _iter_jsonl(scan_files):
         t = rec.get("type")
         if t == "lidar":
@@ -240,25 +245,36 @@ def load_session(session_dir: Path) -> SessionData:
         elif t == "imu":
             imu.extend(_flatten_imu_batch(rec))
         elif t == "gnss":
-            gnss.append(rec)
+            scan_gnss.append(rec)
 
-    # gnss*.jsonl is the unconditional GNSS source (T1-053: the logger no
-    # longer mirrors GNSS records into scan*.jsonl). Records picked up above
-    # from scan segments are legacy support only — pre-T1-053 sessions (or a
-    # rotated gnss segment whose scan-mirror wasn't itself rotated away)
-    # still carry "type": "gnss" records there. Merge both sources, sort by
-    # timestamp, and de-duplicate consecutive same-timestamp records (keep
-    # the first) so a legacy session mirrored in both places isn't double
-    # counted.
+    # gnss*.jsonl is the unconditional, AUTHORITATIVE GNSS source (T1-053:
+    # the logger no longer mirrors GNSS records into scan*.jsonl). Records
+    # picked up above from scan segments are legacy support only —
+    # pre-T1-053 sessions (or a rotated gnss segment whose scan-mirror
+    # wasn't itself rotated away) still carry "type": "gnss" records there.
+    # gnss*.jsonl records are placed FIRST so that on a timestamp tie the
+    # stable sort below keeps the gnss-file version ahead of the
+    # scan-embedded one, and the keep-the-first dedup step then prefers it
+    # (fix round 1, item 3).
     gnss_files = _segment_files(session_dir, "gnss")
-    gnss.extend(r for r in _iter_jsonl(gnss_files) if r.get("type") == "gnss")
+    gnss = [r for r in _iter_jsonl(gnss_files) if r.get("type") == "gnss"] + scan_gnss
 
-    gnss.sort(key=lambda r: r.get("timestamp", 0.0))
+    # Sort with missing/None timestamps grouped after real ones (Python
+    # can't compare None to a float), then de-duplicate consecutive
+    # records with an identical, non-None timestamp (keep the first — see
+    # above for which source wins a tie). Two records that both lack a
+    # timestamp are NOT duplicates of each other (fix round 1, item 4).
+    gnss.sort(
+        key=lambda r: (
+            r.get("timestamp") is None,
+            r.get("timestamp") if r.get("timestamp") is not None else 0.0,
+        ),
+    )
     deduped_gnss: list[dict] = []
     prev_ts = None
     for rec in gnss:
         ts = rec.get("timestamp")
-        if deduped_gnss and ts == prev_ts:
+        if deduped_gnss and ts is not None and prev_ts is not None and ts == prev_ts:
             continue
         deduped_gnss.append(rec)
         prev_ts = ts
