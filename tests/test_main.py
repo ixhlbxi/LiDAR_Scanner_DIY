@@ -381,7 +381,6 @@ def test_save_images_false_prevents_capture(tmp_path: Path, monkeypatch) -> None
     """[logging].save_images = false must stop captures, not just skip a mkdir (T1-031)."""
     _CountingCamera.captures = 0
     monkeypatch.setattr(main_mod, "Camera", _CountingCamera)
-    monkeypatch.setattr(main_mod, "_CAMERA_IMPORT_OK", True)
     monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 0.05)  # many iterations in 1 s
     cfg = tmp_path / "cam.toml"
     cfg.write_text(
@@ -426,7 +425,6 @@ def test_save_images_true_captures_and_logs(tmp_path: Path, monkeypatch) -> None
 
     _CountingCamera.captures = 0
     monkeypatch.setattr(main_mod, "Camera", _CountingCamera)
-    monkeypatch.setattr(main_mod, "_CAMERA_IMPORT_OK", True)
     monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 0.05)  # many iterations in 1 s
     cfg = tmp_path / "cam.toml"
     cfg.write_text(
@@ -728,3 +726,47 @@ session_prefix = "ag"
 """
     )
     assert main_mod.run(config_path=cfg, duration_sec=5.0) == 4
+
+
+class _BrokenStepper(_FakeStepper):
+    fails = 0
+
+    def step(self, steps: int) -> None:
+        type(self).fails += 1
+        raise RuntimeError("stall")
+
+
+def test_stepper_failures_are_gated_and_still_publish(tmp_path: Path, monkeypatch) -> None:
+    """A failing stepper must not spam warnings forever nor skip telemetry (S2-R3)."""
+    import json
+
+    _BrokenStepper.fails = 0
+    published: list = []
+    monkeypatch.setattr(main_mod, "StepperMotor", _BrokenStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
+
+    real_router = main_mod.TelemetryRouter
+
+    class _SpyRouter(real_router):
+        def publish(self, status):
+            published.append(status.scan_state)
+            return super().publish(status)
+
+    monkeypatch.setattr(main_mod, "TelemetryRouter", _SpyRouter)
+    assert main_mod.run(config_path=_stage3_config(tmp_path), duration_sec=4.0) == 0
+    assert _BrokenStepper.fails == 5, "gate must stop retrying after 5 failures"
+    assert any(s == main_mod.SCAN_ERROR for s in published), "SCAN_ERROR must be published"
+    session = next((tmp_path / "data").glob("s3_*"))
+    events = [
+        json.loads(line)["event"]
+        for line in (session / "scan.jsonl").read_text().splitlines()
+        if '"event"' in line
+    ]
+    assert "sensor_disabled" in events
+
+
+def test_scan_constants_come_from_lora_protocol():
+    from rover import lora_protocol
+
+    assert main_mod.SCAN_ERROR is lora_protocol.SCAN_ERROR

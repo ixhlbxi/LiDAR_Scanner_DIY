@@ -54,6 +54,18 @@ Changelog:
                          status.sensors_disabled/logger_degraded fed from the
                          sensor gates / SessionLogger.degraded each iteration
                          (S2-R2).
+    0.11.5  2026-09-23  Stepper failures are now gated like every other
+                         sensor (_SensorGate("stepper")) instead of warning
+                         forever and `continue`-ing past the telemetry
+                         publish — SCAN_ERROR now actually reaches the wire;
+                         after 5 consecutive failures the stepper is skipped
+                         and the session continues in continuous mode with
+                         mast_angle_deg frozen (S2-R3, T1-046). SCAN_* is now
+                         imported from rover.lora_protocol instead of
+                         re-declared here. The module-level camera import
+                         guard is gone in favour of camera.py's own
+                         picamera2 guard. The SIGTERM nested try and the
+                         `# noqa: F821` are gone.
 """
 
 from __future__ import annotations
@@ -67,37 +79,19 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from rover.camera import Camera
 from rover.config import RoverConfig, load_config
 from rover.gnss import GnssFix, GnssReceiver
 from rover.imu import ImuDriver
 from rover.lidar import LidarScan, LidarScanner
 from rover.logger import SessionLogger
+from rover.lora_protocol import SCAN_ERROR, SCAN_SCANNING
 from rover.ntrip import NtripClient
 from rover.stepper import StepperMotor
 from rover.telemetry import TelemetryRouter, status_from_config
 from rover.watchdog import Watchdog
 
-# Optional import — Camera depends on picamera2 which may not be importable off-Pi.
-# Failure to import is treated the same as the device being absent: the camera
-# subsystem is unavailable, but the rest of the system runs.
-try:
-    from rover.camera import Camera
-
-    _CAMERA_IMPORT_OK = True
-except Exception as _e:  # pragma: no cover — import-time only
-    Camera = None  # type: ignore[assignment]
-    _CAMERA_IMPORT_OK = False
-    _CAMERA_IMPORT_ERROR = _e
-
 logger = logging.getLogger(__name__)
-
-
-# Scan state constants — kept in sync with lora_protocol.SCAN_* values so the
-# numeric we put in RoverStatus.scan_state lines up with the wire encoding.
-SCAN_IDLE = 0
-SCAN_SCANNING = 1
-SCAN_PAUSED = 2
-SCAN_ERROR = 3
 
 # Loop pace when there is no stepper to settle behind (bench / telemetry-only).
 # Module-level so tests can shrink it.
@@ -213,19 +207,15 @@ def _init_sensors(config: RoverConfig) -> _Sensors:
         except Exception as e:
             logger.warning("IMU init failed: %s — subsystem disabled", e)
 
-    if config.camera.enabled and _CAMERA_IMPORT_OK:
+    if config.camera.enabled:
         try:
             sensors.camera = Camera(config.camera)
         except Exception as e:
             logger.warning("Camera init failed: %s — subsystem disabled", e)
-    elif config.camera.enabled and not _CAMERA_IMPORT_OK:
-        logger.warning(
-            "Camera enabled but picamera2 import failed (%s) — subsystem disabled",
-            _CAMERA_IMPORT_ERROR,
-        )
 
     if config.gnss.enabled:
         try:
+            # takes the whole config: it needs [gnss] and [ntrip].client_location
             sensors.gnss = GnssReceiver(config)
         except Exception as e:
             logger.warning("GNSS init failed: %s — subsystem disabled", e)
@@ -364,10 +354,10 @@ def _scan_loop(
     lidar_gate = _SensorGate("lidar")
     imu_gate = _SensorGate("imu")
     camera_gate = _SensorGate("camera")
-    # Local list (not individual names) so a later gate — e.g. Task 6's
-    # stepper_gate — can be appended here without touching the
-    # sensors_disabled computation below.
-    gates = [lidar_gate, imu_gate, camera_gate]
+    stepper_gate = _SensorGate("stepper")
+    # Local list (not individual names) so sensors_disabled below reflects
+    # every gate without needing its own per-gate wiring.
+    gates = [lidar_gate, imu_gate, camera_gate, stepper_gate]
     ntrip_fatal_noted = False
 
     while not stop_event.is_set():
@@ -384,19 +374,30 @@ def _scan_loop(
 
         # --- Step + settle ---
         stepped = False
-        if sensors.stepper is not None and sensors.stepper.available and steps_per_increment > 0:
+        step_ok = True
+        if (
+            sensors.stepper is not None
+            and sensors.stepper.available
+            and steps_per_increment > 0
+            and not stepper_gate.tripped
+        ):
             if sensors.imu is not None and sensors.imu.available:
                 sensors.imu.enable_magnetometer(False)  # DEC-013: stepper EMI
             try:
                 sensors.stepper.step(steps_per_increment)
                 stepped = True
+                stepper_gate.record_success()
+                status.scan_state = SCAN_SCANNING
             except Exception as e:
-                logger.warning("Stepper step failed: %s — pausing scan", e)
+                step_ok = False
+                if stepper_gate.record_failure(e):
+                    _note_gate_trip(session_logger, stepper_gate, e)
                 status.scan_state = SCAN_ERROR
-                stop_event.wait(0.5)
-                continue
-        stop_event.wait(settle_sec)
-        if stepped and sensors.imu is not None and sensors.imu.available:
+        if step_ok:
+            stop_event.wait(settle_sec)
+        else:
+            stop_event.wait(0.5)
+        if sensors.imu is not None and sensors.imu.available:
             sensors.imu.enable_magnetometer(config.imu.use_magnetometer)
         mast_angle_deg = (
             sensors.stepper.current_angle
@@ -411,7 +412,12 @@ def _scan_loop(
         # revolution actually finished, not whenever IMU/camera work after it
         # happens to wrap up.
         scan_wall_time: float | None = None
-        if sensors.lidar is not None and sensors.lidar.available and not lidar_gate.tripped:
+        if (
+            step_ok
+            and sensors.lidar is not None
+            and sensors.lidar.available
+            and not lidar_gate.tripped
+        ):
             try:
                 lidar_scan = sensors.lidar.read_scan(discard_stale=stepped)
                 scan_wall_time = time.time()
@@ -422,7 +428,7 @@ def _scan_loop(
 
         # --- IMU ---
         imu_batch: list = []
-        if sensors.imu is not None and sensors.imu.available and not imu_gate.tripped:
+        if step_ok and sensors.imu is not None and sensors.imu.available and not imu_gate.tripped:
             try:
                 imu_batch = sensors.imu.drain()
                 imu_gate.record_success()
@@ -433,7 +439,8 @@ def _scan_loop(
         # --- Camera (cadence-gated) ---
         image_relpath: str | None = None
         if (
-            sensors.camera is not None
+            step_ok
+            and sensors.camera is not None
             and config.logging.save_images
             and sensors.camera.available
             and sensors.camera.should_capture(step_index)
@@ -580,17 +587,13 @@ def run(
 
     def _handle_signal(signum: int, _frame) -> None:
         logger.info("Received signal %d — shutting down", signum)
-        stop_event.set()  # noqa: F821 — captured
+        stop_event.set()
 
     if owns_signals:
         # Only the main thread can install signal handlers.
         try:
             signal.signal(signal.SIGINT, _handle_signal)
-            try:
-                signal.signal(signal.SIGTERM, _handle_signal)
-            except (AttributeError, ValueError):
-                # SIGTERM absent on some platforms; that's fine
-                pass
+            signal.signal(signal.SIGTERM, _handle_signal)
         except ValueError:
             # Not in main thread (e.g. test runner) — caller must drive stop_event
             logger.debug("Signal handlers not installed (not main thread)")
