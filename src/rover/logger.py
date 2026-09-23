@@ -156,17 +156,30 @@ class SessionLogger:
         try:
             self._queue.put_nowait(record)
         except queue.Full:
-            # Drop the oldest so a stalled disk cannot eat all memory.
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                pass
-            self._dropped += 1
-            if self._dropped in (1, 100, 1000) or self._dropped % 10_000 == 0:
-                logger.warning(
-                    "SessionLogger queue full — dropped %d records so far", self._dropped
-                )
-            self._queue.put_nowait(record)
+            # Drop the oldest so a stalled disk cannot eat all memory. The whole
+            # recovery is locked so a concurrent _flush() draining the queue
+            # between our get_nowait() and put_nowait() can't cause a phantom
+            # drop count (Empty means nothing of ours was actually lost) or an
+            # uncounted real drop (Full again means our put really did fail).
+            with self._lock:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    self._note_dropped()
+                try:
+                    self._queue.put_nowait(record)
+                except queue.Full:
+                    # Another producer refilled it since we made room for
+                    # ourselves — drop this record instead.
+                    self._note_dropped()
+
+    def _note_dropped(self) -> None:
+        """Increment the drop counter and warn at a decaying frequency."""
+        self._dropped += 1
+        if self._dropped in (1, 100, 1000) or self._dropped % 10_000 == 0:
+            logger.warning("SessionLogger queue full — dropped %d records so far", self._dropped)
 
     def stop(self, metadata: dict[str, Any] | None = None) -> None:
         """Flush remaining records, write metadata, and close files.
@@ -195,7 +208,11 @@ class SessionLogger:
             self._degraded = True
 
         # Write metadata
-        self._write_metadata(metadata)
+        try:
+            self._write_metadata(metadata)
+        except Exception as e:
+            logger.error("SessionLogger metadata write failed: %s", e)
+            self._degraded = True
 
         # Close files
         self._close_files()

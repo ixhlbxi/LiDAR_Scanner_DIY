@@ -1,6 +1,7 @@
 """Unit tests for rover.logger — runs anywhere, no hardware required."""
 
 import json
+import queue
 import threading
 import time
 from pathlib import Path
@@ -480,3 +481,60 @@ def test_metadata_written_atomically(cfg, monkeypatch):
     lg.start()
     lg.stop()
     assert called and called[0].endswith("metadata.json")
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 — stop() metadata guard, drop-oldest locking (T1-011, T1-033)
+# ---------------------------------------------------------------------------
+
+
+def test_stop_closes_files_when_metadata_write_fails(cfg, monkeypatch):
+    """A metadata-write failure must not skip _close_files() (Finding 1)."""
+    from rover import logger as logger_mod
+
+    def _boom(path, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(logger_mod, "atomic_write_json", _boom)
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.write({"type": "event", "event": "x"})
+
+    lg.stop()  # must not raise
+
+    assert lg.degraded is True
+    assert lg._scan_file is None or lg._scan_file.closed
+    assert lg._gnss_file is None or lg._gnss_file.closed
+
+
+def test_write_drop_only_counts_real_drops(cfg, monkeypatch):
+    """A `queue.Empty` from the recovery `get_nowait()` means a concurrent
+    `_flush()` already drained the queue for real — it must not be counted as
+    a drop, and the record that triggered recovery must still be accepted
+    (Finding 2). Simulated by forcing the fast-path `put_nowait()` to look
+    full exactly once while the real queue is genuinely empty underneath —
+    the same race the lock in `write()` is meant to survive."""
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    try:
+        assert lg._queue.empty()
+        real_put_nowait = lg._queue.put_nowait
+        calls = {"n": 0}
+
+        def _full_once(item):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise queue.Full
+            real_put_nowait(item)
+
+        monkeypatch.setattr(lg._queue, "put_nowait", _full_once)
+
+        lg.write({"type": "event", "event": "raced"})
+
+        assert lg.dropped_records == 0
+        assert lg._queue.qsize() == 1
+        assert lg._queue.get_nowait()["event"] == "raced"
+    finally:
+        lg.stop()

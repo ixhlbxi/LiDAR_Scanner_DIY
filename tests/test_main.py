@@ -404,3 +404,54 @@ save_images = false
     )
     assert main_mod.run(config_path=cfg, duration_sec=1.0) == 0
     assert _CountingCamera.captures == 0
+
+
+def test_save_images_true_captures_and_logs(tmp_path: Path, monkeypatch) -> None:
+    """The enabled-camera success path — capture, gate reset, and the
+    scan.jsonl camera record — must actually run (Finding 3 follow-up to T1-033)."""
+    import json
+
+    _CountingCamera.captures = 0
+    monkeypatch.setattr(main_mod, "Camera", _CountingCamera)
+    monkeypatch.setattr(main_mod, "_CAMERA_IMPORT_OK", True)
+    monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 0.05)  # many iterations in 1 s
+    cfg = tmp_path / "cam.toml"
+    cfg.write_text(
+        f"""
+[camera]
+enabled = true
+
+[lidar]
+enabled = false
+[stepper]
+enabled = false
+[imu]
+enabled = false
+[gnss]
+enabled = false
+[ntrip]
+enabled = false
+[lora]
+enabled = false
+role = "disabled"
+[base_station_integration]
+enabled = false
+[telemetry]
+http_enabled = false
+[watchdog]
+enabled = false
+
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "withimg"
+save_images = true
+"""
+    )
+    assert main_mod.run(config_path=cfg, duration_sec=1.0) == 0
+    assert _CountingCamera.captures > 0
+
+    session = next((tmp_path / "data").glob("withimg_*"))
+    lines = (session / "scan.jsonl").read_text().splitlines()
+    camera_records = [json.loads(line) for line in lines if '"type":"camera"' in line]
+    assert camera_records, "expected at least one camera record in scan.jsonl"
+    assert any(r["filename"].startswith("images/") for r in camera_records)
