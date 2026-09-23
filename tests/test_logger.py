@@ -85,14 +85,14 @@ class TestSessionDirectory:
         finally:
             lg.stop()
 
-    def test_images_dir_created_when_camera_enabled(self, cfg):
+    def test_images_dir_not_precreated_by_start(self, cfg):
+        """The logger no longer owns the images directory (T1-033) — the
+        camera creates it lazily on first capture, so start() must not."""
         config, config_path = cfg
         lg = SessionLogger(config, config_path)
-        lg.start()
+        session_dir = lg.start()
         try:
-            assert lg.images_dir is not None
-            assert lg.images_dir.exists()
-            assert lg.images_dir.name == config.camera.output_folder
+            assert not (session_dir / config.camera.output_folder).exists()
         finally:
             lg.stop()
 

@@ -348,6 +348,7 @@ def _scan_loop(
         image_relpath: str | None = None
         if (
             sensors.camera is not None
+            and config.logging.save_images
             and sensors.camera.available
             and sensors.camera.should_capture(step_index)
             and session_logger.session_dir is not None

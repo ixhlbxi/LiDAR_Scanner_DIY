@@ -340,3 +340,67 @@ def test_telemetry_constructor_failure_still_tears_down(tmp_path: Path, monkeypa
     ]
     assert events[-1] == "scan_abort", events
     assert (session / "metadata.json").exists(), "logger.stop() must still run"
+
+
+class _CountingCamera:
+    captures = 0
+
+    def __init__(self, *_a, **_kw) -> None:
+        pass
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def should_capture(self, step_index: int) -> bool:
+        return True
+
+    def capture(self, output_dir, step_index) -> str:
+        type(self).captures += 1
+        return f"images/img_{step_index:06d}.jpg"
+
+
+def test_save_images_false_prevents_capture(tmp_path: Path, monkeypatch) -> None:
+    """[logging].save_images = false must stop captures, not just skip a mkdir (T1-033)."""
+    _CountingCamera.captures = 0
+    monkeypatch.setattr(main_mod, "Camera", _CountingCamera)
+    monkeypatch.setattr(main_mod, "_CAMERA_IMPORT_OK", True)
+    monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 0.05)  # many iterations in 1 s
+    cfg = tmp_path / "cam.toml"
+    cfg.write_text(
+        f"""
+[camera]
+enabled = true
+
+[lidar]
+enabled = false
+[stepper]
+enabled = false
+[imu]
+enabled = false
+[gnss]
+enabled = false
+[ntrip]
+enabled = false
+[lora]
+enabled = false
+role = "disabled"
+[base_station_integration]
+enabled = false
+[telemetry]
+http_enabled = false
+[watchdog]
+enabled = false
+
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "noimg"
+save_images = false
+"""
+    )
+    assert main_mod.run(config_path=cfg, duration_sec=1.0) == 0
+    assert _CountingCamera.captures == 0

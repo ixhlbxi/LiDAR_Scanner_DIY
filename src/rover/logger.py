@@ -57,7 +57,6 @@ class SessionLogger:
         self._lc = config.logging
 
         self._session_dir: Path | None = None
-        self._images_dir: Path | None = None
         self._start_time: datetime | None = None
 
         # File handles
@@ -101,11 +100,6 @@ class SessionLogger:
         """Records discarded because the queue was full."""
         return self._dropped
 
-    @property
-    def images_dir(self) -> Path | None:
-        """Path to the images subdirectory, or None if not started."""
-        return self._images_dir
-
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -129,11 +123,6 @@ class SessionLogger:
 
         self._session_dir = Path(self._lc.output_dir) / session_name
         self._session_dir.mkdir(parents=True, exist_ok=True)
-
-        # Images directory
-        if self._config.camera.enabled and self._lc.save_images:
-            self._images_dir = self._session_dir / self._config.camera.output_folder
-            self._images_dir.mkdir(exist_ok=True)
 
         # Copy config to session directory
         self._copy_config()
