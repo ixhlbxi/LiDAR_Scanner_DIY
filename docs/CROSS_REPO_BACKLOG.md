@@ -118,7 +118,7 @@ tracking file. Each carries its finding ID so the report and this list stay cros
 |---|---|---|---|
 | T1-018 | `src/rover/imu.py` free-fall branch | Quaternion derivative uses already-modified q0 | Low; superseded when the MARG update lands in stage 3 |
 | T1-021 | `src/rover/gnss.py` `_nmea_checksum_ok` | Non-hex checksum raises ValueError into the catch-all | Low; one 0.5 s stall on a corrupt sentence |
-| T1-024 | `src/rover/ntrip.py` `stop()` / stats | Socket not closed on stop; stats handed live | Low; partially addressed in stage 4 |
+| T1-024 | `src/rover/ntrip.py` `stop()` / stats | [CLOSED 2026-09-23 167f4a2] Socket not closed on stop; stats handed live | Low; partially addressed in stage 4 |
 | T1-028 | `src/rover/config.py` `_require_type` | bool passes int checks | Low; no config key plausibly set to a bool by mistake |
 | T1-037 | `src/rover/main.py` scan_state | Stays SCAN_ERROR after a recovered stepper fault | Low; cosmetic on the telemetry channel |
 | T1-038 | `src/rover/main.py` settle | Stop latency up to ~6 s | Low; the settle half is fixed in stage 2, the read_scan half waits for stage 3 |
@@ -138,10 +138,10 @@ tracking file. Each carries its finding ID so the report and this list stay cros
 
 | ID | Where | What | Why here |
 |---|---|---|---|
-| S2-R1 | `src/rover/gnss.py` NAV-PVT + GGA paths | Altitude datum: NAV-PVT now logs `hMSL` (orthometric) and GGA logs MSL, but `GnssFix.alt` and SPECIFICATIONS.md say ellipsoidal | Stage 4 rewrites gnss.py: log ellipsoidal from both (NAV-PVT `height`; GGA alt + geoid separation field 11) or relabel the schema |
-| S2-R2 | `src/rover/telemetry.py` RoverStatus | A tripped sensor gate and `logger.degraded` are not visible on the wire (status.json / LoRa STATUS) | Changes the Base-Station contract; stage 4 owns telemetry |
-| S2-R3 | `src/rover/main.py` stepper failure branch | Warns every 0.5 s forever and its `continue` skips the telemetry publish, so SCAN_ERROR is never published | Gate it like the sensors; stage 4 touches the loop's publish block |
-| S2-R4 | `src/rover/logger.py` `write()` Full path | Drop-oldest takes `_lock`, which `_flush` holds across disk I/O, so a stalled disk blocks the producer; drained-but-unwritten records on a failed flush are not counted | Needs a small design choice (separate counter lock, `lost_records`) |
+| S2-R1 | `src/rover/gnss.py` NAV-PVT + GGA paths | [CLOSED 2026-09-23 167f4a2] Altitude datum: NAV-PVT now logs `hMSL` (orthometric) and GGA logs MSL, but `GnssFix.alt` and SPECIFICATIONS.md say ellipsoidal | Stage 4 rewrites gnss.py: log ellipsoidal from both (NAV-PVT `height`; GGA alt + geoid separation field 11) or relabel the schema |
+| S2-R2 | `src/rover/telemetry.py` RoverStatus | [CLOSED 2026-09-23 167f4a2] A tripped sensor gate and `logger.degraded` are not visible on the wire (status.json / LoRa STATUS) | Changes the Base-Station contract; stage 4 owns telemetry |
+| S2-R3 | `src/rover/main.py` stepper failure branch | [CLOSED 2026-09-23 167f4a2] Warns every 0.5 s forever and its `continue` skips the telemetry publish, so SCAN_ERROR is never published | Gate it like the sensors; stage 4 touches the loop's publish block |
+| S2-R4 | `src/rover/logger.py` `write()` Full path | [CLOSED 2026-09-23 167f4a2] Drop-oldest takes `_lock`, which `_flush` holds across disk I/O, so a stalled disk blocks the producer; drained-but-unwritten records on a failed flush are not counted | Needs a small design choice (separate counter lock, `lost_records`) |
 
 ### Pre-field-session blockers (from the stage 3 whole-branch review, merged 7ef5b1e)
 
@@ -152,8 +152,14 @@ These need the owner and a bench target before any session is georeferenced; non
 | S3-R1 | `scripts/georef.py`, `src/rover/imu.py` | Madgwick's world frame is North-West-Up (x = magnetic north) and no declination is applied; georef adds ENU offsets to NWU points, so cloud azimuth in State Plane is arbitrary (with 6-DOF, yaw is the start-up heading; yaw is now stripped when no magnetometer) | Add the fixed NWU→ENU rotation plus a declination setting (about −11° in PA), or accept "orientation relative to first heading" and document it |
 | S3-R2 | `src/rover/lidar.py`, `docs/HARDWARE.md` | LDRobot documents LD19 angles increasing clockwise (left-handed), so the side-mount mapping (LiDAR y → body up) is right for only one of the two ways the sensor can stand on its side | Bench check with a target above the scanner; then pin the mount orientation in HARDWARE.md or negate the angle at parse |
 | S3-R3 | `docs/HARDWARE.md:451`, `scripts/georef.py` | HARDWARE.md says the IMU is on the rotating platform; the code assumes it is rigid to the fixed body. If it rides the mast, georef applies the mast angle twice | Owner confirms the IMU mount; if on the mast, georef takes yaw from the commanded angle only |
-| S3-R4 | `src/rover/logger.py` `_schedule_flush`/`stop()` | Timer is now started before being published; a `stop()` in that window leaves one stray no-op timer callback | Cancel-then-check pattern or a `_stopping` flag; benign until then |
-| S3-R5 | `tests/test_config.py` | `mag_offset` bool/non-finite rejection and the two-neighbour step-interval message have no tests | Add in stage 4 Task 5 |
+| S3-R4 | `src/rover/logger.py` `_schedule_flush`/`stop()` | [CLOSED 2026-09-23 167f4a2] Timer is now started before being published; a `stop()` in that window leaves one stray no-op timer callback | Cancel-then-check pattern or a `_stopping` flag; benign until then |
+| S3-R5 | `tests/test_config.py` | [CLOSED 2026-09-23 167f4a2] `mag_offset` bool/non-finite rejection and the two-neighbour step-interval message have no tests | Add in stage 4 Task 5 |
+
+### Upgrade hazards (from the stage 4 whole-branch review, merged 167f4a2)
+
+| ID | Where | What | Decision needed |
+|---|---|---|---|
+| S4-R1 | `deploy/install.sh`, `src/rover/config.py` | `install.sh` keeps an existing `/etc/rover/config.toml`. One installed from pre-stage-4 defaults still has `[power]`, `imu.fusion_output_hz`, `survey_in_*`, `rtcm_profile`, `logging.format` (now rejected, exit 2, and with RestartPreventExitStatus the unit stays down) and `status_schema_version = 1` (labels v2 payloads as v1). No rover is deployed yet, so nothing is affected today | Have `install.sh` flag retired keys, or have `load_config` warn instead of raise for this set; stage 5 docs carry the upgrade note either way |
 
 ## How to use this file
 
