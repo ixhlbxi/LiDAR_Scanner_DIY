@@ -11,6 +11,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from rover import main as main_mod
 
 
@@ -276,7 +278,7 @@ class _FlakyLidar:
     def stop(self) -> None:
         pass
 
-    def read_scan(self):
+    def read_scan(self, discard_stale: bool = True):
         type(self).calls += 1
         raise OSError(5, "simulated serial unplug")
 
@@ -469,3 +471,166 @@ save_images = true
     camera_records = [json.loads(line) for line in lines if '"type":"camera"' in line]
     assert camera_records, "expected at least one camera record in scan.jsonl"
     assert any(r["filename"].startswith("images/") for r in camera_records)
+
+
+class _FakeScan:
+    def __init__(self, n: int = 3) -> None:
+        from rover.lidar import LidarPoint, LidarScan
+
+        self.scan = LidarScan(
+            points=[
+                LidarPoint(angle=10.0 * i, distance=1.0 + i, intensity=100 + i) for i in range(n)
+            ],
+            lidar_ms_start=1000,
+            lidar_ms_end=1090,
+        )
+
+
+class _StaticLidar:
+    calls: list[bool] = []
+
+    def __init__(self, *_a, **_kw) -> None:
+        pass
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def read_scan(self, discard_stale: bool = True):
+        type(self).calls.append(discard_stale)
+        return _FakeScan().scan
+
+
+class _FakeStepper:
+    def __init__(self, *_a, **_kw) -> None:
+        self._angle = 0.0
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def current_angle(self) -> float:
+        return self._angle
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def step(self, steps: int) -> None:
+        self._angle += steps * (360.0 / 3200)
+
+
+class _FakeImu:
+    mag_calls: list[bool] = []
+
+    def __init__(self, *_a, **_kw) -> None:
+        pass
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def enable_magnetometer(self, enable: bool) -> None:
+        type(self).mag_calls.append(enable)
+
+    def drain(self):
+        from rover.imu import ImuSample
+
+        return [
+            ImuSample(
+                timestamp=1.0,
+                accel=(0, 0, 9.81),
+                gyro=(0, 0, 0),
+                mag=None,
+                orientation=(1, 0, 0, 0),
+            ),
+            ImuSample(
+                timestamp=1.005,
+                accel=(0, 0, 9.81),
+                gyro=(0, 0, 0),
+                mag=(1, 2, 3),
+                orientation=(1, 0, 0, 0),
+            ),
+        ]
+
+
+def _stage3_config(tmp_path: Path) -> Path:
+    cfg = tmp_path / "s3.toml"
+    cfg.write_text(
+        f"""
+[lidar]
+enabled = true
+scan_rate_hz = 10
+
+[stepper]
+enabled = true
+steps_per_rev = 3200
+step_interval_deg = 1.125
+
+[imu]
+enabled = true
+use_magnetometer = true
+
+[gnss]
+enabled = false
+[camera]
+enabled = false
+[ntrip]
+enabled = false
+[lora]
+enabled = false
+role = "disabled"
+[base_station_integration]
+enabled = false
+[telemetry]
+http_enabled = false
+[watchdog]
+enabled = false
+
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "s3"
+"""
+    )
+    return cfg
+
+
+def test_records_are_columnar_with_mast_angle_and_imu_batches(tmp_path: Path, monkeypatch) -> None:
+    import json
+
+    _StaticLidar.calls = []
+    _FakeImu.mag_calls = []
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
+    monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
+    assert main_mod.run(config_path=_stage3_config(tmp_path), duration_sec=0.6) == 0
+
+    session = next((tmp_path / "data").glob("s3_*"))
+    recs = [json.loads(line) for line in (session / "scan.jsonl").read_text().splitlines() if line]
+    lidar = [r for r in recs if r["type"] == "lidar"]
+    imu = [r for r in recs if r["type"] == "imu"]
+    assert lidar, "no lidar records"
+    r = lidar[0]
+    assert r["angle"] == [0.0, 10.0, 20.0] and r["distance"] == [1.0, 2.0, 3.0]
+    assert r["intensity"] == [100, 101, 102]
+    assert r["lidar_ms_start"] == 1000 and r["lidar_ms_end"] == 1090
+    assert r["mast_angle_deg"] == pytest.approx(1.125)  # after the first 10-microstep move
+    assert "points" not in r
+    assert len(lidar) >= 2 and lidar[1]["mast_angle_deg"] == pytest.approx(2.25)
+    # IMU batches
+    b = imu[0]
+    assert b["t"] == [1.0, 1.005] and b["mag"] == [None, [1, 2, 3]]
+    assert b["orientation"][0] == [1, 0, 0, 0]
+    # DEC-013: mag disabled before each step, re-enabled after settle
+    assert _FakeImu.mag_calls[:2] == [False, True]
+    # stale discard after a step
+    assert _StaticLidar.calls and all(_StaticLidar.calls)
