@@ -143,6 +143,18 @@ tracking file. Each carries its finding ID so the report and this list stay cros
 | S2-R3 | `src/rover/main.py` stepper failure branch | Warns every 0.5 s forever and its `continue` skips the telemetry publish, so SCAN_ERROR is never published | Gate it like the sensors; stage 4 touches the loop's publish block |
 | S2-R4 | `src/rover/logger.py` `write()` Full path | Drop-oldest takes `_lock`, which `_flush` holds across disk I/O, so a stalled disk blocks the producer; drained-but-unwritten records on a failed flush are not counted | Needs a small design choice (separate counter lock, `lost_records`) |
 
+### Pre-field-session blockers (from the stage 3 whole-branch review, merged 7ef5b1e)
+
+These need the owner and a bench target before any session is georeferenced; none is coded yet.
+
+| ID | Where | What | Decision needed |
+|---|---|---|---|
+| S3-R1 | `scripts/georef.py`, `src/rover/imu.py` | Madgwick's world frame is North-West-Up (x = magnetic north) and no declination is applied; georef adds ENU offsets to NWU points, so cloud azimuth in State Plane is arbitrary (with 6-DOF, yaw is the start-up heading; yaw is now stripped when no magnetometer) | Add the fixed NWU→ENU rotation plus a declination setting (about −11° in PA), or accept "orientation relative to first heading" and document it |
+| S3-R2 | `src/rover/lidar.py`, `docs/HARDWARE.md` | LDRobot documents LD19 angles increasing clockwise (left-handed), so the side-mount mapping (LiDAR y → body up) is right for only one of the two ways the sensor can stand on its side | Bench check with a target above the scanner; then pin the mount orientation in HARDWARE.md or negate the angle at parse |
+| S3-R3 | `docs/HARDWARE.md:451`, `scripts/georef.py` | HARDWARE.md says the IMU is on the rotating platform; the code assumes it is rigid to the fixed body. If it rides the mast, georef applies the mast angle twice | Owner confirms the IMU mount; if on the mast, georef takes yaw from the commanded angle only |
+| S3-R4 | `src/rover/logger.py` `_schedule_flush`/`stop()` | Timer is now started before being published; a `stop()` in that window leaves one stray no-op timer callback | Cancel-then-check pattern or a `_stopping` flag; benign until then |
+| S3-R5 | `tests/test_config.py` | `mag_offset` bool/non-finite rejection and the two-neighbour step-interval message have no tests | Add in stage 4 Task 5 |
+
 ## How to use this file
 
 - **Adding an item:** when you find a "rover side codes for X, sibling side
