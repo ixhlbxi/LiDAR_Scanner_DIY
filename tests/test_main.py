@@ -213,3 +213,106 @@ def test_ready_notified_even_when_watchdog_disabled(tmp_path: Path, monkeypatch)
     assert main_mod.run(config_path=config_path, duration_sec=0.5) == 0
     assert "READY=1\n" in sent
     assert any(m == "WATCHDOG=1\n" for m in sent), "heartbeats must flow when disabled too"
+
+
+def _enabled_lidar_config(tmp_path: Path) -> Path:
+    cfg = tmp_path / "lidar_on.toml"
+    cfg.write_text(
+        f"""
+[lidar]
+enabled = true
+
+[stepper]
+enabled = false
+
+[imu]
+enabled = false
+
+[gnss]
+enabled = false
+
+[camera]
+enabled = false
+
+[ntrip]
+enabled = false
+
+[lora]
+enabled = false
+role = "disabled"
+
+[base_station_integration]
+enabled = false
+
+[telemetry]
+http_enabled = false
+
+[watchdog]
+enabled = false
+
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "gate"
+"""
+    )
+    return cfg
+
+
+class _FlakyLidar:
+    """Stands in for LidarScanner: available, but every read raises OSError."""
+
+    calls = 0
+
+    def __init__(self, *_a, **_kw) -> None:
+        pass
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def read_scan(self):
+        type(self).calls += 1
+        raise OSError(5, "simulated serial unplug")
+
+
+def test_scan_loop_disables_sensor_after_repeated_oserror(tmp_path: Path, monkeypatch) -> None:
+    """OSError from a read must not abort the run, and after 5 failures the
+    sensor is skipped rather than re-read every iteration (T1-003)."""
+    _FlakyLidar.calls = 0
+    monkeypatch.setattr(main_mod, "LidarScanner", _FlakyLidar)
+    # No stepper in this config, so the loop paces itself on the idle settle;
+    # shrink it so 1.5 s yields well over five iterations.
+    monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 0.05)
+    exit_code = main_mod.run(config_path=_enabled_lidar_config(tmp_path), duration_sec=1.5)
+    assert exit_code == 0
+    assert _FlakyLidar.calls == 5, (
+        f"expected exactly 5 attempts before the gate trips, got {_FlakyLidar.calls}"
+    )
+
+
+def test_sensor_gate_trips_once_and_resets_on_success() -> None:
+    gate = main_mod._SensorGate("lidar", limit=3)
+    assert gate.record_failure(OSError("x")) is False
+    assert gate.record_failure(OSError("x")) is False
+    assert gate.record_failure(OSError("x")) is True  # trips on the 3rd
+    assert gate.tripped
+    assert gate.record_failure(OSError("x")) is False  # already tripped: no re-warn
+    gate.record_success()
+    assert not gate.tripped
+
+
+def test_settle_uses_stop_event(tmp_path: Path, monkeypatch) -> None:
+    """The settle pause must be interruptible: run() with a 1.0 s idle settle
+    should return well under 1 s after stop is set (T1-038 hygiene, in scope here)."""
+    config_path = _write_all_disabled_config(tmp_path)
+    stop = threading.Event()
+    threading.Timer(0.2, stop.set).start()
+    start = time.monotonic()
+    assert main_mod.run(config_path=config_path, duration_sec=10.0, stop_event=stop) == 0
+    assert time.monotonic() - start < 1.5

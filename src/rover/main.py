@@ -72,6 +72,17 @@ SCAN_SCANNING = 1
 SCAN_PAUSED = 2
 SCAN_ERROR = 3
 
+# Loop pace when there is no stepper to settle behind (bench / telemetry-only).
+# Module-level so tests can shrink it.
+_IDLE_SETTLE_SEC = 1.0
+
+# Exceptions a sensor read is allowed to fail with without aborting the run.
+# OSError covers serial.SerialException (cable pull) and I2C errno 121
+# (device not present) — both are OSError subclasses, so a bare
+# RuntimeError/TimeoutError catch previously let them escape and crash the
+# process. Module-level so it documents itself next to _IDLE_SETTLE_SEC.
+_SENSOR_ERRORS = (RuntimeError, TimeoutError, OSError)
+
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -217,6 +228,41 @@ def _stop_sensors(sensors: _Sensors) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _SensorGate:
+    """Counts consecutive read failures for one sensor and trips after *limit*.
+
+    A tripped gate makes the loop skip that sensor instead of re-raising or
+    re-logging every iteration (CLAUDE.md §5: degrade, never crash).
+    """
+
+    def __init__(self, name: str, limit: int = 5) -> None:
+        self.name = name
+        self.limit = limit
+        self.failures = 0
+        self.tripped = False
+
+    def record_failure(self, exc: BaseException) -> bool:
+        """Return True exactly once, on the failure that trips the gate."""
+        if self.tripped:
+            return False
+        self.failures += 1
+        logger.debug("%s read failed (%d/%d): %s", self.name, self.failures, self.limit, exc)
+        if self.failures >= self.limit:
+            self.tripped = True
+            logger.warning(
+                "%s: %d consecutive read failures — subsystem disabled for this session (last: %s)",
+                self.name,
+                self.failures,
+                exc,
+            )
+            return True
+        return False
+
+    def record_success(self) -> None:
+        self.failures = 0
+        self.tripped = False
+
+
 def _scan_loop(
     config: RoverConfig,
     sensors: _Sensors,
@@ -249,10 +295,13 @@ def _scan_loop(
         settle_sec = 1.0 / max(1, config.lidar.scan_rate_hz)
     else:
         steps_per_increment = 0
-        settle_sec = 1.0  # idle pace when nothing to step
+        settle_sec = _IDLE_SETTLE_SEC  # idle pace when nothing to step
 
     step_index = 0
     started_monotonic = time.monotonic()
+    lidar_gate = _SensorGate("lidar")
+    imu_gate = _SensorGate("imu")
+    camera_gate = _SensorGate("camera")
 
     while not stop_event.is_set():
         # Honor duration timeout for bench runs
@@ -275,23 +324,25 @@ def _scan_loop(
                 status.scan_state = SCAN_ERROR
                 stop_event.wait(0.5)
                 continue
-        time.sleep(settle_sec)
+        stop_event.wait(settle_sec)
 
         # --- LiDAR ---
         lidar_points: list = []
-        if sensors.lidar is not None and sensors.lidar.available:
+        if sensors.lidar is not None and sensors.lidar.available and not lidar_gate.tripped:
             try:
                 lidar_points = sensors.lidar.read_scan()
-            except (RuntimeError, TimeoutError) as e:
-                logger.debug("LiDAR read skipped: %s", e)
+                lidar_gate.record_success()
+            except _SENSOR_ERRORS as e:
+                lidar_gate.record_failure(e)
 
         # --- IMU ---
         imu_sample = None
-        if sensors.imu is not None and sensors.imu.available:
+        if sensors.imu is not None and sensors.imu.available and not imu_gate.tripped:
             try:
                 imu_sample = sensors.imu.read_sample()
-            except RuntimeError as e:
-                logger.debug("IMU read skipped: %s", e)
+                imu_gate.record_success()
+            except _SENSOR_ERRORS as e:
+                imu_gate.record_failure(e)
 
         # --- Camera (cadence-gated) ---
         image_relpath: str | None = None
@@ -300,11 +351,14 @@ def _scan_loop(
             and sensors.camera.available
             and sensors.camera.should_capture(step_index)
             and session_logger.session_dir is not None
+            and not camera_gate.tripped
         ):
             try:
                 image_relpath = sensors.camera.capture(session_logger.session_dir, step_index)
-            except RuntimeError as e:
-                logger.debug("Camera capture skipped: %s", e)
+            except _SENSOR_ERRORS as e:
+                camera_gate.record_failure(e)
+            else:
+                camera_gate.record_success()
 
         # --- Log records ---
         now = time.time()
