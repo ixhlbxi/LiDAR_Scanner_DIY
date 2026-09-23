@@ -404,12 +404,14 @@ def _strip_yaw(q):
     upper-left 2x2 block (standard Z-first Euler extraction), then
     left-multiply the matrix by R_z(-yaw) to cancel it —
     R_z(-yaw) @ R(q) keeps R(q)'s roll/pitch while zeroing its heading.
-    Used by session_to_pointcloud() when no magnetometer data is present in
-    the session (see its docstring / the INFO log it emits).
+    Used by session_to_pointcloud() on every scan to isolate the per-scan
+    tilt (roll/pitch) from the IMU quaternion before the per-sweep rest
+    heading (yaw) is applied on top of it — see the heading model in that
+    function's docstring.
     """
     r = _quat_to_rotmat(q)
-    yaw = math.atan2(float(r[1, 0]), float(r[0, 0]))
-    r_no_yaw = _rot_z(-math.degrees(yaw)) @ r
+    yaw = _yaw_deg(r)
+    r_no_yaw = _rot_z(-yaw) @ r
     return _rotmat_to_quat(r_no_yaw)
 
 

@@ -830,6 +830,26 @@ class TestHeadingModel:
         t = math.radians(10.0)
         np.testing.assert_allclose(xyz[0], [0.0, math.cos(t), math.sin(t)], atol=1e-9)
 
+    def test_scan_time_tilt_used_not_rest_time_tilt(self, tmp_path):
+        """test_tilt_applied_per_scan (brief-verbatim) sets scan_q == rest_q, so
+        it cannot tell whether the tilt came from the scan-time orientation or
+        the rest-time one. Here the rest orientation is LEVEL (identity, mag
+        present -> yaw_ref = 90 deg, magnetic heading) and only the scan-time
+        orientation is tilted 10 deg about X; at mast 90 deg the point must
+        show that tilt, which is possible only if tilt comes from q_t
+        (orientation_at the scan timestamp), not from the rest sample:
+        world = Rz(90) . Rx(10) . mast-rotated-forward = (-cos10, 0, sin10)."""
+        import math
+
+        h = math.radians(10.0) / 2
+        tilted = (math.cos(h), math.sin(h), 0.0, 0.0)
+        data = georef.load_session(
+            _heading_session(tmp_path, scan_q=tilted, with_gnss=False, mast_angles=(90.0,))
+        )
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        t = math.radians(10.0)
+        np.testing.assert_allclose(xyz[0], [-math.cos(t), 0.0, math.sin(t)], atol=1e-9)
+
     def test_platform_mount_matches_base_mount(self, tmp_path):
         """An IMU riding the mast reports R_base · Rz(mast). With mount =
         'platform' the mast rotation is removed before the tilt is taken, so
@@ -900,6 +920,37 @@ class TestHeadingModel:
         xyz, _i, _o = georef.session_to_pointcloud(data)
         np.testing.assert_allclose(xyz[0], [0.0, 0.8, -0.5], atol=1e-6)
 
+    def test_lever_arm_uses_world_rotation_not_mast_alone(self, tmp_path):
+        """test_lever_arm_on_axis and test_lever_arm_rotates_with_mast both use
+        mag=None (relative heading, level rest_q), so r_world is the identity
+        there and cannot show whether the arm subtraction actually rotates by
+        r_world or just by the mast. Here the base is tilted 10 deg about X
+        (mag off, so heading stays relative/yaw_ref=0, but r_world = Rx(10) is
+        NOT identity) with antenna_offset_m = [0.2, 0.0, 0.5] at mast 0.
+
+        By hand: forward point world = (1, 0, 0) (mast 0, X-axis is invariant
+        under an X-tilt, so the point itself doesn't visibly move). GNSS has
+        one fix == the origin, so no ENU offset. The arm is
+        r_world @ (Rz(0) @ a) = Rx(10) @ (0.2, 0, 0.5)
+          = (0.2, -0.5*sin10, 0.5*cos10),
+        so the exported point is (1,0,0) - that arm =
+        (0.8, 0.5*sin10, -0.5*cos10) -- NOT (0.8, 0, -0.5), which is what a
+        mast-only (r_world-less) subtraction would give."""
+        import math
+
+        h = math.radians(10.0) / 2
+        tilted = (math.cos(h), math.sin(h), 0.0, 0.0)
+        data = georef.load_session(
+            _heading_session(tmp_path, rest_q=tilted, mag=None, antenna_offset=[0.2, 0.0, 0.5])
+        )
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        t = math.radians(10.0)
+        expected = [0.8, 0.5 * math.sin(t), -0.5 * math.cos(t)]
+        np.testing.assert_allclose(xyz[0], expected, atol=1e-6)
+        # A mast-only subtraction (dropping r_world) would give (0.8, 0, -0.5)
+        # instead -- confirm the two are not the same point.
+        assert not np.allclose(xyz[0], [0.8, 0.0, -0.5], atol=1e-6)
+
     def test_old_session_without_geometry_or_events_loads(self, tmp_path):
         """Pre-stage-5 sessions: no geometry, no sweep field, no sweep_start."""
         sess = _make_session(tmp_path)
@@ -907,3 +958,122 @@ class TestHeadingModel:
         assert data.sweep_starts == {}
         xyz, _i, _o = georef.session_to_pointcloud(data)
         assert len(xyz) == 4
+
+    # -----------------------------------------------------------------------
+    # Multi-sweep pinning (fix round 1): the brief's own _heading_session
+    # always builds exactly one sweep, so none of the tests above can tell
+    # the per-sweep rest window, the old-session rest_end fallback, or the
+    # missing-sweep reuse rule apart from a bug that happens to look right on
+    # a single sweep. These build a SessionData directly (bypassing the JSONL
+    # round trip, which is already pinned by test_old_session_..._loads and
+    # the true/magnetic/relative label tests above) to isolate
+    # _rest_samples_by_sweep's window arithmetic precisely.
+    # -----------------------------------------------------------------------
+
+    def test_rest_window_excludes_other_sweeps_scan_time_and_post_start_samples(
+        self, tmp_path, caplog
+    ):
+        """Three sweeps:
+          - sweep 0's rest sample is at t=0.0 (NWU yaw 0 deg); a mag sample at
+            t=1.5 sits DURING sweep 0's own scans (first lidar t=1.0, last
+            t=2.0) and must not leak into sweep 1's rest window (it would, if
+            the window dropped its prev_end lower bound).
+          - sweep 1's rest sample is at t=3.0 (NWU yaw -90 deg,
+            sweep_starts[1]=3.1); a mag sample at t=3.2, just AFTER that
+            sweep_start, must not leak in either (it would, if the window
+            dropped its rest_end upper bound).
+          - sweep 2 has no rest samples at all (sweep_starts[2]=4.9 is used
+            only as a rest_end bound, no mag sample falls in it) and must
+            reuse sweep 1's yaw_ref, with exactly one WARNING naming it.
+        No declination (no GNSS), so yaw_ref = yaw(Rz(90) . R(rest_q)):
+        sweep 0 (NWU 0) -> ENU +Y forward; sweep 1 and the reused sweep 2
+        (NWU -90) -> ENU +X forward."""
+        import math
+
+        def qz(deg):
+            half = math.radians(deg) / 2
+            return [math.cos(half), 0.0, 0.0, math.sin(half)]
+
+        def lidar(t, sweep):
+            return {
+                "type": "lidar",
+                "timestamp": t,
+                "mast_angle_deg": 0.0,
+                "angle": [0.0],
+                "distance": [1.0],
+                "intensity": [1],
+                "sweep": sweep,
+            }
+
+        imu = [
+            {"timestamp": 0.0, "orientation": qz(0.0), "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 1.5, "orientation": qz(45.0), "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 3.0, "orientation": qz(-90.0), "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 3.2, "orientation": qz(45.0), "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 5.0, "orientation": qz(45.0), "mag": None},
+        ]
+        session = georef.SessionData(
+            metadata={},
+            lidar_records=[lidar(1.0, 0), lidar(2.0, 0), lidar(3.5, 1), lidar(5.0, 2)],
+            imu_records=imu,
+            gnss_records=[],
+            sweep_starts={0: 0.5, 1: 3.1, 2: 4.9},
+        )
+        imu_sorted = sorted(imu, key=lambda r: r["timestamp"])
+        rest = georef._rest_samples_by_sweep(session, imu_sorted)
+        assert [s["timestamp"] for s in rest[0]] == [0.0]
+        assert [s["timestamp"] for s in rest[1]] == [3.0]
+        assert rest[2] == []
+
+        info: dict = {}
+        with caplog.at_level("WARNING", logger="georef"):
+            xyz, _i, _o = georef.session_to_pointcloud(session, info=info)
+        np.testing.assert_allclose(xyz[0], [0.0, 1.0, 0.0], atol=1e-9)  # sweep 0 @ t=1.0
+        np.testing.assert_allclose(xyz[1], [0.0, 1.0, 0.0], atol=1e-9)  # sweep 0 @ t=2.0
+        np.testing.assert_allclose(xyz[2], [1.0, 0.0, 0.0], atol=1e-9)  # sweep 1
+        np.testing.assert_allclose(xyz[3], [1.0, 0.0, 0.0], atol=1e-9)  # sweep 2, reused
+        reuse_warnings = [
+            r.message
+            for r in caplog.records
+            if r.levelname == "WARNING" and "rest heading" in r.message
+        ]
+        assert len(reuse_warnings) == 1
+        assert "2" in reuse_warnings[0]
+
+    def test_old_session_rest_end_falls_back_to_first_lidar_timestamp(self):
+        """No sweep_start events at all (pre-stage-5 session): rest_end for
+        sweep 0 must fall back to its FIRST lidar timestamp (10.0), not its
+        last (11.0) and not +inf. A mag sample just before 10.0 counts; one
+        just after must not, even though it is still well before the sweep's
+        last scan."""
+
+        def lidar(t):
+            return {
+                "type": "lidar",
+                "timestamp": t,
+                "mast_angle_deg": 0.0,
+                "angle": [0.0],
+                "distance": [1.0],
+                "intensity": [1],
+                "sweep": 0,
+            }
+
+        imu = [
+            {"timestamp": 9.9, "orientation": [1.0, 0.0, 0.0, 0.0], "mag": [1.0, 0.0, 0.0]},
+            {"timestamp": 10.1, "orientation": [1.0, 0.0, 0.0, 0.0], "mag": [1.0, 0.0, 0.0]},
+        ]
+        session = georef.SessionData(
+            metadata={},
+            lidar_records=[lidar(10.0), lidar(11.0)],
+            imu_records=imu,
+            gnss_records=[],
+            # sweep_starts intentionally empty: no sweep_start events.
+        )
+        rest = georef._rest_samples_by_sweep(session, imu)
+        assert [s["timestamp"] for s in rest[0]] == [9.9]
+
+    def test_circular_mean_wraps_across_plus_minus_180(self):
+        """Rest samples at yaw ~= +179 deg and -179 deg straddle the wrap
+        boundary; their true circular mean is 180 deg. A naive arithmetic
+        mean would silently give 0 deg -- the opposite heading."""
+        assert georef._circular_mean_deg([179.0, -179.0]) == pytest.approx(180.0, abs=1e-6)
