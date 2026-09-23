@@ -4,7 +4,6 @@ integration, telemetry HTTP. No hardware required.
 See DEC-030 through DEC-034 in docs/DECISIONS.md.
 """
 
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -17,17 +16,6 @@ from rover.config import (
     TelemetryConfig,
     load_config,
 )
-
-
-@pytest.fixture
-def tmp_toml(tmp_path):
-    def _write(content: str) -> Path:
-        p = tmp_path / "test_config.toml"
-        p.write_text(textwrap.dedent(content))
-        return p
-
-    return _write
-
 
 # ---------------------------------------------------------------------------
 # Session (DEC-030)

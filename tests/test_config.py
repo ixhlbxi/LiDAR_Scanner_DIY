@@ -1,6 +1,5 @@
 """Unit tests for rover.config — runs anywhere, no hardware required."""
 
-import textwrap
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -10,19 +9,6 @@ from rover.config import (
     RoverConfig,
     load_config,
 )
-
-
-@pytest.fixture
-def tmp_toml(tmp_path):
-    """Helper: write TOML content to a temp file and return its path."""
-
-    def _write(content: str) -> Path:
-        p = tmp_path / "test_config.toml"
-        p.write_text(textwrap.dedent(content))
-        return p
-
-    return _write
-
 
 # ---------------------------------------------------------------------------
 # Defaults

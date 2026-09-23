@@ -30,7 +30,7 @@ from scripts import georef  # noqa: E402
 def _write_all_disabled_config(tmp_path: Path) -> Path:
     """Write a TOML that disables every sensor and every telemetry channel.
 
-    This is the minimal valid config for an off-Pi bench run.
+    Keeps only keys that differ from defaults.
     """
     cfg = tmp_path / "rover_all_disabled.toml"
     cfg.write_text(
@@ -41,65 +41,28 @@ log_level = "WARNING"
 
 [lidar]
 enabled = false
-port = "/dev/null"
-baud = 230400
-scan_rate_hz = 10
 
 [stepper]
 enabled = false
-steps_per_rev = 3200
-rpm = 1.0
-step_interval_deg = 1.575
-direction_pin = 17
-step_pin = 27
-enable_pin = 22
 
 [imu]
 enabled = false
-bus = 1
-address = 0x68
-sample_rate_hz = 200
-use_magnetometer = false
-fusion_beta = 0.1
 
 [gnss]
 enabled = false
-port = "/dev/null"
-baud = 115200
-
-[ntrip]
-enabled = false
-client_location = "pi"
-
-[lora]
-enabled = false
-port = "/dev/null"
-role = "disabled"
-
-[base_station_integration]
-enabled = false
-
-[telemetry]
-http_enabled = false
 
 [camera]
 enabled = false
-resolution = [640, 480]
-capture_cadence = 1
-jpeg_quality = 85
-output_folder = "images"
+
+[lora]
+enabled = false
+
+[watchdog]
+enabled = false
 
 [logging]
 output_dir = "{(tmp_path / "data").as_posix()}"
 session_prefix = "test"
-flush_interval_sec = 1.0
-rotate_size_mb = 0
-save_images = false
-
-[watchdog]
-enabled = false
-timeout_sec = 30
-heartbeat_interval_sec = 5
 """
     )
     return cfg

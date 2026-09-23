@@ -42,6 +42,7 @@ PACKET_LENGTH = 47
 POINTS_PER_PACKET = 12
 
 # CRC8 lookup table for LD19 (polynomial 0x4D, LDRobot standard)
+# fmt: skip
 _CRC_TABLE = [
     0x00,
     0x4D,

@@ -5,7 +5,6 @@ See DEC-033 in docs/DECISIONS.md and §3 of docs/BASE_STATION_INTEGRATION.md.
 """
 
 import json
-import textwrap
 import time
 import urllib.request
 from pathlib import Path
@@ -24,17 +23,6 @@ from rover.telemetry import (
     build_payload,
     status_from_config,
 )
-
-
-@pytest.fixture
-def tmp_toml(tmp_path):
-    def _write(content: str) -> Path:
-        p = tmp_path / "test_config.toml"
-        p.write_text(textwrap.dedent(content))
-        return p
-
-    return _write
-
 
 # ---------------------------------------------------------------------------
 # atomic_write_json — Base-Station-compatible helper
