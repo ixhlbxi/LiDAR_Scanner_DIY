@@ -28,6 +28,8 @@ Changelog:
                         real rpi-lgpio 0.6 wheel installs at the SAME path as
                         legacy RPi.GPIO (RPi/GPIO/__init__.py) and the two
                         were indistinguishable by path alone (final review C1).
+    0.3.0  2026-09-23  current_step property; per-call rpm for the sweep rewind
+                        (Task 2, Stage 5 scan geometry).
 """
 
 from __future__ import annotations
@@ -116,6 +118,11 @@ class StepperMotor:
         return self._available
 
     @property
+    def current_step(self) -> int:
+        """Signed microstep count from home (the position at start())."""
+        return self._current_step
+
+    @property
     def current_angle(self) -> float:
         """Current angle in degrees."""
         return self._current_step * self._degrees_per_step
@@ -181,11 +188,13 @@ class StepperMotor:
         self._available = False
         logger.info("Stepper stopped, motor disabled")
 
-    def step(self, steps: int) -> None:
+    def step(self, steps: int, rpm: float | None = None) -> None:
         """Move the motor by the given number of steps (negative = reverse).
 
         Args:
             steps: Number of steps to move. Positive = forward, negative = reverse.
+            rpm: Pace for this move only; None uses the configured scan rpm.
+                 The sweep rewind passes [stepper].rewind_rpm here.
 
         Raises:
             RuntimeError: If the stepper is not available.
@@ -195,6 +204,10 @@ class StepperMotor:
 
         if steps == 0:
             return
+
+        step_interval = (
+            self._step_interval if rpm is None else 60.0 / (rpm * self._config.steps_per_rev)
+        )
 
         # Set direction
         direction = GPIO.HIGH if steps > 0 else GPIO.LOW
@@ -213,7 +226,7 @@ class StepperMotor:
 
             # Pace to target interval
             pulse_time = time.monotonic() - t_before
-            sleep_time = self._step_interval - pulse_time
+            sleep_time = step_interval - pulse_time
             if sleep_time > 0:
                 time.sleep(sleep_time)
 

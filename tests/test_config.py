@@ -501,3 +501,56 @@ class TestDeadConfigRemoved:
         """RoverConfig should not have a .power attribute."""
         cfg = load_config()
         assert not hasattr(cfg, "power")
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: Scan Geometry Config (Task 2)
+# ---------------------------------------------------------------------------
+
+
+class TestStage5GeometryKeys:
+    def test_defaults(self):
+        cfg = load_config()
+        assert cfg.stepper.sweep_deg == 360.0
+        assert cfg.stepper.rewind_rpm == 10.0
+        assert cfg.stepper.rest_before_sweep_sec == 2.0
+        assert cfg.imu.mount == "base"
+        assert cfg.calibration.antenna_offset_m is None
+
+    def test_default_toml_matches_defaults(self):
+        cfg = load_config(Path("config/default.toml"))
+        assert cfg.stepper.sweep_deg == 360.0
+        assert cfg.stepper.rewind_rpm == 10.0
+        assert cfg.imu.mount == "base"
+
+    @pytest.mark.parametrize("value", [0, -10.0, 360.5, 720])
+    def test_sweep_deg_range(self, tmp_toml, value):
+        p = tmp_toml(f"[stepper]\nsweep_deg = {value}\n")
+        with pytest.raises(ValueError, match=r"\[stepper\] sweep_deg"):
+            load_config(p)
+
+    def test_sweep_smaller_than_one_increment_rejected(self, tmp_toml):
+        p = tmp_toml("[stepper]\nsweep_deg = 1.0\n")  # default increment is 1.575°
+        with pytest.raises(ValueError, match=r"\[stepper\] sweep_deg"):
+            load_config(p)
+
+    def test_rewind_rpm_positive(self, tmp_toml):
+        p = tmp_toml("[stepper]\nrewind_rpm = 0\n")
+        with pytest.raises(ValueError, match=r"\[stepper\] rewind_rpm"):
+            load_config(p)
+
+    def test_rest_before_sweep_non_negative(self, tmp_toml):
+        p = tmp_toml("[stepper]\nrest_before_sweep_sec = -1\n")
+        with pytest.raises(ValueError, match=r"\[stepper\] rest_before_sweep_sec"):
+            load_config(p)
+
+    def test_mount_values(self, tmp_toml):
+        assert load_config(tmp_toml('[imu]\nmount = "platform"\n')).imu.mount == "platform"
+        with pytest.raises(ValueError, match=r"\[imu\] mount"):
+            load_config(tmp_toml('[imu]\nmount = "mast"\n'))
+
+    def test_antenna_offset(self, tmp_toml):
+        cfg = load_config(tmp_toml("[calibration]\nantenna_offset_m = [0.0, 0.0, 0.35]\n"))
+        assert cfg.calibration.antenna_offset_m == [0.0, 0.0, 0.35]
+        with pytest.raises(ValueError, match=r"\[calibration\] antenna_offset_m"):
+            load_config(tmp_toml("[calibration]\nantenna_offset_m = [0.0, 0.35]\n"))

@@ -335,3 +335,38 @@ def test_start_refuses_legacy_backend(stepper_config, monkeypatch):
     m = stepper.StepperMotor(stepper_config)
     m.start()
     assert m.available is False
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: Scan Geometry API (Task 2)
+# ---------------------------------------------------------------------------
+
+
+class TestStage5StepperApi:
+    @patch("rover.stepper.time")
+    def test_current_step_tracks_moves(self, mock_time, stepper_config, mock_gpio):
+        mock_time.monotonic.return_value = 0.0
+        from rover.stepper import StepperMotor
+
+        m = StepperMotor(stepper_config)
+        m.start()
+        m.step(14)
+        m.step(-4)
+        assert m.current_step == 10
+
+    @patch("rover.stepper.time")
+    def test_rpm_override_changes_pacing(self, mock_time, stepper_config, mock_gpio):
+        """rpm=None paces at the configured scan rate; rpm=60 paces 60x faster.
+        The pacing sleep is the LAST sleep of a one-step move (the 1 ms
+        direction-setup sleep and the 2 µs pulse sleep come before it)."""
+        mock_time.monotonic.return_value = 0.0
+        from rover.stepper import StepperMotor
+
+        m = StepperMotor(stepper_config)  # rpm = 1.0, 3200 steps/rev
+        m.start()
+        m.step(1)
+        slow = mock_time.sleep.call_args_list[-1].args[0]
+        m.step(1, rpm=60.0)
+        fast = mock_time.sleep.call_args_list[-1].args[0]
+        assert slow == pytest.approx(60.0 / 3200, rel=1e-6)  # 1 rpm → 18.75 ms/step
+        assert fast == pytest.approx(1.0 / 3200, rel=1e-6)  # 60 rpm → 0.3125 ms/step

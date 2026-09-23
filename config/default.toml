@@ -29,6 +29,9 @@ step_interval_deg = 1.575         # 14 microsteps at 3200/rev; MUST be a multipl
 direction_pin = 17                # BCM GPIO
 step_pin = 27                     # BCM GPIO
 enable_pin = 22                   # BCM GPIO (active low)
+sweep_deg = 360.0                 # DEC-015 (amended 2026-09-23): 360° forward, then rewind; never more (no slip ring)
+rewind_rpm = 10.0                 # rewind speed; no data is logged while rewinding
+rest_before_sweep_sec = 2.0       # hold still before each sweep so the rest heading can be read
 
 [imu]
 enabled = true
@@ -37,6 +40,7 @@ address = 0x68                    # MPU-9250 address (or 0x69)
 sample_rate_hz = 200              # IMU polling rate
 use_magnetometer = false          # 9-DOF needs [calibration].mag_offset first (stage 3); DEC-013 gating applies when true
 fusion_beta = 0.1                 # Madgwick filter gain
+mount = "base"                    # "base" (fixed body) | "platform" (turns with the mast); decided at the bench (S3-R3)
 
 [gnss]
 enabled = true
@@ -107,3 +111,4 @@ heartbeat_interval_sec = 5        # Internal heartbeat rate
 # lidar_to_imu_rotation = [1.0, 0.0, 0.0, 0.0]   # [w, x, y, z] quaternion
 # imu_to_gnss_translation = [0.0, 0.0, 0.30]      # [x, y, z] meters
 # mag_offset = [0.0, 0.0, 0.0]                   # hard-iron offset, µT, body frame — measure before enabling use_magnetometer
+# antenna_offset_m = [0.0, 0.0, 0.35]           # LiDAR centre → antenna phase centre, metres, platform frame at mast 0
