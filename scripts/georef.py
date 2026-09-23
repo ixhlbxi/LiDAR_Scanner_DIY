@@ -37,15 +37,27 @@ does not raise when the GEOID18 grid is unavailable locally and the network
 is off or fails — it silently returns a "ballpark" transform that leaves
 ellipsoidal heights unchanged — so the NAVD88 path checks transformer
 availability explicitly and refuses any result whose undulation is under 1 m
-everywhere (`GeoidUnavailable`). When that happens (or the grid genuinely
-can't be fetched — `projsync --file us_noaa_g2018u0.tif` installs it), the
-ellipsoidal files are still written, `export.json` names the failure, and the
-process exits **3**. An unprojected export (local ENU, or a units mismatch
-that dropped the CRS label) keeps the single `<prefix>.{ply,las}` naming and
-carries ellipsoidal/relative heights only — NAVD88 needs a real horizontal
-CRS to locate the geoid. Every export also writes `export/export.json`,
-naming each file's horizontal and vertical datum plus the heading reference,
-declination, IMU mount and antenna offset used to build the cloud (Task 6).
+anywhere across the point cloud, not merely on average (`GeoidUnavailable`).
+When that happens (or the grid genuinely can't be fetched — `projsync --file
+us_noaa_g2018u0.tif` installs it), the ellipsoidal files are still written,
+`export.json` names the failure, and the process exits **3**.
+
+A units/CRS mismatch (`--units` disagrees with the target CRS's native unit)
+shares that exit code for a different reason: `project_to_crs` still converts
+the values but drops the CRS label (`epsg_to_embed == 0`), and — when a CRS
+was actually requested and a GNSS origin exists to project from — that is
+reported honestly rather than as local ENU: the manifest's `horizontal` names
+the dropped EPSG and the unit conversion, `vertical` stays "ellipsoidal
+NAD83(2011)", `navd88_error` names the mismatch (NAVD88 needs the CRS's own
+unit to locate the geoid), an ERROR is logged, and the process exits **3**
+with only the single `<prefix>.{ply,las}` written — there is no embedded CRS
+to split an ellipsoidal/NAVD88 pair on. True local-ENU output — no CRS ever
+requested (`target_crs_epsg == 0`), or no GNSS fix to project from — keeps
+its original exit-0 labels ("local ENU (ellipsoidal offsets)" /
+"LiDAR-relative") and carries ellipsoidal/relative heights only. Every export
+also writes `export/export.json`, naming each file's horizontal and vertical
+datum plus the heading reference, declination, IMU mount and antenna offset
+used to build the cloud (Task 6).
 
 Defaults:
     * `target_crs_epsg = 0` (the personal-profile default) → no CRS conversion;
@@ -64,6 +76,9 @@ Failure modes:
       this case either, for the same reason.
     * GEOID18 grid unavailable → ellipsoidal files written, NAVD88 skipped,
       exit 3.
+    * `--units` disagrees with the target CRS's native unit, and a GNSS
+      origin exists → values converted but the CRS label is dropped; the
+      manifest and PLY comments say so, NAVD88 is not attempted, exit 3.
 
 Decision references: DEC-014, DEC-022, DEC-024, DEC-034.
 
@@ -71,6 +86,18 @@ Dependencies: numpy (required); laspy + pyproj (optional, install via `[post]`
 extra).
 
 Changelog:
+    0.15.1  2026-09-23  Final review fixes: _rest_samples_by_sweep keeps only
+                        the last _REST_WINDOW_SEC (1.0 s) before each sweep's
+                        rest_end, matching main.py's sweep-0 heading-settle
+                        wait, so an early unconverged mag sample earlier in a
+                        long rest cannot set the heading (I1); a units/CRS
+                        mismatch that dropped the CRS label is now labelled
+                        truthfully in export.json and the PLY comments
+                        (never "local ENU") and exits 3 instead of 0 (I2);
+                        navd88_from_enu's ballpark guard now checks the
+                        MINIMUM |undulation| across all points, not the
+                        maximum, so a transform that is ballpark for only
+                        some points is still refused (M2).
     0.15.0  2026-09-23  Dual export for projected CRSs: <prefix>_ellipsoidal
                         and <prefix>_navd88 (GEOID18, EPSG:<H>+6360/5703, source
                         NAD83(2011) 3D EPSG:6319); refuses PROJ's silent ballpark
@@ -547,8 +574,22 @@ def _circular_mean_deg(angles: list[float]) -> float:
     return math.degrees(math.atan2(s, c))
 
 
+_REST_WINDOW_SEC = 1.0  # only the last second before rest_end is trusted (I1)
+
+
 def _rest_samples_by_sweep(session: SessionData, imu_sorted: list[dict]) -> dict[int, list[dict]]:
-    """Mag-bearing IMU samples in (end of previous sweep, rest end of this sweep]."""
+    """Mag-bearing IMU samples in
+    (max(end of previous sweep, rest end - _REST_WINDOW_SEC), rest end of this sweep].
+
+    Restricted to the last _REST_WINDOW_SEC (not the whole rest) because the
+    Madgwick filter run at acquisition time has not necessarily converged
+    earlier in a long rest (I1: measured up to ~30 s for a 170° heading with
+    the repo's beta=0.1 filter) — main.py's sweep-0 heading-settle wait
+    (_HEADING_SETTLE_WINDOW_SEC et al.) targets exactly this trailing window,
+    so the samples it produces are the ones this function keeps. Still
+    excludes anything at or before the previous sweep's own last scan, so an
+    in-sweep sample can never leak into the next sweep's rest window.
+    """
     by_sweep: dict[int, list[dict]] = {}
     for rec in session.lidar_records:
         by_sweep.setdefault(int(rec.get("sweep", 0)), []).append(rec)
@@ -558,10 +599,11 @@ def _rest_samples_by_sweep(session: SessionData, imu_sorted: list[dict]) -> dict
         recs = by_sweep[k]
         first = min(r["timestamp"] for r in recs)
         rest_end = session.sweep_starts.get(k, first)
+        window_start = max(prev_end, rest_end - _REST_WINDOW_SEC)
         out[k] = [
             s
             for s in imu_sorted
-            if s.get("mag") is not None and prev_end < s["timestamp"] <= rest_end
+            if s.get("mag") is not None and window_start < s["timestamp"] <= rest_end
         ]
         prev_end = max(r["timestamp"] for r in recs)
     return out
@@ -876,9 +918,12 @@ def navd88_from_enu(xyz, origin_lat_lon_alt, target_epsg: int):
     xs, ys, zs = transformer.transform(lons, lats, alts)
     zs = np.asarray(zs, dtype=float)
     undulation = np.asarray(alts, dtype=float) - zs * unit_m
-    # CONUS geoid heights run about -8 m to -53 m; |N| < 1 m everywhere means
-    # PROJ handed back ellipsoidal heights through a ballpark transform.
-    if not np.all(np.isfinite(zs)) or float(np.max(np.abs(undulation))) < 1.0:
+    # CONUS geoid heights run about -8 m to -53 m; |N| < 1 m ANYWHERE means at
+    # least one point came back through PROJ's ballpark transform (unchanged
+    # ellipsoidal height) even if others look like real geoid values — so the
+    # guard checks the MINIMUM |undulation|, not the maximum (M2): a max-based
+    # check would pass a result that is only PARTLY ballpark.
+    if not np.all(np.isfinite(zs)) or float(np.min(np.abs(undulation))) < 1.0:
         raise GeoidUnavailable(
             "transform returned ellipsoidal heights (ballpark) — refusing to label them NAVD88"
         )
@@ -1049,6 +1094,16 @@ def main(argv: list[str] | None = None) -> int:
     files: list[dict] = []
     navd88_error: str | None = None
     exit_code = 0
+    # A CRS was requested and a GNSS origin exists, but project_to_crs dropped
+    # the CRS label because --units disagreed with the CRS's native unit
+    # (T1-A) -- distinct from "no CRS was ever requested" (target_epsg == 0)
+    # or "nothing to project from" (no GNSS fix, origin[0] is None), both of
+    # which keep the local-ENU/LiDAR-relative labels in the `else` branch
+    # below (I2). The coordinate VALUES are still correct here -- only the
+    # CRS label was dropped -- so this must not be reported as "local ENU",
+    # and NAVD88 cannot be attempted without a real horizontal CRS to locate
+    # the geoid.
+    units_crs_mismatch = target_epsg != 0 and epsg_to_embed == 0 and origin[0] is not None
     if epsg_to_embed != 0:
         name = f"{prefix}_ellipsoidal"
         vertical = "ellipsoidal NAD83(2011)"
@@ -1087,6 +1142,24 @@ def main(argv: list[str] | None = None) -> int:
                     "vertical": vertical,
                 }
             )
+    elif units_crs_mismatch:
+        vertical = "ellipsoidal NAD83(2011)"
+        horizontal = f"EPSG:{target_epsg} values converted to {units}, CRS label dropped"
+        navd88_error = (
+            f"units/CRS mismatch: --units {units} on EPSG:{target_epsg}; "
+            "re-export with the CRS's native unit to get NAVD88"
+        )
+        logger.error("NAVD88 export skipped: %s", navd88_error)
+        exit_code = 3
+        export_ply(
+            out_dir / f"{prefix}.ply",
+            xyz,
+            intensity,
+            comments=(f"vertical {vertical}", f"horizontal {horizontal}"),
+        )
+        if not args.no_las:
+            export_las(out_dir / f"{prefix}.las", xyz, intensity, 0)
+        files.append({"path": f"{prefix}.ply", "horizontal": horizontal, "vertical": vertical})
     else:
         vertical = "local ENU (ellipsoidal offsets)" if origin[0] is not None else "LiDAR-relative"
         export_ply(out_dir / f"{prefix}.ply", xyz, intensity, comments=(f"vertical {vertical}",))

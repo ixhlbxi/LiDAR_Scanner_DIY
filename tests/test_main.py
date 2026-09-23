@@ -7,6 +7,7 @@ sensor init failures.
 
 from __future__ import annotations
 
+import math
 import sys
 import threading
 import time
@@ -532,6 +533,12 @@ class _FakeImu:
             ),
         ]
 
+    def latest(self):
+        """None by default: the sweep-0 heading-settle helper (I1) then skips
+        immediately, adding no extra wait, so existing tests' timing is
+        unaffected. Subclasses override this to exercise the settle path."""
+        return None
+
 
 def _stage3_config(tmp_path: Path) -> Path:
     cfg = tmp_path / "s3.toml"
@@ -952,7 +959,7 @@ def test_sweep_rewinds_and_never_exceeds_sweep_deg(tmp_path: Path, monkeypatch) 
             return super().publish(status)
 
     monkeypatch.setattr(main_mod, "TelemetryRouter", _SpyRouter)
-    assert main_mod.run(config_path=_sweep_config(tmp_path), duration_sec=2.5) == 0
+    assert main_mod.run(config_path=_sweep_config(tmp_path), duration_sec=4.0) == 0
 
     pos = peak = 0
     for steps, _rpm in _FakeStepper.moves:
@@ -1012,7 +1019,7 @@ def test_no_records_logged_during_rewind(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
     monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
     monkeypatch.setattr(main_mod, "ImuDriver", _MarkingImu)
-    assert main_mod.run(config_path=_sweep_config(tmp_path), duration_sec=2.5) == 0
+    assert main_mod.run(config_path=_sweep_config(tmp_path), duration_sec=4.0) == 0
     recs, _meta = _records(tmp_path, "sw")
     assert _MarkingImu.marked >= 1, "no rewind drain happened — the test proves nothing"
     logged_orientations = [o for r in recs if r["type"] == "imu" for o in r["orientation"]]
@@ -1112,3 +1119,169 @@ def test_return_home_failure_is_logged_not_raised(tmp_path: Path, monkeypatch) -
     recs, _meta = _records(tmp_path, "sw")
     fails = [r for r in recs if r.get("event") == "return_home_failed"]
     assert len(fails) == 1 and fails[0]["details"]["steps_from_home"] > 0
+
+
+# ---------------------------------------------------------------------------
+# I1: sweep 0's rest heading waits for the Madgwick filter to settle
+# ---------------------------------------------------------------------------
+
+
+def _yaw_quat(deg: float) -> tuple[float, float, float, float]:
+    """Scalar-first quaternion for a pure yaw rotation of *deg* degrees."""
+    half = math.radians(deg) / 2.0
+    return (math.cos(half), 0.0, 0.0, math.sin(half))
+
+
+class _ConvergingImu:
+    """latest().orientation's yaw converges exponentially toward *target_deg*
+    with time constant *tau_sec* — stands in for an unconverged Madgwick
+    filter that settles quickly enough for a fast test."""
+
+    def __init__(self, target_deg: float = 90.0, tau_sec: float = 0.03) -> None:
+        self._t0 = time.monotonic()
+        self._target = target_deg
+        self._tau = tau_sec
+
+    def latest(self):
+        from rover.imu import ImuSample
+
+        t = time.monotonic() - self._t0
+        yaw = self._target * (1.0 - math.exp(-t / self._tau))
+        return ImuSample(
+            timestamp=time.time(),
+            accel=(0, 0, 9.81),
+            gyro=(0, 0, 0),
+            mag=(1, 2, 3),
+            orientation=_yaw_quat(yaw),
+        )
+
+
+class _NeverSettlingImu:
+    """latest().orientation's yaw climbs steadily and never stabilizes."""
+
+    def __init__(self, deg_per_sec: float = 90.0) -> None:
+        self._t0 = time.monotonic()
+        self._rate = deg_per_sec
+
+    def latest(self):
+        from rover.imu import ImuSample
+
+        t = time.monotonic() - self._t0
+        return ImuSample(
+            timestamp=time.time(),
+            accel=(0, 0, 9.81),
+            gyro=(0, 0, 0),
+            mag=(1, 2, 3),
+            orientation=_yaw_quat(self._rate * t),
+        )
+
+
+class _NoSampleImu:
+    def latest(self):
+        return None
+
+
+def test_heading_settle_converges_within_tolerance(monkeypatch) -> None:
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_WINDOW_SEC", 0.05)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_TOL_DEG", 0.5)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_MAX_SEC", 2.0)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_POLL_SEC", 0.01)
+    elapsed, settled = main_mod._wait_for_heading_settle(
+        _ConvergingImu(target_deg=90.0, tau_sec=0.03), threading.Event(), watchdog=None
+    )
+    assert settled is True
+    assert elapsed < 2.0  # converged well before the cap
+
+
+def test_heading_settle_caps_and_warns_when_never_settled(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_WINDOW_SEC", 0.02)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_TOL_DEG", 0.5)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_MAX_SEC", 0.05)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_POLL_SEC", 0.01)
+    with caplog.at_level("WARNING", logger="rover.main"):
+        elapsed, settled = main_mod._wait_for_heading_settle(
+            _NeverSettlingImu(), threading.Event(), watchdog=None
+        )
+    assert settled is False
+    assert elapsed >= 0.05 - 1e-3
+    assert any("not settled" in r.message for r in caplog.records)
+
+
+def test_heading_settle_skips_immediately_with_no_sample() -> None:
+    elapsed, settled = main_mod._wait_for_heading_settle(
+        _NoSampleImu(), threading.Event(), watchdog=None
+    )
+    assert elapsed == 0.0
+    assert settled is False
+
+
+def test_heading_settle_returns_promptly_when_stop_event_is_set(monkeypatch) -> None:
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_MAX_SEC", 60.0)
+    stop_event = threading.Event()
+    stop_event.set()
+    started = time.monotonic()
+    elapsed, settled = main_mod._wait_for_heading_settle(
+        _ConvergingImu(), stop_event, watchdog=None
+    )
+    assert time.monotonic() - started < 1.0
+    assert settled is False
+    assert elapsed < 1.0
+
+
+def test_heading_settle_heartbeats_the_watchdog_during_the_wait(monkeypatch) -> None:
+    """The main loop's own heartbeat only runs at the top of each iteration —
+    too infrequent once this wait can run up to _HEADING_SETTLE_MAX_SEC."""
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_MAX_SEC", 0.05)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_POLL_SEC", 0.01)
+    beats: list[float] = []
+
+    class _SpyWatchdog:
+        def heartbeat(self) -> None:
+            beats.append(time.monotonic())
+
+    main_mod._wait_for_heading_settle(_NeverSettlingImu(), threading.Event(), _SpyWatchdog())
+    assert len(beats) >= 2
+
+
+def test_sweep0_rest_records_settle_details(tmp_path: Path, monkeypatch) -> None:
+    """A main-loop test: sweep 0's sweep_start details carry the actual rest
+    seconds (configured rest + any extra settle wait) and whether the
+    heading settled; later sweeps are unchanged (heading_settled: null)."""
+
+    class _SettlingImu(_FakeImu):
+        """A fixed, unmoving orientation so the settle converges as soon as
+        one window has elapsed."""
+
+        def latest(self):
+            from rover.imu import ImuSample
+
+            return ImuSample(
+                timestamp=time.time(),
+                accel=(0, 0, 9.81),
+                gyro=(0, 0, 0),
+                mag=(1, 2, 3),
+                orientation=(1.0, 0.0, 0.0, 0.0),
+            )
+
+    _FakeStepper.moves = []
+    _FakeImu.mag_calls = []
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_WINDOW_SEC", 0.02)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_TOL_DEG", 0.5)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_MAX_SEC", 1.0)
+    monkeypatch.setattr(main_mod, "_HEADING_SETTLE_POLL_SEC", 0.01)
+    monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _SettlingImu)
+    assert main_mod.run(config_path=_sweep_config(tmp_path), duration_sec=4.0) == 0
+
+    recs, _meta = _records(tmp_path, "sw")
+    starts = [r for r in recs if r.get("event") == "sweep_start"]
+    assert len(starts) >= 2, "need at least two sweeps to see sweep 0 vs. a later sweep"
+    first = starts[0]["details"]
+    assert first["sweep"] == 0
+    assert first["heading_settled"] is True
+    assert first["rest_sec"] > 0.05  # configured rest (0.05) plus the settle wait
+    later = starts[1]["details"]
+    assert later["sweep"] == 1
+    assert later["heading_settled"] is None
+    assert later["rest_sec"] == pytest.approx(0.05)

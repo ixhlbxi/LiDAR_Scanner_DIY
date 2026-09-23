@@ -85,12 +85,29 @@ Changelog:
                          each rest; metadata.json carries a "geometry" block.
                          Teardown returns the mast home (no home switch exists)
                          and records returned_home / return_home_failed.
+    0.12.1  2026-09-23  Final review fix I1: sweep 0's rest heading came from
+                         an unconverged Madgwick filter (measured: a static
+                         90° true heading read 13.8° at 2 s, 45.7° at 5 s,
+                         89.6° at 10 s). Sweep 0's rest — the only one with no
+                         prior sweep motion to help the filter converge — now
+                         waits, after the configured rest, for the fused yaw
+                         to stop moving (_HEADING_SETTLE_WINDOW_SEC/_TOL_DEG/
+                         _MAX_SEC, module-level so tests can shrink them),
+                         heartbeating the watchdog throughout since this wait
+                         can run up to 60 s — past the 30 s default watchdog
+                         timeout — and the loop's own heartbeat only runs at
+                         the top of each iteration. sweep_start's details gain
+                         "rest_sec" (actual seconds rested) and
+                         "heading_settled" (bool when sweep 0 has a
+                         magnetometer and an IMU sample to settle; null when
+                         the settle does not apply).
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import math
 import signal
 import sys
 import threading
@@ -129,6 +146,17 @@ _SENSOR_ERRORS = (RuntimeError, TimeoutError, OSError)
 # enough for the connect + handshake round trip, short enough that a healthy
 # caster doesn't visibly delay scan start. BASE_STATION_INTEGRATION.md §7.
 _NTRIP_FATAL_GRACE_SEC = 3.0
+
+# Sweep 0's rest heading comes from a Madgwick filter that has had no chance
+# to converge (no prior sweep motion feeds it) — measured 2026-09-23 with the
+# repo's MadgwickFilter, beta 0.1, 200 Hz, static: a true 90° heading reads
+# 13.8° at 2 s, 45.7° at 5 s, 89.6° at 10 s (final review I1). Only sweep 0
+# pays this cost; later sweeps carry the filter's state forward from the
+# previous sweep's own motion. Module-level so tests can shrink them.
+_HEADING_SETTLE_WINDOW_SEC = 1.0
+_HEADING_SETTLE_TOL_DEG = 0.5
+_HEADING_SETTLE_MAX_SEC = 60.0
+_HEADING_SETTLE_POLL_SEC = 0.1
 
 
 class _FatalStartupError(RuntimeError):
@@ -346,6 +374,81 @@ def _imu_record(batch: list) -> dict:
     }
 
 
+def _yaw_deg_from_orientation(orientation) -> float:
+    """Yaw (degrees) of a scalar-first [w, x, y, z] quaternion (CLAUDE.md §8)."""
+    w, x, y, z = orientation
+    return math.degrees(math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+
+
+def _wrapped_delta_deg(a: float, b: float) -> float:
+    """Smallest signed a-b, wrapped to (-180, 180] degrees."""
+    return (a - b + 180.0) % 360.0 - 180.0
+
+
+def _wait_for_heading_settle(
+    imu, stop_event: threading.Event, watchdog: Watchdog | None
+) -> tuple[float, bool]:
+    """Wait for sweep 0's rest heading to stop moving before trusting it (I1).
+
+    Polls ``imu.latest()`` in ``_HEADING_SETTLE_POLL_SEC`` slices via
+    ``stop_event.wait`` (so a set stop_event is honoured promptly instead of
+    riding out the whole wait) and calls ``watchdog.heartbeat()`` on every
+    poll — the main loop's own heartbeat only runs at the top of each
+    iteration, which is too infrequent once this wait can run up to
+    ``_HEADING_SETTLE_MAX_SEC`` (default 60 s, past the 30 s default watchdog
+    timeout).
+
+    "Settled" means the yaw has changed by less than
+    ``_HEADING_SETTLE_TOL_DEG`` over the last ``_HEADING_SETTLE_WINDOW_SEC``.
+    Gives up (not settled) at ``_HEADING_SETTLE_MAX_SEC`` with one WARNING.
+    Returns immediately, not settled, if ``imu.latest()`` has no sample yet
+    (nothing to settle) or if stop_event is already set.
+
+    Returns:
+        (elapsed_sec, settled) — elapsed_sec is how long THIS call waited
+        (the caller adds it to the configured rest to get the total actual
+        rest_sec); settled is False on a cap, an empty sample, or a stop.
+    """
+    started = time.monotonic()
+    sample = imu.latest()
+    if sample is None:
+        return 0.0, False
+
+    history: list[tuple[float, float]] = [(0.0, _yaw_deg_from_orientation(sample.orientation))]
+    elapsed = 0.0
+    while elapsed < _HEADING_SETTLE_MAX_SEC:
+        if watchdog is not None:
+            try:
+                watchdog.heartbeat()
+            except Exception:
+                pass
+        remaining = _HEADING_SETTLE_MAX_SEC - elapsed
+        if stop_event.wait(min(_HEADING_SETTLE_POLL_SEC, remaining)):
+            return time.monotonic() - started, False
+        elapsed = time.monotonic() - started
+        sample = imu.latest()
+        if sample is None:
+            continue
+        yaw = _yaw_deg_from_orientation(sample.orientation)
+        history.append((elapsed, yaw))
+        while len(history) > 1 and elapsed - history[0][0] > _HEADING_SETTLE_WINDOW_SEC:
+            history.pop(0)
+        if (
+            elapsed >= _HEADING_SETTLE_WINDOW_SEC
+            and abs(_wrapped_delta_deg(yaw, history[0][1])) < _HEADING_SETTLE_TOL_DEG
+        ):
+            return elapsed, True
+
+    logger.warning(
+        "sweep 0 rest heading not settled after %.1fs (still changing by >= %.2f deg "
+        "over the last %.1fs) — using it anyway",
+        elapsed,
+        _HEADING_SETTLE_TOL_DEG,
+        _HEADING_SETTLE_WINDOW_SEC,
+    )
+    return elapsed, False
+
+
 def _return_home(sensors: _Sensors, config: RoverConfig, session_logger: SessionLogger) -> None:
     """Rewind the mast to step 0 before the stepper is disabled.
 
@@ -494,6 +597,20 @@ def _scan_loop(
             if sensors.imu is not None and sensors.imu.available:
                 sensors.imu.enable_magnetometer(config.imu.use_magnetometer)
             stop_event.wait(action.seconds)
+            # Sweep 0 has no prior sweep motion to help the Madgwick filter
+            # converge, so its rest heading is trusted only after it settles
+            # (I1). Later sweeps keep the configured rest as-is.
+            extra_settle_sec = 0.0
+            heading_settled: bool | None = None
+            if (
+                planner.sweep_index == 0
+                and config.imu.use_magnetometer
+                and sensors.imu is not None
+                and sensors.imu.available
+            ):
+                extra_settle_sec, heading_settled = _wait_for_heading_settle(
+                    sensors.imu, stop_event, watchdog
+                )
             rest_batch: list = []
             if sensors.imu is not None and sensors.imu.available and not imu_gate.tripped:
                 try:
@@ -509,7 +626,11 @@ def _scan_loop(
                     "type": "event",
                     "timestamp": time.time(),
                     "event": "sweep_start",
-                    "details": {"sweep": planner.sweep_index, "rest_sec": action.seconds},
+                    "details": {
+                        "sweep": planner.sweep_index,
+                        "rest_sec": action.seconds + extra_settle_sec,
+                        "heading_settled": heading_settled,
+                    },
                 }
             )
             status.scan_state = SCAN_SCANNING

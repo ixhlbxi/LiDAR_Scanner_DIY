@@ -306,6 +306,37 @@ class TestPipelinePly:
             assert (out / f"{sess.name}_ellipsoidal.ply").exists()
             assert (out / f"{sess.name}_navd88.ply").exists()
 
+    def test_units_crs_mismatch_labelled_truthfully_and_exits_3(self, tmp_path):
+        """I2: a CRS was requested (target_crs_epsg=6563, ftUS) and a GNSS
+        origin exists, but `_make_session` hardcodes "units": "m" -- a
+        mismatch against 6563's native ftUS unit. project_to_crs still
+        converts the values but drops the CRS label (epsg_to_embed == 0);
+        that must be reported as a units/CRS mismatch, not mislabelled
+        "local ENU", and NAVD88 (which needs the CRS's own unit to locate the
+        geoid) must be refused rather than silently skipped."""
+        pytest.importorskip("pyproj")
+        sess = _make_session(tmp_path, profile="arm_group", target_crs=6563)
+        rc = georef.main([str(sess), "--no-las"])
+        assert rc == 3
+        out = sess / "export"
+        assert not (out / f"{sess.name}_ellipsoidal.ply").exists()
+        assert not (out / f"{sess.name}_navd88.ply").exists()
+        assert (out / f"{sess.name}.ply").exists()
+        manifest = json.loads((out / "export.json").read_text())
+        assert manifest["files"] == [
+            {
+                "path": f"{sess.name}.ply",
+                "horizontal": "EPSG:6563 values converted to m, CRS label dropped",
+                "vertical": "ellipsoidal NAD83(2011)",
+            }
+        ]
+        assert "units/CRS mismatch" in manifest["navd88_error"]
+        assert "--units m" in manifest["navd88_error"]
+        assert "EPSG:6563" in manifest["navd88_error"]
+        head = (out / f"{sess.name}.ply").read_bytes().split(b"end_header")[0]
+        assert b"comment vertical ellipsoidal NAD83(2011)" in head
+        assert b"comment horizontal EPSG:6563 values converted to m, CRS label dropped" in head
+
 
 # ---------------------------------------------------------------------------
 # NAVD88 (GEOID18) export: dual ellipsoidal/NAVD88 output, ballpark guard,
@@ -365,6 +396,34 @@ class TestNavd88Export:
         pytest.importorskip("pyproj")
         monkeypatch.setattr(georef, "_geoid_transformer", _fake_geoid(0.0))
         xyz = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+        with pytest.raises(georef.GeoidUnavailable, match="ballpark"):
+            georef.navd88_from_enu(xyz, (40.79, -77.86, 300.0), 6563)
+
+    def test_ballpark_guard_triggers_when_only_one_point_is_ballpark(self, monkeypatch):
+        """M2: the guard must check the MINIMUM |undulation| across the whole
+        point cloud, not the maximum -- a max-based check would let a result
+        through where only SOME points came back ballpark, because a single
+        real-looking undulation elsewhere in the cloud would dominate the
+        max. Point 0 gets a real geoid undulation (-33.3 m); point 1 comes
+        back ballpark (N=0, PROJ handed back the ellipsoidal height
+        unchanged) -- the minimum is 0, so this must still raise."""
+        pytest.importorskip("pyproj")
+        import pyproj
+
+        def _factory(target_epsg):
+            horiz = pyproj.Transformer.from_crs("EPSG:6319", f"EPSG:{target_epsg}", always_xy=True)
+
+            class _T:
+                def transform(self, lons, lats, alts):
+                    xs, ys = horiz.transform(lons, lats)
+                    alts = np.asarray(alts, dtype=float)
+                    zs = np.array([alts[0] + 33.3, alts[1]]) / 0.3048006096012192
+                    return xs, ys, zs
+
+            return _T(), f"EPSG:{target_epsg}+6360", 0.3048006096012192
+
+        monkeypatch.setattr(georef, "_geoid_transformer", _factory)
+        xyz = np.array([[0.0, 0.0, 0.0], [10.0, 10.0, 0.0]])
         with pytest.raises(georef.GeoidUnavailable, match="ballpark"):
             georef.navd88_from_enu(xyz, (40.79, -77.86, 300.0), 6563)
 
@@ -1166,6 +1225,41 @@ class TestHeadingModel:
         ]
         assert len(reuse_warnings) == 1
         assert "2" in reuse_warnings[0]
+
+    def test_rest_window_uses_only_the_last_second_before_rest_end(self):
+        """I1: sweep 0's rest heading must come from where the acquisition-time
+        Madgwick filter has had a chance to converge -- the LAST second before
+        rest_end -- not an early, still-unconverged sample from earlier in the
+        same rest (the controller measured beta=0.1 needing up to ~30s to
+        fully converge; main.py's own sweep-0 heading-settle wait targets
+        exactly this trailing window)."""
+
+        def lidar(t, sweep):
+            return {
+                "type": "lidar",
+                "timestamp": t,
+                "mast_angle_deg": 0.0,
+                "angle": [0.0],
+                "distance": [1.0],
+                "intensity": [1],
+                "sweep": sweep,
+            }
+
+        imu = [
+            # 8 s before rest_end: still unconverged, must be dropped.
+            {"timestamp": 2.0, "orientation": [1.0, 0.0, 0.0, 0.0], "mag": [1.0, 0.0, 0.0]},
+            # 0.4 s before rest_end: inside the last second, kept.
+            {"timestamp": 9.6, "orientation": [1.0, 0.0, 0.0, 0.0], "mag": [1.0, 0.0, 0.0]},
+        ]
+        session = georef.SessionData(
+            metadata={},
+            lidar_records=[lidar(11.0, 0)],
+            imu_records=imu,
+            gnss_records=[],
+            sweep_starts={0: 10.0},
+        )
+        rest = georef._rest_samples_by_sweep(session, imu)
+        assert [s["timestamp"] for s in rest[0]] == [9.6]
 
     def test_missing_sweeps_with_no_earlier_sweep_reuse_nearest_later(self, caplog):
         """Fix round 2 (item 1c, second half): the reuse rule's "no earlier
