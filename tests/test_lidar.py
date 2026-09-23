@@ -309,7 +309,8 @@ class TestScannerWithMockSerial:
 
         scanner = LidarScanner(lidar_config)
         scanner.start()
-        points = scanner.read_scan()
+        scan = scanner.read_scan(discard_stale=False)
+        points = scan.points
 
         assert len(points) > 0
         assert all(isinstance(p, LidarPoint) for p in points)
@@ -366,3 +367,74 @@ class TestPacketResync:
         assert r["speed_dps"] == pytest.approx(359.9)
         assert r["timestamp_ms"] == 4321
         assert r["points_raw"][5] == (105, 5)
+
+
+# ---------------------------------------------------------------------------
+# read_scan: stale-discard, seam carry-over, LD19 timestamps (T1-012, T1-013)
+# ---------------------------------------------------------------------------
+
+
+def _revolution_packets(rev_index: int = 0, start_ms: int = 1000) -> list[bytes]:
+    """30 packets covering 0..360 in 12° packets; timestamps advance 3 ms each."""
+    pkts = []
+    for i in range(30):
+        s = i * 12.0
+        e = s + 11.0
+        pkts.append(build_packet(start_angle_deg=s, end_angle_deg=e, timestamp_ms=start_ms + 3 * i))
+    return pkts
+
+
+class TestReadScanRevolutions:
+    def _scanner(self, lidar_config, mock_serial, stream: bytes):
+        mock_serial.in_waiting = len(stream)
+        # first read returns everything, later reads return nothing
+        mock_serial.read.side_effect = [stream] + [b""] * 10_000
+        s = LidarScanner(lidar_config)
+        s.start()
+        return s
+
+    def test_read_scan_returns_one_full_revolution_with_timestamps(self, lidar_config, mock_serial):
+        stream = b"".join(
+            _revolution_packets(0, 1000)
+            + _revolution_packets(1, 2000)
+            + _revolution_packets(2, 3000)
+        )
+        s = self._scanner(lidar_config, mock_serial, stream)
+        scan = s.read_scan(discard_stale=False)
+        assert len(scan.points) == 30 * POINTS_PER_PACKET
+        assert scan.lidar_ms_start == 1000
+        assert scan.lidar_ms_end == 1000 + 3 * 29
+
+    def test_seam_packet_is_carried_into_next_scan(self, lidar_config, mock_serial):
+        """The packet that reveals the wrap (first packet of revolution 2) used to be
+        thrown away; it must open the next scan instead (T1-013)."""
+        stream = b"".join(
+            _revolution_packets(0, 1000)
+            + _revolution_packets(1, 2000)
+            + _revolution_packets(2, 3000)
+        )
+        s = self._scanner(lidar_config, mock_serial, stream)
+        first = s.read_scan(discard_stale=False)
+        second = s.read_scan(discard_stale=False)
+        assert len(second.points) == 30 * POINTS_PER_PACKET
+        assert second.lidar_ms_start == 2000  # revolution 2's very first packet, not its second
+        assert first.lidar_ms_end < second.lidar_ms_start
+
+    def test_read_scan_discards_buffered_packets_after_step(self, lidar_config, mock_serial):
+        """With discard_stale=True the driver flushes the serial input and skips to the
+        first wrap, so bytes buffered while the mast moved never land in the slice (T1-012)."""
+        stale = _revolution_packets(0, 100)[10:25]  # a partial revolution from 120°..300°
+        fresh = _revolution_packets(1, 5000) + _revolution_packets(2, 6000)
+        stream = b"".join(stale + fresh)
+        s = self._scanner(lidar_config, mock_serial, stream)
+        scan = s.read_scan(discard_stale=True)
+        mock_serial.reset_input_buffer.assert_called_once()
+        assert scan.lidar_ms_start == 5000
+        assert len(scan.points) == 30 * POINTS_PER_PACKET
+
+    def test_read_scan_times_out_without_wrap(self, lidar_config, mock_serial, monkeypatch):
+        stream = b"".join(_revolution_packets(0, 1000)[:5])
+        s = self._scanner(lidar_config, mock_serial, stream)
+        monkeypatch.setattr("rover.lidar._SCAN_TIMEOUT_SEC", 0.2)
+        with pytest.raises(TimeoutError):
+            s.read_scan(discard_stale=False)
