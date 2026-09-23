@@ -258,6 +258,7 @@ def parse_gga(sentence: str) -> GnssFix | None:
 _LINE_BUF_MAX = 1024  # cap on the NMEA-only read buffer; drop oldest overflow
 _NAVPVT_STALE_SEC = 5.0  # no NAV-PVT for this long while active → GGA resumes as source
 _RTK_AGE_VALID_SEC = 10.0  # a carried-forward rtk_age older than this is dropped (unknown)
+_NAV_PVT_NO_HDOP = 99.9  # GnssFix.hdop placeholder: NAV-PVT carries no HDOP
 
 
 class GnssReceiver:
@@ -440,6 +441,15 @@ class GnssReceiver:
                 and time.monotonic() - self._rtk_age_mono <= _RTK_AGE_VALID_SEC
             ):
                 fix = dataclasses.replace(fix, rtk_age=self._latest.rtk_age)
+            if (
+                source == "nav_pvt"
+                and self._latest is not None
+                and self._latest.hdop < _NAV_PVT_NO_HDOP
+            ):
+                # Keep GGA's last real HDOP across NAV-PVT epochs; otherwise
+                # every epoch resets it to the 99.9 placeholder until the next
+                # GGA arrives, and the main loop only reads new timestamps.
+                fix = dataclasses.replace(fix, hdop=self._latest.hdop)
             self._latest = fix
 
     def latest_fix(self) -> GnssFix | None:

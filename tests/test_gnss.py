@@ -235,6 +235,12 @@ class TestStage4Gnss:
         assert latest.lat == 40.0  # still the NAV-PVT position
         assert latest.hdop == 0.8  # but HDOP came from GGA
 
+        nav2 = GnssFix(timestamp=2.0, fix_type=5, lat=40.1, lon=-75.1, alt=5.0, pdop=1.2)
+        r._record_fix(nav2, source="nav_pvt")
+        latest = r.latest_fix()
+        assert latest.lat == 40.1  # the new NAV-PVT epoch
+        assert latest.hdop == 0.8  # GGA's HDOP carried, not reset to 99.9
+
     def test_gga_is_source_without_ubx(self):
         from rover.gnss import GnssReceiver
 
