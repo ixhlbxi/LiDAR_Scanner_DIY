@@ -492,6 +492,7 @@ def _scan_loop(
                     "alt": gnss_fix.alt,
                     "hdop": gnss_fix.hdop,
                     "vdop": gnss_fix.vdop,
+                    "pdop": gnss_fix.pdop,
                     "sat_count": gnss_fix.sat_count,
                     "rtk_age": gnss_fix.rtk_age,
                 }

@@ -52,8 +52,9 @@ class TestParseGgaHappy:
         assert fix.lon == pytest.approx(-74.006, abs=0.0001)
 
     def test_alt_decoded(self):
+        # alt 10.5 m MSL + geoid separation -34.0 m → -23.5 m ellipsoidal (Stage 4)
         fix = parse_gga(GGA_RTK_FIX)
-        assert fix.alt == 10.5
+        assert fix.alt == pytest.approx(-23.5)
 
     def test_sat_count(self):
         fix = parse_gga(GGA_RTK_FIX)
@@ -114,7 +115,12 @@ class TestGnssFixDefaults:
 
 def test_fix_from_nav_pvt_uses_pyubx2_scaled_attributes() -> None:
     """pyubx2 already scales lat/lon to degrees and pDOP to 0.01 units and
-    expands the flags byte into carrSoln; dividing again zeroes the fix (T1-006)."""
+    expands the flags byte into carrSoln; dividing again zeroes the fix (T1-006).
+
+    Stage 4 (S2-R1/T1-019/T1-020): alt now comes from `height` (ellipsoidal),
+    not `hMSL` (orthometric), and pDOP lands in `pdop`, not `hdop` — NAV-PVT
+    carries no HDOP so `hdop` is always 99.9 for this source.
+    """
     import pyubx2
 
     from rover.gnss import _fix_from_nav_pvt
@@ -128,6 +134,7 @@ def test_fix_from_nav_pvt_uses_pyubx2_scaled_attributes() -> None:
         numSV=18,
         lat=40.712800,
         lon=-74.006000,
+        height=12345,
         hMSL=10500,
         pDOP=1.2,
     )
@@ -146,7 +153,72 @@ def test_fix_from_nav_pvt_uses_pyubx2_scaled_attributes() -> None:
     fix = _fix_from_nav_pvt(parsed)
     assert abs(fix.lat - 40.7128) < 1e-6
     assert abs(fix.lon - (-74.006)) < 1e-6
-    assert abs(fix.alt - 10.5) < 1e-6
+    assert abs(fix.alt - 12.345) < 1e-6  # ellipsoidal height (mm), not hMSL
     assert fix.fix_type == 5  # RTK FIX
-    assert abs(fix.hdop - 1.2) < 1e-6
+    assert abs(fix.pdop - 1.2) < 1e-6
+    assert fix.hdop == 99.9  # NAV-PVT has no HDOP
     assert fix.sat_count == 18
+
+
+class TestStage4Gnss:
+    def test_gga_alt_is_ellipsoidal(self):
+        # alt 10.5 m MSL + geoid separation -34.0 m → -23.5 m ellipsoidal
+        fix = parse_gga(
+            _fix_checksum(
+                "$GNGGA,143052.00,4042.76800,N,07400.36000,W,4,18,0.8,10.5,M,-34.0,M,1.2,0000*00"
+            )
+        )
+        assert fix.alt == pytest.approx(-23.5)
+
+    def test_nav_pvt_uses_ellipsoidal_height_and_pdop(self):
+        import pyubx2
+
+        from rover.gnss import _fix_from_nav_pvt
+
+        msg = pyubx2.UBXMessage(
+            "NAV",
+            "NAV-PVT",
+            pyubx2.GET,
+            fixType=3,
+            carrSoln=2,
+            numSV=18,
+            lat=40.7128,
+            lon=-74.006,
+            height=12345,
+            hMSL=10500,
+            pDOP=1.2,
+        )
+        fix = _fix_from_nav_pvt(pyubx2.UBXReader.parse(msg.serialize()))
+        assert fix.alt == pytest.approx(12.345)
+        assert fix.pdop == pytest.approx(1.2) and fix.hdop == 99.9
+
+    def test_nav_pvt_is_sole_source_when_ubx_present(self):
+        from rover.gnss import GnssReceiver
+
+        r = GnssReceiver.__new__(GnssReceiver)
+        r._lock = __import__("threading").Lock()
+        r._latest = None
+        r._ubx_active = True
+        nav = GnssFix(timestamp=1.0, fix_type=5, lat=40.0, lon=-75.0, alt=5.0, pdop=1.1)
+        r._record_fix(nav, source="nav_pvt")
+        gga = GnssFix(timestamp=1.2, fix_type=5, lat=41.0, lon=-76.0, alt=99.0, rtk_age=2.5)
+        r._record_fix(gga, source="gga")
+        latest = r.latest_fix()
+        assert latest.lat == 40.0 and latest.alt == 5.0  # GGA did not replace the NAV-PVT fix
+        assert latest.rtk_age == 2.5  # but its RTCM age was merged
+
+    def test_gga_is_source_without_ubx(self):
+        from rover.gnss import GnssReceiver
+
+        r = GnssReceiver.__new__(GnssReceiver)
+        r._lock = __import__("threading").Lock()
+        r._latest = None
+        r._ubx_active = False
+        gga = GnssFix(timestamp=1.2, fix_type=5, lat=41.0, lon=-76.0, alt=99.0, rtk_age=2.5)
+        r._record_fix(gga, source="gga")
+        assert r.latest_fix().lat == 41.0
+
+    def test_no_subscribe_api(self):
+        from rover.gnss import GnssReceiver
+
+        assert not hasattr(GnssReceiver, "subscribe")
