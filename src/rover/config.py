@@ -518,6 +518,11 @@ def _validate(raw: dict) -> None:
             f"got {nt['gga_send_interval_sec']}"
         )
     nt["gga_send_interval_sec"] = float(nt["gga_send_interval_sec"])
+    if nt["enabled"] and nt["client_location"] == "pi" and not gn["enabled"]:
+        raise ValueError(
+            "[ntrip] enabled with client_location = 'pi' requires [gnss].enabled = true "
+            "(the Pi-side client writes RTCM to the F9P serial port)"
+        )
 
     # -- lora --
     lo = raw["lora"]

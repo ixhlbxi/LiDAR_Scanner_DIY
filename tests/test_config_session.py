@@ -384,3 +384,39 @@ class TestRoverConfigComposition:
         assert cfg.session.profile == "personal"
         assert cfg.ntrip.enabled is False
         assert cfg.lora.role == "rtcm_rx+status_tx"
+
+
+# ---------------------------------------------------------------------------
+# T1-027 cross-check: NTRIP on Pi requires GNSS enabled
+# ---------------------------------------------------------------------------
+
+
+def test_ntrip_on_pi_requires_gnss_enabled(tmp_toml):
+    """NTRIP on the Pi has nowhere to write RTCM if the F9P is disabled (T1-027)."""
+    path = tmp_toml(
+        """
+        [gnss]
+        enabled = false
+
+        [ntrip]
+        enabled = true
+        client_location = "pi"
+        """
+    )
+    with pytest.raises(ValueError, match=r"\[ntrip\].*requires \[gnss\]\.enabled"):
+        load_config(path)
+
+
+def test_ntrip_on_esp32_does_not_require_gnss(tmp_toml):
+    path = tmp_toml(
+        """
+        [gnss]
+        enabled = false
+
+        [ntrip]
+        enabled = true
+        client_location = "esp32"
+        """
+    )
+    cfg = load_config(path)
+    assert cfg.ntrip.client_location == "esp32"
