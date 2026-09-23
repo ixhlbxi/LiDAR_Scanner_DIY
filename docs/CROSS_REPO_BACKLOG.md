@@ -134,6 +134,15 @@ tracking file. Each carries its finding ID so the report and this list stay cros
 
 ---
 
+### Filed during stage 2 review (2026-09-22) — for stage 4
+
+| ID | Where | What | Why here |
+|---|---|---|---|
+| S2-R1 | `src/rover/gnss.py` NAV-PVT + GGA paths | Altitude datum: NAV-PVT now logs `hMSL` (orthometric) and GGA logs MSL, but `GnssFix.alt` and SPECIFICATIONS.md say ellipsoidal | Stage 4 rewrites gnss.py: log ellipsoidal from both (NAV-PVT `height`; GGA alt + geoid separation field 11) or relabel the schema |
+| S2-R2 | `src/rover/telemetry.py` RoverStatus | A tripped sensor gate and `logger.degraded` are not visible on the wire (status.json / LoRa STATUS) | Changes the Base-Station contract; stage 4 owns telemetry |
+| S2-R3 | `src/rover/main.py` stepper failure branch | Warns every 0.5 s forever and its `continue` skips the telemetry publish, so SCAN_ERROR is never published | Gate it like the sensors; stage 4 touches the loop's publish block |
+| S2-R4 | `src/rover/logger.py` `write()` Full path | Drop-oldest takes `_lock`, which `_flush` holds across disk I/O, so a stalled disk blocks the producer; drained-but-unwritten records on a failed flush are not counted | Needs a small design choice (separate counter lock, `lost_records`) |
+
 ## How to use this file
 
 - **Adding an item:** when you find a "rover side codes for X, sibling side
