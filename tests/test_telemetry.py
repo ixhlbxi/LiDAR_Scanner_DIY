@@ -464,3 +464,50 @@ class TestRouterCadence:
             router.publish(s)
         assert calls["status_json"] == 11  # every 0.2 s incl. t=0
         assert calls["lora"] == 3  # t=0, 1.0, 2.0
+        assert router.interval_for("lora") == 1.0
+        assert router.interval_for("status_json") == 0.2
+
+    def test_router_bounded_catch_up_after_stall(self, tmp_toml, tmp_path, monkeypatch):
+        """After a long gap (caller stalled), each channel catches up with at
+        most one extra fire instead of bursting once per call until it
+        re-syncs to wall time — an unbounded burst is unacceptable on an
+        airtime-limited LoRa link (fix round 1 on Task 4)."""
+        p = tmp_toml(
+            f"""
+            [base_station_integration]
+            enabled = true
+            status_json_path = "{(tmp_path / "s.json").as_posix()}"
+            publish_interval_sec = 0.2
+            [lora]
+            enabled = true
+            role = "status_tx_only"
+            telemetry_interval_sec = 1.0
+            [telemetry]
+            http_enabled = false
+            """
+        )
+        from rover.config import load_config
+
+        router = TelemetryRouter(load_config(p))
+        calls = {pub.name: 0 for pub in router.publishers}
+        for pub in router.publishers:
+            monkeypatch.setattr(
+                pub, "publish", lambda s, _n=pub.name: calls.__setitem__(_n, calls[_n] + 1)
+            )
+        clock = [0.0]
+        monkeypatch.setattr("rover.telemetry.time.monotonic", lambda: clock[0])
+        s = RoverStatus()
+
+        clock[0] = 0.0
+        router.publish(s)  # establishes the schedule; not part of the stall window
+        calls["status_json"] = 0
+        calls["lora"] = 0
+
+        # Stall: the caller doesn't call publish() again for 30s, then resumes
+        # at a normal pace (0.01s steps) for 10 calls.
+        for i in range(10):
+            clock[0] = 30.0 + i * 0.01
+            router.publish(s)
+
+        assert calls["lora"] <= 2  # not 10 — bounded catch-up, not a burst
+        assert calls["status_json"] <= 2

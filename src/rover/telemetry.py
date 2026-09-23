@@ -67,6 +67,11 @@ Changelog:
                         LoRaPublisher.publish_link() and the dead
                         role == "disabled" re-checks removed (T1-025,
                         T1-026, T1-030, T1-047, S2-R2).
+    0.11.1  2026-09-23  TelemetryRouter.publish()'s catch-up-after-a-stall is
+                        now bounded to one extra fire per channel instead of
+                        unbounded (a caller wedged for 30s on a 1s-interval
+                        LoRa channel used to burst ~30 back-to-back fires on
+                        an airtime-limited link) — fix round 1 on Task 4.
 """
 
 from __future__ import annotations
@@ -440,9 +445,19 @@ class TelemetryRouter:
             # measurably undercounts publishes over many iterations (a
             # channel due every 0.2s over a 0.1s-jittery loop fired 9 times
             # in 2s instead of the intended 11). Advancing by a fixed step
-            # keeps the schedule on-grid; a stalled loop just catches up
-            # over its next few calls instead of losing beats permanently.
-            self._last[pub.name] = now if last == float("-inf") else last + interval
+            # keeps the schedule on-grid.
+            #
+            # The `max(..., now - interval)` clamp bounds catch-up after a
+            # stall: without it, a long gap (e.g. the caller wedges for 30s
+            # on a 1s-interval LoRa channel) leaves `last` far behind `now`,
+            # and every subsequent call stays "overdue" until `last`
+            # increments its way back up to `now` — a burst of ~30 back-to-
+            # back fires on an airtime-limited radio link. Clamping `last` to
+            # no earlier than `now - interval` means at most one extra catch-
+            # up fire happens after any gap, however long.
+            self._last[pub.name] = (
+                now if last == float("-inf") else max(last + interval, now - interval)
+            )
             try:
                 pub.publish(status)
             except Exception as e:
