@@ -125,10 +125,13 @@ def test_sd_notify_reuses_one_socket(monkeypatch, tmp_path) -> None:
     wd_mod._reset_notify_socket_for_tests()
 
 
-def test_default_timeout_path_does_not_use_logging(monkeypatch, capsys) -> None:
+def test_default_timeout_path_does_not_use_logging(monkeypatch, capfd) -> None:
     """The default timeout callback must not touch logging (T1-001 fix round 1):
     the hung main thread may hold a logging handler lock, so this path writes
-    straight to stderr and calls os._exit — never logger.error/logging.shutdown."""
+    straight to fd 2 and calls os._exit — never logger.error/logging.shutdown.
+    ``_emergency_write`` now goes through ``os.write(2, ...)`` rather than
+    ``sys.stderr``, so this must use ``capfd`` (fd-level capture) — ``capsys``
+    does not see raw fd writes."""
     exit_mock = mock.MagicMock()
     monkeypatch.setattr(wd_mod.os, "_exit", exit_mock)
     monkeypatch.setattr(wd_mod.logging, "shutdown", mock.MagicMock())
@@ -139,16 +142,18 @@ def test_default_timeout_path_does_not_use_logging(monkeypatch, capsys) -> None:
     exit_mock.assert_called_once_with(2)
     wd_mod.logging.shutdown.assert_not_called()
     wd_mod.logger.error.assert_not_called()
-    assert "heartbeat timeout" in capsys.readouterr().err
+    assert "heartbeat timeout" in capfd.readouterr().err
 
 
 def test_run_loop_timeout_notice_is_lock_free(
-    fast_config: WatchdogConfig, monkeypatch, capsys
+    fast_config: WatchdogConfig, monkeypatch, capfd
 ) -> None:
     """_run_loop's own timeout notice must also be lock-free (T1-001 fix round 2):
     it fires before the on_timeout callback runs, so — like _default_on_timeout —
     it must not touch logging. logger.error is only used afterward, and only if
-    the callback returns instead of ending the process."""
+    the callback returns instead of ending the process. ``_emergency_write`` now
+    goes through ``os.write(2, ...)`` rather than ``sys.stderr``, so this must use
+    ``capfd`` (fd-level capture) — ``capsys`` does not see raw fd writes."""
     fired = threading.Event()
     logger_mock = mock.MagicMock()
     monkeypatch.setattr(wd_mod.logger, "error", logger_mock)
@@ -164,7 +169,7 @@ def test_run_loop_timeout_notice_is_lock_free(
     finally:
         wd.stop()
 
-    assert "heartbeat timeout" in capsys.readouterr().err
+    assert "heartbeat timeout" in capfd.readouterr().err
 
 
 def test_sd_notify_reconnects_after_send_failure(monkeypatch) -> None:

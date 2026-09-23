@@ -29,9 +29,9 @@ Five thematic stages in dependency order. Each stage is a branch off `main`, mer
 | Stage | Branch | Closes |
 |---|---|---|
 | 1 Hygiene and identity | `fix/stage1-hygiene` | T1-036, T1-054, T1-055, T1-056, T3-003, D-008 |
-| 2 First-boot blockers | `fix/stage2-first-boot` | T1-001, T1-002, T1-003, T1-005, T1-006, T1-011, T1-027, T1-029, T1-032, T1-033, T2-001, T2-002, T2-003, T2-004, part of T2-005 |
+| 2 First-boot blockers | `fix/stage2-first-boot` | T1-001, T1-002, T1-003, T1-005, T1-006, T1-011, T1-027, T1-029, T1-032, T1-031, T2-001, T2-002, T2-003, T2-004, part of T2-005 |
 | 3 Data pipeline | `fix/stage3-pipeline` | T1-007, T1-008, T1-009, T1-010, T1-012, T1-013, T1-014, T1-015, T1-016, T1-017, T1-039, T1-043, T1-044, T1-050, T1-052, `[calibration].mag_offset` from T1-041 |
-| 4 Comms and config | `fix/stage4-comms-config` | T1-004, T1-019, T1-020, T1-022, T1-023, T1-025, T1-026, T1-030, T1-041, T1-042 (Python), T1-046, T1-047, T1-049, T1-053, rest of T2-005, T2-006, T2-007, T2-008 |
+| 4 Comms and config | `fix/stage4-comms-config` | T1-004, T1-019, T1-020, T1-022, T1-023, T1-025, T1-026, T1-030, T1-041, T1-042 (Python), T1-046, T1-047, T1-049, T1-053, rest of T2-005, T2-006, T2-007, T2-008, T1-033 (RPi.GPIO backend detection in stepper.py + apt remedy in install.sh) |
 | 5 Docs and close-out | `fix/stage5-docs` | D-001 to D-015, D-017, D-019, T3-001, T3-002; backlog entries for the 15 out-of-scope rows |
 
 ## 3. Stage 1 — Hygiene and identity

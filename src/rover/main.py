@@ -263,6 +263,23 @@ class _SensorGate:
         self.tripped = False
 
 
+def _note_gate_trip(session_logger: SessionLogger, gate: _SensorGate, exc: BaseException) -> None:
+    """Write a `sensor_disabled` event the moment a gate trips.
+
+    Without this, a subsystem going dark mid-session is visible only as a
+    WARNING in the journal — scan.jsonl itself gives no indication that,
+    say, the LiDAR stopped contributing records partway through.
+    """
+    session_logger.write(
+        {
+            "type": "event",
+            "timestamp": time.time(),
+            "event": "sensor_disabled",
+            "details": {"sensor": gate.name, "error": str(exc)},
+        }
+    )
+
+
 def _scan_loop(
     config: RoverConfig,
     sensors: _Sensors,
@@ -333,7 +350,8 @@ def _scan_loop(
                 lidar_points = sensors.lidar.read_scan()
                 lidar_gate.record_success()
             except _SENSOR_ERRORS as e:
-                lidar_gate.record_failure(e)
+                if lidar_gate.record_failure(e):
+                    _note_gate_trip(session_logger, lidar_gate, e)
 
         # --- IMU ---
         imu_sample = None
@@ -342,7 +360,8 @@ def _scan_loop(
                 imu_sample = sensors.imu.read_sample()
                 imu_gate.record_success()
             except _SENSOR_ERRORS as e:
-                imu_gate.record_failure(e)
+                if imu_gate.record_failure(e):
+                    _note_gate_trip(session_logger, imu_gate, e)
 
         # --- Camera (cadence-gated) ---
         image_relpath: str | None = None
@@ -357,7 +376,8 @@ def _scan_loop(
             try:
                 image_relpath = sensors.camera.capture(session_logger.session_dir, step_index)
             except _SENSOR_ERRORS as e:
-                camera_gate.record_failure(e)
+                if camera_gate.record_failure(e):
+                    _note_gate_trip(session_logger, camera_gate, e)
             else:
                 camera_gate.record_success()
 

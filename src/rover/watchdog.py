@@ -30,7 +30,6 @@ from __future__ import annotations
 import logging
 import os
 import socket
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -93,14 +92,15 @@ def _sd_notify(message: str) -> None:
 
 
 def _emergency_write(message: str) -> None:
-    """Write straight to stderr, bypassing logging.
+    """Write straight to fd 2 (stderr), bypassing logging and Python's stderr buffer.
 
     Used on the timeout path only: the hung main thread may hold a logging
-    handler lock, and nothing here may block. Under systemd stderr is the journal.
+    handler lock — or Python's own stderr buffer lock — and nothing here may
+    block. ``os.write(2, ...)`` goes straight to the file descriptor, so it
+    cannot contend for that lock. Under systemd fd 2 is the journal.
     """
     try:
-        sys.stderr.write(f"rover.watchdog: {message}\n")
-        sys.stderr.flush()
+        os.write(2, f"rover.watchdog: {message}\n".encode())
     except Exception:
         pass
 

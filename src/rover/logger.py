@@ -314,22 +314,48 @@ class SessionLogger:
                 self._rotate_file("gnss")
 
     def _rotate_file(self, which: str) -> None:
-        """Close current file and open a new numbered one."""
+        """Open a new numbered file, then close and swap out the current one.
+
+        Opens the new segment FIRST. If that ``open()`` fails (ENOSPC,
+        EROFS, ...), the current file handle is never touched and the index
+        is never advanced — the old file stays open and writable and every
+        later flush keeps landing in it. Closing the old file before opening
+        the new one (the previous order) left the stream closed with no
+        replacement on a failed open, wedging every subsequent flush.
+        """
         assert self._session_dir is not None
 
         if which == "scan":
+            next_index = self._scan_index + 1
+            next_path = self._session_dir / f"scan_{next_index:03d}.jsonl"
+            try:
+                new_file = open(next_path, "a", encoding="utf-8")
+            except OSError as e:
+                if not self._degraded:
+                    logger.error("Rotation of scan log to %s failed: %s", next_path.name, e)
+                self._degraded = True
+                return
             if self._scan_file is not None and not self._scan_file.closed:
                 self._scan_file.close()
-            self._scan_index += 1
-            self._scan_path = self._session_dir / f"scan_{self._scan_index:03d}.jsonl"
-            self._scan_file = open(self._scan_path, "a", encoding="utf-8")
+            self._scan_index = next_index
+            self._scan_path = next_path
+            self._scan_file = new_file
             logger.info("Rotated scan log to %s", self._scan_path.name)
         elif which == "gnss":
+            next_index = self._gnss_index + 1
+            next_path = self._session_dir / f"gnss_{next_index:03d}.jsonl"
+            try:
+                new_file = open(next_path, "a", encoding="utf-8")
+            except OSError as e:
+                if not self._degraded:
+                    logger.error("Rotation of gnss log to %s failed: %s", next_path.name, e)
+                self._degraded = True
+                return
             if self._gnss_file is not None and not self._gnss_file.closed:
                 self._gnss_file.close()
-            self._gnss_index += 1
-            self._gnss_path = self._session_dir / f"gnss_{self._gnss_index:03d}.jsonl"
-            self._gnss_file = open(self._gnss_path, "a", encoding="utf-8")
+            self._gnss_index = next_index
+            self._gnss_path = next_path
+            self._gnss_file = new_file
             logger.info("Rotated gnss log to %s", self._gnss_path.name)
 
     # ------------------------------------------------------------------

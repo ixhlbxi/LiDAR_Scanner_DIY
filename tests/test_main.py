@@ -283,7 +283,10 @@ class _FlakyLidar:
 
 def test_scan_loop_disables_sensor_after_repeated_oserror(tmp_path: Path, monkeypatch) -> None:
     """OSError from a read must not abort the run, and after 5 failures the
-    sensor is skipped rather than re-read every iteration (T1-003)."""
+    sensor is skipped rather than re-read every iteration (T1-003). The trip
+    itself must also be visible in scan.jsonl, not just the journal (Important 4)."""
+    import json
+
     _FlakyLidar.calls = 0
     monkeypatch.setattr(main_mod, "LidarScanner", _FlakyLidar)
     # No stepper in this config, so the loop paces itself on the idle settle;
@@ -294,6 +297,14 @@ def test_scan_loop_disables_sensor_after_repeated_oserror(tmp_path: Path, monkey
     assert _FlakyLidar.calls == 5, (
         f"expected exactly 5 attempts before the gate trips, got {_FlakyLidar.calls}"
     )
+
+    session = next((tmp_path / "data").glob("gate_*"))
+    records = [
+        json.loads(line) for line in (session / "scan.jsonl").read_text().splitlines() if line
+    ]
+    disabled_events = [r for r in records if r.get("event") == "sensor_disabled"]
+    assert len(disabled_events) == 1, disabled_events
+    assert disabled_events[0]["details"]["sensor"] == "lidar"
 
 
 def test_sensor_gate_trips_once_and_resets_on_success() -> None:
@@ -308,14 +319,17 @@ def test_sensor_gate_trips_once_and_resets_on_success() -> None:
 
 
 def test_settle_uses_stop_event(tmp_path: Path, monkeypatch) -> None:
-    """The settle pause must be interruptible: run() with a 1.0 s idle settle
-    should return well under 1 s after stop is set (T1-038 hygiene, in scope here)."""
+    """The settle pause must be interruptible (T1-003): with the idle settle
+    forced to 5 s and stop set 0.2 s in, only a `stop_event.wait`-style
+    interruptible wait can return in under 2 s — a plain `time.sleep(5)`
+    settle would not."""
+    monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 5.0)
     config_path = _write_all_disabled_config(tmp_path)
     stop = threading.Event()
     threading.Timer(0.2, stop.set).start()
     start = time.monotonic()
     assert main_mod.run(config_path=config_path, duration_sec=10.0, stop_event=stop) == 0
-    assert time.monotonic() - start < 1.5
+    assert time.monotonic() - start < 2.0
 
 
 def test_telemetry_constructor_failure_still_tears_down(tmp_path: Path, monkeypatch) -> None:
@@ -365,7 +379,7 @@ class _CountingCamera:
 
 
 def test_save_images_false_prevents_capture(tmp_path: Path, monkeypatch) -> None:
-    """[logging].save_images = false must stop captures, not just skip a mkdir (T1-033)."""
+    """[logging].save_images = false must stop captures, not just skip a mkdir (T1-031)."""
     _CountingCamera.captures = 0
     monkeypatch.setattr(main_mod, "Camera", _CountingCamera)
     monkeypatch.setattr(main_mod, "_CAMERA_IMPORT_OK", True)
@@ -408,7 +422,7 @@ save_images = false
 
 def test_save_images_true_captures_and_logs(tmp_path: Path, monkeypatch) -> None:
     """The enabled-camera success path — capture, gate reset, and the
-    scan.jsonl camera record — must actually run (Finding 3 follow-up to T1-033)."""
+    scan.jsonl camera record — must actually run (Finding 3 follow-up to T1-031)."""
     import json
 
     _CountingCamera.captures = 0

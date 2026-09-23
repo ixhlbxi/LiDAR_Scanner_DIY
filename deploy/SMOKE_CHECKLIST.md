@@ -15,14 +15,18 @@ Each line is pass/fail. Record the outcome and date in the audit report row name
    `metadata.json`. (T1-029)
 6. `sudo systemctl start rover` with the stepper connected → journal shows no
    `lgpio` / `LG_WD` error and the motor steps. (PrivateTmp, T2-002)
-7. With the camera enabled: journal shows `Captured images/img_000000.jpg`, no
-   `TypeError`. (T1-005)
+7. With the camera enabled: `ls /var/lib/rover/data/scan_*/images/*.jpg` shows
+   files (the `Captured …` line itself is logged at DEBUG, invisible at the
+   shipped INFO level) and `journalctl -u rover | grep -c TypeError` prints
+   `0`. (T1-005)
 8. With the F9P connected and pyubx2 installed: `status.json` shows a plausible
    `lat`/`lon` (not 0.0) within 60 s of a sky view. (T1-006)
 9. Pull the LD19 USB cable mid-session → journal shows one WARNING
    `lidar: 5 consecutive read failures — subsystem disabled`, the service stays
    `active`, telemetry keeps publishing. (T1-003)
 10. `python3 -c "import RPi.GPIO as g; print(g.__file__)"` → path contains
-    `rpi_lgpio` or `lgpio`, not `RPi/GPIO`. If it does not, `sudo apt remove
-    python3-rpi.gpio && pip install rpi-lgpio`. (T1-033; stage 4 adds a code guard)
+    `rpi_lgpio` or `lgpio`, not `RPi/GPIO`. If it does not (`pip install
+    rpi-lgpio` fails on Bookworm under PEP 668): `sudo apt remove
+    python3-rpi.gpio` (if the wrong backend was found) then `sudo apt install
+    python3-rpi-lgpio`. (T1-033; stage 4 adds a code guard)
 11. `sudo deploy/install.sh` a second time → prints `kept /etc/rover/config.toml`.

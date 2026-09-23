@@ -3,6 +3,10 @@ Description=PiLiDAR-RTK Rover — acquisition orchestrator
 # No After=/Wants=multi-user.target here; combined with WantedBy=multi-user.target
 # in [Install] that creates an ordering cycle systemd resolves by deleting our
 # start job.
+# Both rover.service and rover-telemetry.service own RuntimeDirectory=rover
+# (stopping one removes /run/rover out from under the other) and the same
+# F9P serial port, so they must never run together.
+Conflicts=rover-telemetry.service
 
 [Service]
 # Type=notify lets the rover send READY=1 once main loop is up and WATCHDOG=1

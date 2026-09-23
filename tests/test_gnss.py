@@ -115,7 +115,8 @@ class TestGnssFixDefaults:
 def test_fix_from_nav_pvt_uses_pyubx2_scaled_attributes() -> None:
     """pyubx2 already scales lat/lon to degrees and pDOP to 0.01 units and
     expands the flags byte into carrSoln; dividing again zeroes the fix (T1-006)."""
-    pyubx2 = pytest.importorskip("pyubx2")
+    import pyubx2
+
     from rover.gnss import _fix_from_nav_pvt
 
     msg = pyubx2.UBXMessage(
@@ -137,7 +138,12 @@ def test_fix_from_nav_pvt_uses_pyubx2_scaled_attributes() -> None:
     assert abs(msg.lat - 40.7128) < 1e-6
     assert msg.carrSoln == 2
 
-    fix = _fix_from_nav_pvt(msg)
+    # Round-trip through a real parse rather than handing _fix_from_nav_pvt the
+    # hand-built UBXMessage directly — this exercises the actual attribute
+    # population path pyubx2 uses when parsing bytes off the wire.
+    parsed = pyubx2.UBXReader.parse(msg.serialize())
+
+    fix = _fix_from_nav_pvt(parsed)
     assert abs(fix.lat - 40.7128) < 1e-6
     assert abs(fix.lon - (-74.006)) < 1e-6
     assert abs(fix.alt - 10.5) < 1e-6

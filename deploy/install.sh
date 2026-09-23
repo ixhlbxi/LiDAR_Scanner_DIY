@@ -91,6 +91,10 @@ for rule in 99-rover-lidar.rules 99-rover-esp32.rules; do
         echo "  OK:      $rule has a configured serial"
     fi
 done
+if [[ "$DRY_RUN" == false ]] && ! command -v rsync >/dev/null 2>&1; then
+    echo "  REFUSED: rsync not found — apt install rsync"
+    fail=1
+fi
 if [[ $fail -ne 0 ]]; then
     exit 3
 fi
@@ -125,7 +129,7 @@ elif ! diff -q "$ETC_DIR/telemetry-only.toml" "$CONFIG_DIR/telemetry-only.toml" 
     echo "  DIFFERS: (config) telemetry-only.toml (existing file kept; not overwritten)"
 fi
 if command -v rsync >/dev/null 2>&1; then
-    rsync_n=$(rsync -a --delete -n --exclude '__pycache__' "$SRC_DIR/rover/" "$OPT_DIR/src/rover/" 2>/dev/null | grep -vc '^$' || true)
+    rsync_n=$(rsync -a --delete -n -i --exclude '__pycache__' "$SRC_DIR/rover/" "$OPT_DIR/src/rover/" 2>/dev/null | grep -vc '^$' || true)
     echo "  rsync --dry-run: $rsync_n line(s) of change under $OPT_DIR/src/rover/"
 else
     echo "  rsync --dry-run: rsync not found (would fail at install time — apt install rsync)"
@@ -172,7 +176,8 @@ else
 fi
 
 echo "  syncing rover package to $OPT_DIR/src/rover ..."
-command -v rsync >/dev/null || { echo "install.sh: rsync missing — apt install rsync" >&2; exit 1; }
+# rsync presence is already enforced in the Validation section above, before
+# any unit/udev/config file was installed.
 install -d -m 0755 "$OPT_DIR/src"
 rsync -a --delete --exclude '__pycache__' "$SRC_DIR/rover/" "$OPT_DIR/src/rover/"
 

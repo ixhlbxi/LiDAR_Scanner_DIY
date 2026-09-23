@@ -26,6 +26,13 @@ def test_unit_grants_state_and_runtime_dirs(unit: Path) -> None:
     assert "DEC-013 of arm-drone-lidar-workflow" not in text
 
 
+def test_units_conflict_with_each_other() -> None:
+    rover = (REPO / "deploy/systemd/rover.service").read_text(encoding="utf-8")
+    telemetry = (REPO / "deploy/systemd/rover-telemetry.service").read_text(encoding="utf-8")
+    assert re.search(r"^Conflicts=rover-telemetry\.service$", rover, re.M)
+    assert re.search(r"^Conflicts=rover\.service$", telemetry, re.M)
+
+
 @pytest.mark.parametrize(
     "toml_path, expected",
     EXPECTED_OUTPUT_DIRS,

@@ -3,6 +3,10 @@ Description=PiLiDAR-RTK Rover — telemetry-only mode (no stepper / no scan)
 # Use this for indoor bench tests where you want the rover's status.json +
 # HTTP /status endpoint live, but don't want the motor spinning. Points at
 # a separate config that disables stepper / lidar / camera / imu.
+# Both rover.service and rover-telemetry.service own RuntimeDirectory=rover
+# (stopping one removes /run/rover out from under the other) and the same
+# F9P serial port, so they must never run together.
+Conflicts=rover.service
 
 [Service]
 Type=notify

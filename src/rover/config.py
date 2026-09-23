@@ -299,7 +299,7 @@ _DEFAULTS: dict = {
         "output_folder": "images",
     },
     "logging": {
-        "output_dir": "/home/pi/rover/data",
+        "output_dir": "/var/lib/rover/data",
         "session_prefix": "scan",
         "format": "jsonl",
         "flush_interval_sec": 5.0,
