@@ -660,3 +660,32 @@ class TestMastAngleNeverChangedWarning:
         with caplog.at_level("WARNING", logger="georef"):
             georef.session_to_pointcloud(data)
         assert not any("mast angle never changed" in r.message for r in caplog.records)
+
+
+class TestDeclination:
+    _WHEN = 1790121600.0  # 2026-09-23T00:00:00Z
+
+    def test_state_college_known_answer(self):
+        pytest.importorskip("pygeomag", reason="pygeomag not installed (post/dev extra)")
+        d = georef.magnetic_declination_deg(40.79, -77.86, self._WHEN)
+        assert d == pytest.approx(-10.5348, abs=0.01)
+
+    def test_east_pa_is_more_westerly_than_central(self):
+        pytest.importorskip("pygeomag", reason="pygeomag not installed (post/dev extra)")
+        central = georef.magnetic_declination_deg(40.79, -77.86, self._WHEN)
+        east = georef.magnetic_declination_deg(41.40, -75.66, self._WHEN)
+        assert east < central < -9.0
+
+    def test_outside_lifespan_returns_none(self, caplog):
+        """Review Focus 5: WMM 2025 ends in 2030; a later session falls back."""
+        pytest.importorskip("pygeomag", reason="pygeomag not installed (post/dev extra)")
+        when_2031 = 1940000000.0  # 2031-06-23
+        with caplog.at_level("WARNING", logger="georef"):
+            assert georef.magnetic_declination_deg(40.79, -77.86, when_2031) is None
+        assert any("life span" in r.message or "lifespan" in r.message for r in caplog.records)
+
+    def test_missing_library_returns_none(self, monkeypatch, caplog):
+        monkeypatch.setattr(georef, "_optional_import", lambda name: None)
+        with caplog.at_level("WARNING", logger="georef"):
+            assert georef.magnetic_declination_deg(40.79, -77.86, self._WHEN) is None
+        assert any("pygeomag" in r.message for r in caplog.records)

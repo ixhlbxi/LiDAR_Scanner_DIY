@@ -451,6 +451,40 @@ def geodetic_from_enu(east, north, up, lat0: float, lon0: float, alt0: float):
 
 
 # ---------------------------------------------------------------------------
+# Heading reference
+# ---------------------------------------------------------------------------
+
+
+def magnetic_declination_deg(lat: float, lon: float, when_epoch: float) -> float | None:
+    """WMM 2025 declination (degrees, east-positive) at the ellipsoid surface.
+
+    Returns None — and says why — when pygeomag is not installed or the date
+    is outside the model's five-year life span; the caller then labels the
+    heading "magnetic" instead of "true".
+    """
+    pygeomag = _optional_import("pygeomag")
+    if pygeomag is None:
+        logger.warning(
+            'pygeomag not installed — heading stays magnetic; install via `pip install -e ".[post]"`'
+        )
+        return None
+    from datetime import UTC, datetime
+
+    day = datetime.fromtimestamp(when_epoch, UTC).date()
+    year = pygeomag.decimal_year_from_date(day)
+    try:
+        result = pygeomag.GeoMag(coefficients_file="wmm/WMM_2025.COF").calculate(
+            glat=lat, glon=lon, alt=0.0, time=year
+        )
+    except ValueError as e:
+        logger.warning(
+            "WMM 2025 cannot give a declination for %s (%s) — heading stays magnetic", day, e
+        )
+        return None
+    return float(result.d)
+
+
+# ---------------------------------------------------------------------------
 # Point cloud assembly
 # ---------------------------------------------------------------------------
 
