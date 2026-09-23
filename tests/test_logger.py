@@ -3,6 +3,7 @@
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -399,3 +400,83 @@ class TestDoubleStop:
         lg.start()
         lg.stop()
         lg.stop()  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# Fault-tolerant flush (T1-011, T1-032)
+# ---------------------------------------------------------------------------
+
+
+def test_flush_failure_keeps_timer_alive(fast_flush_cfg, monkeypatch):
+    """A write error inside the timer thread must not stop future flushes (T1-011)."""
+    config, path = fast_flush_cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    try:
+        calls = {"n": 0}
+        real = lg._write_record
+
+        def _boom(record):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(28, "No space left on device")
+            real(record)
+
+        monkeypatch.setattr(lg, "_write_record", _boom)
+        lg.write({"type": "event", "event": "first"})
+        time.sleep(0.3)  # first flush raises
+        assert lg.degraded is True
+        assert lg._flush_timer is not None and lg._flush_timer.is_alive()
+        lg.write({"type": "event", "event": "second"})
+        time.sleep(0.3)  # second flush succeeds
+    finally:
+        lg.stop()
+    text = (lg.session_dir / "scan.jsonl").read_text()
+    assert '"second"' in text
+
+
+def test_queue_is_bounded_and_drops_oldest(cfg):
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    try:
+        from rover import logger as logger_mod
+
+        for i in range(logger_mod._QUEUE_MAX + 5):
+            lg.write({"type": "event", "i": i})
+        assert lg.dropped_records == 5
+    finally:
+        lg.stop()
+    lines = (lg.session_dir / "scan.jsonl").read_text().splitlines()
+    first = json.loads(lines[0])
+    assert first["i"] == 5, "oldest five must have been dropped"
+
+
+def test_stop_fsyncs_files(cfg, monkeypatch):
+    import os as os_mod
+
+    synced: list[int] = []
+    monkeypatch.setattr(os_mod, "fsync", lambda fd: synced.append(fd))
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.write({"type": "event", "event": "x"})
+    lg.stop()
+    assert len(synced) >= 2, "scan and gnss files must be fsync'd at stop"
+
+
+def test_metadata_written_atomically(cfg, monkeypatch):
+    from rover import logger as logger_mod
+
+    called: list[str] = []
+
+    def _fake_atomic(path, data):
+        called.append(str(path))
+        Path(path).write_text(json.dumps(data))
+
+    monkeypatch.setattr(logger_mod, "atomic_write_json", _fake_atomic)
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.stop()
+    assert called and called[0].endswith("metadata.json")

@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import queue
 import shutil
 import threading
@@ -30,9 +31,13 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from rover import __version__
+from rover._io import atomic_write_json
 from rover.config import RoverConfig
 
 logger = logging.getLogger(__name__)
+
+_QUEUE_MAX = 10_000  # records buffered between flushes before dropping oldest
+_FSYNC_EVERY = 10  # periodic flushes between fsync calls
 
 
 class SessionLogger:
@@ -66,12 +71,16 @@ class SessionLogger:
         self._gnss_index: int = 0
 
         # Thread-safe write queue
-        self._queue: queue.Queue[dict] = queue.Queue()
+        self._queue: queue.Queue[dict] = queue.Queue(maxsize=_QUEUE_MAX)
 
         # Flush timer
         self._flush_timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._running = False
+
+        self._degraded = False
+        self._dropped = 0
+        self._flush_count = 0
 
     # ------------------------------------------------------------------
     # Properties
@@ -81,6 +90,16 @@ class SessionLogger:
     def session_dir(self) -> Path | None:
         """Path to the current session directory, or None if not started."""
         return self._session_dir
+
+    @property
+    def degraded(self) -> bool:
+        """True once any flush has failed; the logger keeps running regardless."""
+        return self._degraded
+
+    @property
+    def dropped_records(self) -> int:
+        """Records discarded because the queue was full."""
+        return self._dropped
 
     @property
     def images_dir(self) -> Path | None:
@@ -145,7 +164,20 @@ class SessionLogger:
         """
         if not self._running:
             raise RuntimeError("SessionLogger is not running")
-        self._queue.put(record)
+        try:
+            self._queue.put_nowait(record)
+        except queue.Full:
+            # Drop the oldest so a stalled disk cannot eat all memory.
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._dropped += 1
+            if self._dropped in (1, 100, 1000) or self._dropped % 10_000 == 0:
+                logger.warning(
+                    "SessionLogger queue full — dropped %d records so far", self._dropped
+                )
+            self._queue.put_nowait(record)
 
     def stop(self, metadata: dict[str, Any] | None = None) -> None:
         """Flush remaining records, write metadata, and close files.
@@ -166,7 +198,12 @@ class SessionLogger:
             self._flush_timer = None
 
         # Final drain
-        self._flush()
+        try:
+            self._flush()
+            self._fsync_files()
+        except Exception as e:
+            logger.error("SessionLogger final flush failed: %s", e)
+            self._degraded = True
 
         # Write metadata
         self._write_metadata(metadata)
@@ -207,9 +244,18 @@ class SessionLogger:
         self._flush_timer.start()
 
     def _periodic_flush(self) -> None:
-        """Called by timer: flush queue then reschedule."""
-        self._flush()
-        self._schedule_flush()
+        """Called by timer: flush, then ALWAYS reschedule (T1-011)."""
+        try:
+            self._flush()
+            self._flush_count += 1
+            if self._flush_count % _FSYNC_EVERY == 0:
+                self._fsync_files()
+        except Exception as e:
+            if not self._degraded:
+                logger.error("SessionLogger flush failed — continuing degraded: %s", e)
+            self._degraded = True
+        finally:
+            self._schedule_flush()
 
     def _flush(self) -> None:
         """Drain the queue and write all records to disk."""
@@ -304,6 +350,8 @@ class SessionLogger:
             "device_name": self._config.general.device_name,
             "firmware_version": __version__,
             "config_hash": config_hash,
+            "logger_degraded": self._degraded,
+            "dropped_records": self._dropped,
             "session": {
                 "profile": sess.profile,
                 "project_code": sess.project_code,
@@ -317,7 +365,7 @@ class SessionLogger:
             meta.update(extra)
 
         meta_path = self._session_dir / "metadata.json"
-        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        atomic_write_json(meta_path, meta)
         logger.info("Metadata written: %s", meta_path)
 
     def _compute_config_hash(self) -> str | None:
@@ -335,6 +383,12 @@ class SessionLogger:
             return hashlib.sha256(data).hexdigest()
 
         return None
+
+    def _fsync_files(self) -> None:
+        for f in (self._scan_file, self._gnss_file):
+            if f is not None and not f.closed:
+                f.flush()
+                os.fsync(f.fileno())
 
     def _close_files(self) -> None:
         """Close all open file handles."""
