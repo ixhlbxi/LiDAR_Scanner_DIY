@@ -17,12 +17,16 @@ Usage:
 
 Changelog:
     0.1.0  2026-03-22  Initial implementation (Task 1, Phase 3)
+    0.1.1  2026-09-23  mag_offset rejects bool/non-finite values; step_interval_deg
+                        error names both integer-multiple neighbours instead of
+                        rounding (which could suggest 0)
 """
 
 from __future__ import annotations
 
 import copy
 import logging
+import math
 import tomllib
 from dataclasses import asdict, dataclass, fields
 from difflib import get_close_matches
@@ -177,6 +181,9 @@ class CalibrationConfig:
     lidar_to_imu_translation: list[float] | None = None
     lidar_to_imu_rotation: list[float] | None = None
     imu_to_gnss_translation: list[float] | None = None
+    mag_offset: list[float] | None = (
+        None  # hard-iron offset (x, y, z) in µT, body frame; None = uncalibrated
+    )
 
 
 @dataclass(frozen=True)
@@ -233,7 +240,7 @@ _DEFAULTS: dict = {
         "enabled": True,
         "steps_per_rev": 3200,
         "rpm": 1.0,
-        "step_interval_deg": 1.5,
+        "step_interval_deg": 1.575,
         "direction_pin": 17,
         "step_pin": 27,
         "enable_pin": 22,
@@ -244,7 +251,7 @@ _DEFAULTS: dict = {
         "address": 0x68,
         "sample_rate_hz": 200,
         "fusion_output_hz": 100,
-        "use_magnetometer": True,
+        "use_magnetometer": False,
         "fusion_beta": 0.1,
     },
     "gnss": {
@@ -461,6 +468,20 @@ def _validate(raw: dict) -> None:
     _require_type("stepper", "step_interval_deg", st["step_interval_deg"], (int, float))
     _require_positive("stepper", "step_interval_deg", st["step_interval_deg"])
     st["step_interval_deg"] = float(st["step_interval_deg"])
+    per_step = 360.0 / st["steps_per_rev"]
+    ratio = st["step_interval_deg"] / per_step
+    if abs(ratio - round(ratio)) > 1e-9:
+        # Name both integer-multiple neighbours rather than the nearest one
+        # rounded — round() can land on 0 for a step_interval_deg smaller
+        # than one microstep, and "e.g. 0°" is not a usable suggestion (0
+        # steps is not a move). Floor is clamped to 1 microstep instead.
+        floor_n = max(1, math.floor(ratio))
+        ceil_n = max(floor_n + 1, math.ceil(ratio))
+        raise ValueError(
+            f"[stepper] step_interval_deg ({st['step_interval_deg']}) must be an integer "
+            f"multiple of {per_step:g}° (360 / steps_per_rev = {st['steps_per_rev']}); "
+            f"nearest valid values are {floor_n * per_step:g}° and {ceil_n * per_step:g}°"
+        )
     for pin_key in ("direction_pin", "step_pin", "enable_pin"):
         _require_type("stepper", pin_key, st[pin_key], int)
         _require_range("stepper", pin_key, st[pin_key], 0, 27)
@@ -633,7 +654,7 @@ def _validate(raw: dict) -> None:
         if se["target_crs_epsg"] == 0:
             raise ValueError(
                 "[session] profile = 'arm_group' requires target_crs_epsg > 0 "
-                "(e.g. 6346 = NAD83(2011) PA-N ft-US)"
+                "(e.g. 6563 = NAD83(2011) PA-N ft-US)"
             )
         if not bsi["enabled"]:
             raise ValueError(
@@ -644,13 +665,27 @@ def _validate(raw: dict) -> None:
 
     # -- calibration (all optional) --
     cal = raw.get("calibration", {})
-    for key in ("lidar_to_imu_translation", "imu_to_gnss_translation"):
+    for key in ("lidar_to_imu_translation", "imu_to_gnss_translation", "mag_offset"):
         if key in cal and cal[key] is not None:
             v = cal[key]
             if not isinstance(v, list) or len(v) != 3:
                 raise ValueError(f"[calibration] {key}: must be [x, y, z] (3 floats), got {v!r}")
             if not all(isinstance(x, (int, float)) for x in v):
                 raise ValueError(f"[calibration] {key}: all values must be numeric, got {v!r}")
+
+    # mag_offset gets an extra, stricter pass: isinstance(True, int) is True in
+    # Python, so the generic numeric check above silently accepts a stray
+    # `true`/`false` in the TOML list as 1/0; and a hard-iron offset of NaN or
+    # +/-inf would poison every downstream MadgwickFilter.update() call.
+    if "mag_offset" in cal and cal["mag_offset"] is not None:
+        for x in cal["mag_offset"]:
+            if isinstance(x, bool):
+                raise ValueError(
+                    f"[calibration] mag_offset: values must be numeric, got bool {x!r}"
+                )
+            if not math.isfinite(x):
+                raise ValueError(f"[calibration] mag_offset: values must be finite, got {x!r}")
+
     if "lidar_to_imu_rotation" in cal and cal["lidar_to_imu_rotation"] is not None:
         v = cal["lidar_to_imu_rotation"]
         if not isinstance(v, list) or len(v) != 4:
@@ -696,6 +731,7 @@ def _build_config(raw: dict) -> RoverConfig:
             lidar_to_imu_translation=cal_raw.get("lidar_to_imu_translation"),
             lidar_to_imu_rotation=cal_raw.get("lidar_to_imu_rotation"),
             imu_to_gnss_translation=cal_raw.get("imu_to_gnss_translation"),
+            mag_offset=cal_raw.get("mag_offset"),
         ),
     )
 

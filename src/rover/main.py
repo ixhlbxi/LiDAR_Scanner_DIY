@@ -27,6 +27,16 @@ Decision references:
 
 Changelog:
     0.10.1  2026-05-30  Real orchestrator (Stage A of deep-alignment overhaul).
+    0.11.0  2026-09-22  Columnar lidar records (mast_angle_deg + LD19
+                         lidar_ms_start/lidar_ms_end, parallel angle/
+                         distance/intensity arrays in place of a points
+                         list) written via LidarScanner.read_scan();
+                         batched imu records from ImuDriver.drain() in
+                         place of one-sample read_sample(); DEC-013
+                         magnetometer gating around each stepper move.
+    0.11.1  2026-09-23  Lidar record timestamp captured immediately after
+                         read_scan() returns instead of later alongside
+                         other records' `now`.
 """
 
 from __future__ import annotations
@@ -43,7 +53,7 @@ from pathlib import Path
 from rover.config import RoverConfig, load_config
 from rover.gnss import GnssFix, GnssReceiver
 from rover.imu import ImuDriver
-from rover.lidar import LidarScanner
+from rover.lidar import LidarScan, LidarScanner
 from rover.logger import SessionLogger
 from rover.ntrip import NtripClient
 from rover.stepper import StepperMotor
@@ -165,7 +175,10 @@ def _init_sensors(config: RoverConfig) -> _Sensors:
 
     if config.imu.enabled:
         try:
-            sensors.imu = ImuDriver(config.imu)
+            mag_offset = (
+                tuple(config.calibration.mag_offset) if config.calibration.mag_offset else None
+            )
+            sensors.imu = ImuDriver(config.imu, mag_offset=mag_offset)
         except Exception as e:
             logger.warning("IMU init failed: %s — subsystem disabled", e)
 
@@ -333,31 +346,48 @@ def _scan_loop(
                 pass
 
         # --- Step + settle ---
+        stepped = False
         if sensors.stepper is not None and sensors.stepper.available and steps_per_increment > 0:
+            if sensors.imu is not None and sensors.imu.available:
+                sensors.imu.enable_magnetometer(False)  # DEC-013: stepper EMI
             try:
                 sensors.stepper.step(steps_per_increment)
+                stepped = True
             except Exception as e:
                 logger.warning("Stepper step failed: %s — pausing scan", e)
                 status.scan_state = SCAN_ERROR
                 stop_event.wait(0.5)
                 continue
         stop_event.wait(settle_sec)
+        if stepped and sensors.imu is not None and sensors.imu.available:
+            sensors.imu.enable_magnetometer(config.imu.use_magnetometer)
+        mast_angle_deg = (
+            sensors.stepper.current_angle
+            if sensors.stepper is not None and sensors.stepper.available
+            else 0.0
+        )
 
         # --- LiDAR ---
-        lidar_points: list = []
+        lidar_scan: LidarScan | None = None
+        # Captured immediately after read_scan() returns (not later, alongside
+        # the other records' `now`) so the logged timestamp reflects when the
+        # revolution actually finished, not whenever IMU/camera work after it
+        # happens to wrap up.
+        scan_wall_time: float | None = None
         if sensors.lidar is not None and sensors.lidar.available and not lidar_gate.tripped:
             try:
-                lidar_points = sensors.lidar.read_scan()
+                lidar_scan = sensors.lidar.read_scan(discard_stale=stepped)
+                scan_wall_time = time.time()
                 lidar_gate.record_success()
             except _SENSOR_ERRORS as e:
                 if lidar_gate.record_failure(e):
                     _note_gate_trip(session_logger, lidar_gate, e)
 
         # --- IMU ---
-        imu_sample = None
+        imu_batch: list = []
         if sensors.imu is not None and sensors.imu.available and not imu_gate.tripped:
             try:
-                imu_sample = sensors.imu.read_sample()
+                imu_batch = sensors.imu.drain()
                 imu_gate.record_success()
             except _SENSOR_ERRORS as e:
                 if imu_gate.record_failure(e):
@@ -383,27 +413,30 @@ def _scan_loop(
 
         # --- Log records ---
         now = time.time()
-        if lidar_points:
+        if lidar_scan is not None and lidar_scan.points:
             session_logger.write(
                 {
                     "type": "lidar",
-                    "timestamp": now,
+                    "timestamp": scan_wall_time if scan_wall_time is not None else now,
                     "step_index": step_index,
-                    "points": [
-                        {"angle": p.angle, "distance": p.distance, "intensity": p.intensity}
-                        for p in lidar_points
-                    ],
+                    "mast_angle_deg": mast_angle_deg,
+                    "lidar_ms_start": lidar_scan.lidar_ms_start,
+                    "lidar_ms_end": lidar_scan.lidar_ms_end,
+                    "angle": [p.angle for p in lidar_scan.points],
+                    "distance": [p.distance for p in lidar_scan.points],
+                    "intensity": [p.intensity for p in lidar_scan.points],
                 }
             )
-        if imu_sample is not None:
+        if imu_batch:
             session_logger.write(
                 {
                     "type": "imu",
-                    "timestamp": imu_sample.timestamp,
-                    "accel": list(imu_sample.accel),
-                    "gyro": list(imu_sample.gyro),
-                    "mag": list(imu_sample.mag) if imu_sample.mag is not None else None,
-                    "orientation": list(imu_sample.orientation),
+                    "timestamp": imu_batch[-1].timestamp,
+                    "t": [s.timestamp for s in imu_batch],
+                    "accel": [list(s.accel) for s in imu_batch],
+                    "gyro": [list(s.gyro) for s in imu_batch],
+                    "mag": [list(s.mag) if s.mag is not None else None for s in imu_batch],
+                    "orientation": [list(s.orientation) for s in imu_batch],
                 }
             )
         if image_relpath is not None:

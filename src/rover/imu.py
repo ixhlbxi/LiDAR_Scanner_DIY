@@ -4,11 +4,15 @@ MPU-9250 IMU polling and Madgwick sensor fusion.
 Reads accelerometer, gyroscope, and (optionally) magnetometer data
 via I2C, then runs a Madgwick filter to produce quaternion orientation.
 
-The magnetometer is disabled during motor operation (DEC-013) to avoid
-stepper EMI corruption.
+The driver samples on its own daemon thread once started, at
+config.sample_rate_hz, using time.monotonic() for dt. The magnetometer
+toggle (DEC-013, disabled during motor operation to avoid stepper EMI
+corruption) is honoured by the thread once per sample.
 
-Outputs quaternion orientation at fusion_output_hz (default 100 Hz).
-IMU samples are stored in a ring buffer for timestamp correlation
+Consumers pull samples via drain() (everything since the last drain) or
+latest() (most recent only); read_sample() remains for direct single
+reads (hardware diagnostics) and shares the bus lock with the thread.
+IMU samples are also stored in a ring buffer for timestamp correlation
 with LiDAR scans via slerp interpolation (DEC-014).
 
 Decision references:
@@ -21,8 +25,19 @@ Dependencies:
     smbus2
 
 Changelog:
-    0.1.0  2026-03-22  Stub
-    0.2.0  2026-03-22  Full implementation
+    0.1.0   2026-03-22  Stub
+    0.2.0   2026-03-22  Full implementation
+    0.11.0  2026-09-22  Sampling thread with monotonic dt, drain()/latest(),
+                         bus-error shutdown, MARG hard-iron offset wiring
+    0.11.1  2026-09-22  Fix round 1: dt bookkeeping + filter update atomic
+                         under the bus lock, sampling thread also survives
+                         struct.error, stop() warns on a stuck thread
+    0.11.2  2026-09-23  Fix round 2: sampling thread try/finally guards
+                         `available` against ANY exit path; magnetometer
+                         axis mapping to the body frame (datasheet figure);
+                         enable_magnetometer() is change-only and gated on
+                         a successfully-initialised chip; short-mag-read
+                         guard
 """
 
 from __future__ import annotations
@@ -31,6 +46,7 @@ import collections
 import logging
 import math
 import struct
+import threading
 import time
 from dataclasses import dataclass
 
@@ -58,7 +74,11 @@ _AK8963_REG_HXL = 0x03
 # Conversion factors
 _ACCEL_SCALE_2G = 9.81 / 16384.0  # m/s² per LSB at ±2g
 _GYRO_SCALE_250DPS = math.pi / (180.0 * 131.0)  # rad/s per LSB at ±250°/s
-_MAG_SCALE_14BIT = 0.15  # µT per LSB in 14-bit mode
+_MAG_SCALE_16BIT = 0.15  # µT per LSB in 16-bit mode (CNTL1 = 0x16)
+
+# After this many consecutive bus errors, the sampling thread gives up and
+# marks the subsystem unavailable rather than spinning forever.
+_IMU_MAX_CONSECUTIVE_ERRORS = 50
 
 # WHO_AM_I expected values
 WHO_AM_I_MPU9250 = 0x71
@@ -87,17 +107,26 @@ class ImuSample:
 class MadgwickFilter:
     """Madgwick AHRS filter for quaternion orientation estimation.
 
-    Simplified 6-DOF (accel + gyro) implementation. When magnetometer
-    data is available, it is used for yaw correction.
+    6-DOF (accel + gyro) when no magnetometer sample is supplied; MARG (9-DOF)
+    when ``mx, my, mz`` are all given. A hard-iron ``mag_offset`` (µT, body
+    frame) is subtracted from every magnetometer sample before use; it comes
+    from ``[calibration].mag_offset`` and defaults to none.
+
+    Reference: S. Madgwick, "An efficient orientation filter for inertial and
+    inertial/magnetic sensor arrays", 2010 — the standard MARG update, with the
+    gyro-derivative term written once and shared by both branches.
 
     Args:
-        beta: Filter gain parameter (0..1). Higher = more accel trust.
+        beta: Filter gain (0..1). Higher = more accel/mag trust.
+        mag_offset: Hard-iron offset (x, y, z) in µT, or None.
     """
 
-    def __init__(self, beta: float = 0.1) -> None:
+    def __init__(
+        self, beta: float = 0.1, mag_offset: tuple[float, float, float] | None = None
+    ) -> None:
         self._beta = beta
-        # Quaternion [w, x, y, z], initialized to identity
-        self._q = [1.0, 0.0, 0.0, 0.0]
+        self._mag_offset = mag_offset
+        self._q = [1.0, 0.0, 0.0, 0.0]  # [w, x, y, z]
 
     @property
     def quaternion(self) -> tuple[float, float, float, float]:
@@ -112,55 +141,126 @@ class MadgwickFilter:
         ay: float,
         az: float,
         dt: float,
+        mx: float | None = None,
+        my: float | None = None,
+        mz: float | None = None,
     ) -> None:
-        """Update orientation from gyro (rad/s) and accel (m/s²)."""
+        """Advance the orientation by one sample.
+
+        gyro in rad/s, accel in m/s² (any scale; normalised), mag in µT (any
+        scale; normalised). With any of mx/my/mz None the 6-DOF step runs.
+        """
         q0, q1, q2, q3 = self._q
 
-        # Normalize accelerometer
-        norm = math.sqrt(ax * ax + ay * ay + az * az)
-        if norm < 1e-10:
-            # Free-fall or invalid — skip correction, gyro only
-            q0 += 0.5 * dt * (-q1 * gx - q2 * gy - q3 * gz)
-            q1 += 0.5 * dt * (q0 * gx + q2 * gz - q3 * gy)
-            q2 += 0.5 * dt * (q0 * gy - q1 * gz + q3 * gx)
-            q3 += 0.5 * dt * (q0 * gz + q1 * gy - q2 * gx)
-            self._q = [q0, q1, q2, q3]
-            self._normalize()
-            return
-
-        ax /= norm
-        ay /= norm
-        az /= norm
-
-        # Gradient descent corrective step
-        f1 = 2.0 * (q1 * q3 - q0 * q2) - ax
-        f2 = 2.0 * (q0 * q1 + q2 * q3) - ay
-        f3 = 2.0 * (0.5 - q1 * q1 - q2 * q2) - az
-
-        j_t_f0 = -2.0 * q2 * f1 + 2.0 * q1 * f2
-        j_t_f1 = 2.0 * q3 * f1 + 2.0 * q0 * f2 - 4.0 * q1 * f3
-        j_t_f2 = -2.0 * q0 * f1 + 2.0 * q3 * f2 - 4.0 * q2 * f3
-        j_t_f3 = 2.0 * q1 * f1 + 2.0 * q2 * f2
-
-        grad_norm = math.sqrt(j_t_f0 * j_t_f0 + j_t_f1 * j_t_f1 + j_t_f2 * j_t_f2 + j_t_f3 * j_t_f3)
-        if grad_norm > 1e-10:
-            j_t_f0 /= grad_norm
-            j_t_f1 /= grad_norm
-            j_t_f2 /= grad_norm
-            j_t_f3 /= grad_norm
-
-        # Quaternion derivative from gyro
+        # Rate of change of quaternion from gyroscope — shared by every branch.
         qd0 = 0.5 * (-q1 * gx - q2 * gy - q3 * gz)
         qd1 = 0.5 * (q0 * gx + q2 * gz - q3 * gy)
         qd2 = 0.5 * (q0 * gy - q1 * gz + q3 * gx)
         qd3 = 0.5 * (q0 * gz + q1 * gy - q2 * gx)
 
-        # Apply correction
-        q0 += (qd0 - self._beta * j_t_f0) * dt
-        q1 += (qd1 - self._beta * j_t_f1) * dt
-        q2 += (qd2 - self._beta * j_t_f2) * dt
-        q3 += (qd3 - self._beta * j_t_f3) * dt
+        s0 = s1 = s2 = s3 = 0.0
+        a_norm = math.sqrt(ax * ax + ay * ay + az * az)
+        if a_norm > 1e-10:
+            ax, ay, az = ax / a_norm, ay / a_norm, az / a_norm
+            use_mag = mx is not None and my is not None and mz is not None
+            if use_mag:
+                if self._mag_offset is not None:
+                    mx -= self._mag_offset[0]
+                    my -= self._mag_offset[1]
+                    mz -= self._mag_offset[2]
+                m_norm = math.sqrt(mx * mx + my * my + mz * mz)
+                use_mag = m_norm > 1e-10
+            if use_mag:
+                mx, my, mz = mx / m_norm, my / m_norm, mz / m_norm
+                # Reference direction of Earth's magnetic field in the earth frame
+                hx = (
+                    mx * q0 * q0
+                    - 2 * q0 * my * q3
+                    + 2 * q0 * mz * q2
+                    + mx * q1 * q1
+                    + 2 * q1 * my * q2
+                    + 2 * q1 * mz * q3
+                    - mx * q2 * q2
+                    - mx * q3 * q3
+                )
+                hy = (
+                    2 * q0 * mx * q3
+                    + my * q0 * q0
+                    - 2 * q0 * mz * q1
+                    + 2 * q1 * mx * q2
+                    - my * q1 * q1
+                    + my * q2 * q2
+                    + 2 * q2 * mz * q3
+                    - my * q3 * q3
+                )
+                bx = math.sqrt(hx * hx + hy * hy)
+                bz = (
+                    -2 * q0 * mx * q2
+                    + 2 * q0 * my * q1
+                    + mz * q0 * q0
+                    + 2 * q1 * mx * q3
+                    - mz * q1 * q1
+                    + 2 * q2 * my * q3
+                    - mz * q2 * q2
+                    + mz * q3 * q3
+                )
+                # Gradient descent corrective step (MARG)
+                f1 = 2 * (q1 * q3 - q0 * q2) - ax
+                f2 = 2 * (q0 * q1 + q2 * q3) - ay
+                f3 = 2 * (0.5 - q1 * q1 - q2 * q2) - az
+                f4 = 2 * bx * (0.5 - q2 * q2 - q3 * q3) + 2 * bz * (q1 * q3 - q0 * q2) - mx
+                f5 = 2 * bx * (q1 * q2 - q0 * q3) + 2 * bz * (q0 * q1 + q2 * q3) - my
+                f6 = 2 * bx * (q0 * q2 + q1 * q3) + 2 * bz * (0.5 - q1 * q1 - q2 * q2) - mz
+                s0 = (
+                    -2 * q2 * f1
+                    + 2 * q1 * f2
+                    - 2 * bz * q2 * f4
+                    + (-2 * bx * q3 + 2 * bz * q1) * f5
+                    + 2 * bx * q2 * f6
+                )
+                s1 = (
+                    2 * q3 * f1
+                    + 2 * q0 * f2
+                    - 4 * q1 * f3
+                    + 2 * bz * q3 * f4
+                    + (2 * bx * q2 + 2 * bz * q0) * f5
+                    + (2 * bx * q3 - 4 * bz * q1) * f6
+                )
+                s2 = (
+                    -2 * q0 * f1
+                    + 2 * q3 * f2
+                    - 4 * q2 * f3
+                    + (-4 * bx * q2 - 2 * bz * q0) * f4
+                    + (2 * bx * q1 + 2 * bz * q3) * f5
+                    + (2 * bx * q0 - 4 * bz * q2) * f6
+                )
+                s3 = (
+                    2 * q1 * f1
+                    + 2 * q2 * f2
+                    + (-4 * bx * q3 + 2 * bz * q1) * f4
+                    + (-2 * bx * q0 + 2 * bz * q2) * f5
+                    + 2 * bx * q1 * f6
+                )
+            else:
+                # Gradient descent corrective step (accel only)
+                f1 = 2 * (q1 * q3 - q0 * q2) - ax
+                f2 = 2 * (q0 * q1 + q2 * q3) - ay
+                f3 = 2 * (0.5 - q1 * q1 - q2 * q2) - az
+                s0 = -2 * q2 * f1 + 2 * q1 * f2
+                s1 = 2 * q3 * f1 + 2 * q0 * f2 - 4 * q1 * f3
+                s2 = -2 * q0 * f1 + 2 * q3 * f2 - 4 * q2 * f3
+                s3 = 2 * q1 * f1 + 2 * q2 * f2
+            s_norm = math.sqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3)
+            if s_norm > 1e-10:
+                s0, s1, s2, s3 = s0 / s_norm, s1 / s_norm, s2 / s_norm, s3 / s_norm
+            else:
+                s0 = s1 = s2 = s3 = 0.0
+        # else: free-fall / invalid accel — gyro integration only (s = 0)
 
+        q0 += (qd0 - self._beta * s0) * dt
+        q1 += (qd1 - self._beta * s1) * dt
+        q2 += (qd2 - self._beta * s2) * dt
+        q3 += (qd3 - self._beta * s3) * dt
         self._q = [q0, q1, q2, q3]
         self._normalize()
 
@@ -173,24 +273,54 @@ class MadgwickFilter:
 class ImuDriver:
     """MPU-9250 IMU driver with Madgwick fusion.
 
+    Samples on its own daemon thread once started, at ``config.sample_rate_hz``,
+    using ``time.monotonic()`` for ``dt`` so a wall-clock jump (NTP/GNSS
+    correction) never feeds a bogus interval to the filter. Consumers call
+    ``drain()`` (every sample since the last drain) or ``latest()`` (most
+    recent sample only); ``read_sample()`` remains for direct single reads
+    (hardware diagnostics) and shares the bus lock with the thread. The
+    magnetometer toggle (DEC-013) is read by the thread once per sample.
+
     Args:
         config: ImuConfig section from rover config.
+        mag_offset: Hard-iron magnetometer offset from ``[calibration]``, or None.
     """
 
-    def __init__(self, config: ImuConfig) -> None:
+    def __init__(
+        self, config: ImuConfig, mag_offset: tuple[float, float, float] | None = None
+    ) -> None:
         self._config = config
         self._available = False
         self._started = False
         self._mag_enabled = config.use_magnetometer
+        # True once _init_ak8963() has actually run successfully (start()
+        # only calls it when use_magnetometer is set). enable_magnetometer()
+        # folds this in so a caller asking for magnetometer readings before
+        # (or without) a working chip is quietly declined rather than
+        # setting a flag the sampling thread cannot act on.
+        self._mag_present = False
         self._bus = None
-        self._filter = MadgwickFilter(beta=config.fusion_beta)
-        self._last_time: float | None = None
+        self._filter = MadgwickFilter(beta=config.fusion_beta, mag_offset=mag_offset)
         self._identity: str | None = None
 
         # Ring buffer for timestamp correlation (DEC-014)
         self._ring_buffer: collections.deque[ImuSample] = collections.deque(
             maxlen=config.sample_rate_hz * 2,  # ~2 seconds of samples
         )
+
+        self._bus_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        # ~10 s of un-drained samples at sample_rate_hz; if drain() is not
+        # called at least that often, the oldest un-drained samples are
+        # silently dropped as the deque rolls over.
+        self._pending: collections.deque[ImuSample] = collections.deque(
+            maxlen=config.sample_rate_hz * 10
+        )
+        self._latest: ImuSample | None = None
+        self._last_mono: float | None = None
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._consecutive_errors = 0
 
         if not config.enabled:
             logger.info("IMU disabled by config")
@@ -251,9 +381,16 @@ class ImuDriver:
 
         self._started = True
         self._available = True
-        self._last_time = None
         self._ring_buffer.clear()
-        logger.info("IMU started (%s)", self._identity)
+        self._pending.clear()
+        self._last_mono = None
+        self._consecutive_errors = 0
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._sample_loop, name="rover-imu", daemon=True)
+        self._thread.start()
+        logger.info(
+            "IMU started (%s), sampling at %d Hz", self._identity, self._config.sample_rate_hz
+        )
 
     def _init_mpu9250(self) -> None:
         """Wake up MPU-9250, verify identity, configure sample rate."""
@@ -311,11 +448,19 @@ class ImuDriver:
         time.sleep(0.01)
         self._bus.write_byte_data(_AK8963_ADDR, _AK8963_REG_CNTL1, 0x16)
         time.sleep(0.01)
+        self._mag_present = True
 
     def stop(self) -> None:
-        """Stop polling and close I2C bus."""
+        """Stop the sampling thread and close the I2C bus."""
         if not self._started:
             return
+
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                logger.warning("IMU sampling thread did not stop within the 2.0 s join timeout")
+            self._thread = None
 
         try:
             if self._bus is not None:
@@ -328,8 +473,46 @@ class ImuDriver:
         self._available = False
         logger.info("IMU stopped")
 
+    def _read_one(self) -> ImuSample:
+        """One locked bus read, dt bookkeeping, and filter update.
+
+        The whole thing — the bus read, the `_last_mono` read/compute/write,
+        and the (not thread-safe) `MadgwickFilter.update()` call — runs under
+        `_bus_lock` as one unit. `read_sample()` (direct diagnostic reads) and
+        the sampling thread both call this; without the lock covering the dt
+        bookkeeping too, one caller can observe a stale `_last_mono` written
+        by the other and compute a negative or duplicated `dt`, and two
+        interleaved `update()` calls can corrupt the shared quaternion.
+
+        Raises:
+            OSError: On an I2C bus failure.
+            struct.error: On a malformed/short read.
+        """
+        with self._bus_lock:
+            accel, gyro = self._read_accel_gyro()
+            mag = self._read_mag() if self._mag_enabled else None
+            now_mono = time.monotonic()
+            dt = (
+                (now_mono - self._last_mono)
+                if self._last_mono is not None
+                else 1.0 / self._config.sample_rate_hz
+            )
+            self._last_mono = now_mono
+            if mag is not None:
+                self._filter.update(*gyro, *accel, dt, *mag)
+            else:
+                self._filter.update(*gyro, *accel, dt)
+            orientation = self._filter.quaternion
+        return ImuSample(
+            timestamp=time.time(),
+            accel=accel,
+            gyro=gyro,
+            mag=mag,
+            orientation=orientation,
+        )
+
     def read_sample(self) -> ImuSample:
-        """Read current sensor data, run Madgwick filter, return fused sample.
+        """Read one sample now (hardware diagnostics). Also recorded in the buffers.
 
         Returns:
             ImuSample with accel, gyro, optional mag, and fused quaternion.
@@ -340,72 +523,137 @@ class ImuDriver:
         if not self._available or self._bus is None:
             raise RuntimeError("IMU not available")
 
-        now = time.time()
-        dt = (now - self._last_time) if self._last_time is not None else 0.005
-        self._last_time = now
-
-        accel, gyro = self._read_accel_gyro()
-        mag = self._read_mag() if self._mag_enabled else None
-
-        # Run Madgwick filter
-        self._filter.update(
-            gyro[0],
-            gyro[1],
-            gyro[2],
-            accel[0],
-            accel[1],
-            accel[2],
-            dt,
-        )
-
-        sample = ImuSample(
-            timestamp=now,
-            accel=accel,
-            gyro=gyro,
-            mag=mag,
-            orientation=self._filter.quaternion,
-        )
-
-        self._ring_buffer.append(sample)
+        sample = self._read_one()
+        with self._state_lock:
+            self._ring_buffer.append(sample)
+            self._pending.append(sample)
+            self._latest = sample
         return sample
+
+    def _sample_loop(self) -> None:
+        """Sampling-thread body: reads at config.sample_rate_hz until stopped.
+
+        Wrapped in try/finally so that ANY way this loop ends without stop()
+        having asked it to — the OSError/struct.error threshold trip, or an
+        exception neither of those `except` clauses names — leaves
+        `available` False. Without the finally guard, an unanticipated
+        exception type could kill the thread silently while `available`
+        stayed True, so callers would keep trusting a dead sensor.
+        """
+        period = 1.0 / self._config.sample_rate_hz
+        next_t = time.monotonic()
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    sample = self._read_one()
+                except (OSError, struct.error) as e:
+                    self._consecutive_errors += 1
+                    if self._consecutive_errors >= _IMU_MAX_CONSECUTIVE_ERRORS:
+                        logger.warning(
+                            "IMU: %d consecutive %s errors — sampling stopped, subsystem unavailable (last: %s)",
+                            self._consecutive_errors,
+                            type(e).__name__,
+                            e,
+                        )
+                        self._available = False
+                        return
+                    self._stop_event.wait(period)
+                    continue
+                except Exception as e:
+                    logger.error("IMU sampling thread died: %r", e)
+                    return
+                self._consecutive_errors = 0
+                with self._state_lock:
+                    self._ring_buffer.append(sample)
+                    self._pending.append(sample)
+                    self._latest = sample
+                next_t += period
+                delay = next_t - time.monotonic()
+                if delay > 0:
+                    self._stop_event.wait(delay)
+                else:
+                    next_t = time.monotonic()  # fell behind; do not try to catch up
+        finally:
+            if not self._stop_event.is_set():
+                # The loop ended on its own (error threshold or an
+                # unanticipated exception), not via stop() — the subsystem
+                # is no longer sampling, so it must not read as available.
+                self._available = False
+
+    def drain(self) -> list[ImuSample]:
+        """Return and clear every sample recorded since the previous drain."""
+        with self._state_lock:
+            batch = list(self._pending)
+            self._pending.clear()
+        return batch
+
+    def latest(self) -> ImuSample | None:
+        """Return the most recently recorded sample, or None."""
+        with self._state_lock:
+            return self._latest
 
     def _read_accel_gyro(self) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
         """Read accel (m/s²) and gyro (rad/s) from MPU-9250."""
         addr = self._config.address
-        raw = self._bus.read_i2c_block_data(addr, _REG_ACCEL_XOUT_H, 14)
+        raw = bytes(self._bus.read_i2c_block_data(addr, _REG_ACCEL_XOUT_H, 14))
+        # >3h2x3h: accel x/y/z, 2 bytes skipped (temperature), gyro x/y/z
+        ax, ay, az, gx, gy, gz = struct.unpack(">3h2x3h", raw)
 
-        ax = struct.unpack(">h", bytes(raw[0:2]))[0] * _ACCEL_SCALE_2G
-        ay = struct.unpack(">h", bytes(raw[2:4]))[0] * _ACCEL_SCALE_2G
-        az = struct.unpack(">h", bytes(raw[4:6]))[0] * _ACCEL_SCALE_2G
-        # raw[6:8] = temperature, skip
-        gx = struct.unpack(">h", bytes(raw[8:10]))[0] * _GYRO_SCALE_250DPS
-        gy = struct.unpack(">h", bytes(raw[10:12]))[0] * _GYRO_SCALE_250DPS
-        gz = struct.unpack(">h", bytes(raw[12:14]))[0] * _GYRO_SCALE_250DPS
-
-        return (ax, ay, az), (gx, gy, gz)
+        return (
+            (ax * _ACCEL_SCALE_2G, ay * _ACCEL_SCALE_2G, az * _ACCEL_SCALE_2G),
+            (gx * _GYRO_SCALE_250DPS, gy * _GYRO_SCALE_250DPS, gz * _GYRO_SCALE_250DPS),
+        )
 
     def _read_mag(self) -> tuple[float, float, float] | None:
-        """Read magnetometer (µT) from AK8963. Returns None if not ready."""
+        """Read magnetometer (µT) from AK8963, mapped into the accel/gyro body frame.
+
+        Returns None if not ready (bus error, a short/malformed read, or an
+        overflow flag).
+
+        Axis mapping: the AK8963 die inside the MPU-9250 is mounted rotated
+        relative to the accel/gyro die. Per the MPU-9250 datasheet's
+        magnetometer orientation figure (RM-MPU-9250A-00, §9.2): X_mag =
+        Y_accel/gyro, Y_mag = X_accel/gyro, Z_mag = -Z_accel/gyro. Swapping
+        X/Y and negating Z below means every consumer of this value already
+        receives it in the body frame. `mag_offset` ([calibration] section)
+        is documented as a body-frame hard-iron offset and is applied
+        downstream of this mapping, in MadgwickFilter.update() — not here.
+        """
         try:
             raw = self._bus.read_i2c_block_data(_AK8963_ADDR, _AK8963_REG_HXL, 7)
         except OSError:
+            return None
+
+        if len(raw) < 7:
             return None
 
         # ST2 (byte 6) must be read to signal end of measurement
         if raw[6] & 0x08:  # Overflow
             return None
 
-        # AK8963 is little-endian
-        mx = struct.unpack("<h", bytes(raw[0:2]))[0] * _MAG_SCALE_14BIT
-        my = struct.unpack("<h", bytes(raw[2:4]))[0] * _MAG_SCALE_14BIT
-        mz = struct.unpack("<h", bytes(raw[4:6]))[0] * _MAG_SCALE_14BIT
+        # AK8963 is little-endian (chip frame)
+        mx, my, mz = struct.unpack("<3h", bytes(raw[:6]))
 
-        return (mx, my, mz)
+        # Chip frame -> body frame (see docstring): X<->Y swap, Z negated.
+        return (my * _MAG_SCALE_16BIT, mx * _MAG_SCALE_16BIT, -mz * _MAG_SCALE_16BIT)
 
     def enable_magnetometer(self, enable: bool) -> None:
-        """Enable or disable magnetometer readings (DEC-013)."""
-        self._mag_enabled = enable
-        logger.info("Magnetometer %s", "enabled" if enable else "disabled")
+        """Enable or disable magnetometer readings (DEC-013).
+
+        A no-op unless it actually changes something: `target` folds in
+        whether the AK8963 was ever successfully initialised
+        (`_mag_present`), so asking for magnetometer readings without a
+        present chip is quietly declined instead of setting a flag the
+        sampling thread cannot act on. Logged at DEBUG, not INFO — the
+        acquisition loop calls this twice per stepper step (DEC-013 EMI
+        gating), and most of those calls are now this no-op.
+        """
+        target = enable and self._mag_present
+        if target == self._mag_enabled:
+            return
+        with self._bus_lock:
+            self._mag_enabled = target
+        logger.debug("Magnetometer %s", "enabled" if target else "disabled")
 
     def get_sample_at(self, timestamp: float) -> ImuSample | None:
         """Find the closest sample in the ring buffer to the given timestamp.
@@ -418,10 +666,11 @@ class ImuDriver:
         Returns:
             Closest ImuSample, or None if buffer is empty.
         """
-        if not self._ring_buffer:
-            return None
+        with self._state_lock:
+            if not self._ring_buffer:
+                return None
 
-        return min(self._ring_buffer, key=lambda s: abs(s.timestamp - timestamp))
+            return min(self._ring_buffer, key=lambda s: abs(s.timestamp - timestamp))
 
     def __enter__(self) -> ImuDriver:
         self.start()

@@ -103,7 +103,7 @@ class TestArmGroupCrossValidation:
             [session]
             profile = "arm_group"
             project_code = ""
-            target_crs_epsg = 6346
+            target_crs_epsg = 6563
 
             [base_station_integration]
             enabled = true
@@ -139,7 +139,7 @@ class TestArmGroupCrossValidation:
             [session]
             profile = "arm_group"
             project_code = "2026-WENTZ-LIDR"
-            target_crs_epsg = 6346
+            target_crs_epsg = 6563
 
             [base_station_integration]
             enabled = false
@@ -157,7 +157,7 @@ class TestArmGroupCrossValidation:
             [session]
             profile = "arm_group"
             project_code = "2026-WENTZ-LIDR"
-            target_crs_epsg = 6346
+            target_crs_epsg = 6563
 
             [base_station_integration]
             enabled = true
@@ -176,7 +176,7 @@ class TestArmGroupCrossValidation:
             profile = "arm_group"
             project_code = "2026-WENTZ-LIDR"
             mission_tag = "wentz"
-            target_crs_epsg = 6346
+            target_crs_epsg = 6563
             units = "ft"
 
             [base_station_integration]
@@ -190,7 +190,7 @@ class TestArmGroupCrossValidation:
         assert cfg.session.profile == "arm_group"
         assert cfg.session.project_code == "2026-WENTZ-LIDR"
         assert cfg.session.mission_tag == "WENTZ"  # normalized
-        assert cfg.session.target_crs_epsg == 6346
+        assert cfg.session.target_crs_epsg == 6563
         assert cfg.base_station_integration.enabled is True
         assert cfg.ntrip.enabled is True
 

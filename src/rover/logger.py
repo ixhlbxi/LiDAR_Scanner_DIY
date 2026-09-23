@@ -15,6 +15,8 @@ Dependencies:
 
 Changelog:
     0.1.0  2026-03-22  Initial implementation (Task 3, Phase 3)
+    0.1.1  2026-09-23  _schedule_flush() starts the Timer before publishing
+                        it to self._flush_timer
 """
 
 from __future__ import annotations
@@ -242,12 +244,20 @@ class SessionLogger:
     # ------------------------------------------------------------------
 
     def _schedule_flush(self) -> None:
-        """Schedule the next periodic flush."""
+        """Schedule the next periodic flush.
+
+        Builds the Timer into a local and starts it BEFORE publishing it to
+        `self._flush_timer` — publishing an unstarted Timer first leaves a
+        window where a concurrent reader (e.g. a test asserting
+        `is_alive()`) can observe a Timer object that exists but hasn't
+        actually started running yet.
+        """
         if not self._running:
             return
-        self._flush_timer = threading.Timer(self._lc.flush_interval_sec, self._periodic_flush)
-        self._flush_timer.daemon = True
-        self._flush_timer.start()
+        timer = threading.Timer(self._lc.flush_interval_sec, self._periodic_flush)
+        timer.daemon = True
+        timer.start()
+        self._flush_timer = timer
 
     def _periodic_flush(self) -> None:
         """Called by timer: flush, then ALWAYS reschedule (T1-011)."""

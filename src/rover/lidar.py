@@ -19,6 +19,10 @@ Dependencies:
 Changelog:
     0.1.0  2026-03-22  Stub
     0.2.0  2026-03-22  Full implementation
+    0.11.0  2026-09  Seam carry-over, stale discard, LidarScan with LD19 timestamps, one-byte resync
+    0.11.1  2026-09-23  Shared _is_wrap() helper between the discard-skip and
+                        assembly loops; read_scan() docstring notes the
+                        shared timeout budget
 """
 
 from __future__ import annotations
@@ -305,6 +309,11 @@ except ImportError:
     serial = None  # type: ignore[assignment]
     _SERIAL_AVAILABLE = False
 
+PACKET_VERLEN = 0x2C  # byte 1: (packet type 2 << 5) | 12 points
+# Header(1) VerLen(1) speed(H) start(H) 12x(dist H, intensity B) end(H) timestamp(H) — 46 bytes, CRC is byte 46
+_PACKET_STRUCT = struct.Struct("<xxHH" + "HB" * POINTS_PER_PACKET + "HH")
+assert _PACKET_STRUCT.size == PACKET_LENGTH - 1
+
 
 def crc8(data: bytes) -> int:
     """Compute CRC8 over data using the LD19 lookup table."""
@@ -323,27 +332,21 @@ def parse_packet(packet: bytes) -> dict | None:
     """
     if len(packet) != PACKET_LENGTH or packet[0] != PACKET_HEADER:
         return None
-
-    # CRC8 over bytes 0..45, compare to byte 46
+    if packet[1] != PACKET_VERLEN:
+        return None
     if crc8(packet[:46]) != packet[46]:
         return None
 
-    speed = struct.unpack_from("<H", packet, 2)[0] / 100.0  # °/s
-    start_angle = struct.unpack_from("<H", packet, 4)[0] / 100.0  # °
-    end_angle = struct.unpack_from("<H", packet, 42)[0] / 100.0  # °
-    timestamp_ms = struct.unpack_from("<H", packet, 44)[0]
-
-    points_raw = []
-    for i in range(POINTS_PER_PACKET):
-        offset = 6 + i * 3
-        dist_mm = struct.unpack_from("<H", packet, offset)[0]
-        intensity = packet[offset + 2]
-        points_raw.append((dist_mm, intensity))
+    fields = _PACKET_STRUCT.unpack_from(packet, 0)
+    speed_raw, start_raw = fields[0], fields[1]
+    end_raw, timestamp_ms = fields[-2], fields[-1]
+    body = fields[2:-2]
+    points_raw = [(body[i], body[i + 1]) for i in range(0, len(body), 2)]
 
     return {
-        "speed_dps": speed,
-        "start_angle": start_angle,
-        "end_angle": end_angle,
+        "speed_dps": speed_raw / 100.0,
+        "start_angle": start_raw / 100.0,
+        "end_angle": end_raw / 100.0,
         "timestamp_ms": timestamp_ms,
         "points_raw": points_raw,
     }
@@ -370,6 +373,28 @@ class LidarPoint:
     intensity: int  # 0-255
 
 
+@dataclass
+class LidarScan:
+    """One full LD19 revolution."""
+
+    points: list[LidarPoint]
+    lidar_ms_start: int  # LD19 timestamp of the first packet (ms, wraps at 30000)
+    lidar_ms_end: int  # LD19 timestamp of the last packet
+
+
+_SCAN_TIMEOUT_SEC = 5.0
+_WRAP_THRESHOLD_DEG = 10.0
+
+
+def _is_wrap(start: float, prev: float | None) -> bool:
+    """True when `start` reveals a 360deg->0deg wrap relative to `prev` (the
+    previous packet's start_angle). `prev is None` means there is no
+    previous packet yet, so no wrap is possible. Shared by both the
+    discard_stale skip-to-wrap loop and the revolution-assembly loop in
+    read_scan() so the two can't drift onto different wrap definitions."""
+    return prev is not None and start < prev - _WRAP_THRESHOLD_DEG
+
+
 class LidarScanner:
     """LD19 LiDAR scanner driver.
 
@@ -386,6 +411,7 @@ class LidarScanner:
         self._started = False
         self._serial = None
         self._buf = bytearray()
+        self._carry: dict | None = None
 
         if not config.enabled:
             logger.info("LiDAR disabled by config")
@@ -432,6 +458,7 @@ class LidarScanner:
             return
 
         self._buf.clear()
+        self._carry = None
         self._started = True
         self._available = True
         logger.info("LiDAR started on %s", self._config.port)
@@ -449,6 +476,7 @@ class LidarScanner:
 
         self._serial = None
         self._buf.clear()
+        self._carry = None
         self._started = False
         self._available = False
         logger.info("LiDAR stopped")
@@ -475,72 +503,97 @@ class LidarScanner:
                 self._buf.clear()
                 return None
             if idx > 0:
-                self._buf = self._buf[idx:]
+                del self._buf[:idx]
             if len(self._buf) < PACKET_LENGTH:
                 return None
 
             raw = bytes(self._buf[:PACKET_LENGTH])
-            self._buf = self._buf[PACKET_LENGTH:]
-
             result = parse_packet(raw)
             if result is not None:
+                del self._buf[:PACKET_LENGTH]
                 return result
-            # CRC failure — try next header
+            # Not a packet at this offset (VerLen or CRC): drop ONE byte and re-search,
+            # so a 0x54 data byte cannot swallow the real packet behind it.
+            del self._buf[:1]
 
         return None
 
-    def read_scan(self) -> list[LidarPoint]:
-        """Read one complete 360° scan. Blocks until scan is assembled.
+    def _packet_points(self, pkt: dict) -> list[LidarPoint]:
+        angles = interpolate_angles(pkt["start_angle"], pkt["end_angle"], POINTS_PER_PACKET)
+        return [
+            LidarPoint(angle=a, distance=d_mm / 1000.0, intensity=inten)
+            for a, (d_mm, inten) in zip(angles, pkt["points_raw"], strict=True)
+            if d_mm > 0  # 0 = invalid / no return
+        ]
 
-        Collects packets until the angle wraps around (end of a full
-        LD19 revolution), then returns all valid points with interpolated
-        angles and distances converted to meters.
+    def _next_packet(self, deadline: float) -> dict:
+        while time.monotonic() < deadline:
+            pkt = self.read_packet()
+            if pkt is not None:
+                return pkt
+            time.sleep(0.001)
+        raise TimeoutError("No complete LiDAR scan received within timeout")
 
-        Returns:
-            List of LidarPoint with angle (degrees) and distance (meters).
+    def read_scan(self, discard_stale: bool = True) -> LidarScan:
+        """Read one complete 360° revolution.
+
+        Args:
+            discard_stale: When true (the normal case after a mast step) flush the
+                serial input and the parse buffer, then skip packets until the first
+                angle wrap, so bytes buffered while the mast moved never enter the
+                slice. When false, continue from the packet carried over from the
+                previous call (the one that revealed its wrap).
+
+        A single `_SCAN_TIMEOUT_SEC` deadline, set once at the top of this call,
+        covers BOTH phases when discard_stale is true — the skip-to-wrap discard
+        loop and the revolution-assembly loop share it rather than each getting
+        their own budget. A slow or stalled stream can spend the whole deadline
+        discarding and leave nothing for the actual scan; that surfaces as the
+        same TimeoutError either way, not a distinguishable failure mode.
 
         Raises:
             RuntimeError: If the scanner is not available.
-            TimeoutError: If no complete scan is received within 5 seconds.
+            TimeoutError: If no full revolution arrives within the timeout.
         """
-        if not self._available:
+        if not self._available or self._serial is None:
             raise RuntimeError("LiDAR not available")
 
-        points: list[LidarPoint] = []
-        prev_start_angle: float | None = None
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + _SCAN_TIMEOUT_SEC
 
-        while time.monotonic() < deadline:
-            pkt = self.read_packet()
-            if pkt is None:
-                time.sleep(0.001)
-                continue
+        if discard_stale:
+            try:
+                self._serial.reset_input_buffer()
+            except Exception as e:  # pragma: no cover — driver quirk, not fatal
+                logger.debug("reset_input_buffer failed: %s", e)
+            self._buf.clear()
+            self._carry = None
+            # Skip forward to the first wrap so we start at 0°.
+            prev = None
+            while True:
+                pkt = self._next_packet(deadline)
+                if _is_wrap(pkt["start_angle"], prev):
+                    break
+                prev = pkt["start_angle"]
+            first = pkt
+        elif self._carry is not None:
+            first = self._carry
+            self._carry = None
+        else:
+            first = self._next_packet(deadline)
 
-            start_angle = pkt["start_angle"]
-            end_angle = pkt["end_angle"]
+        points = self._packet_points(first)
+        ms_start = first["timestamp_ms"]
+        ms_end = ms_start
+        prev = first["start_angle"]
 
-            # Detect wrap-around: new packet's start angle is less than
-            # previous packet's start angle → full revolution complete
-            if prev_start_angle is not None and start_angle < prev_start_angle - 10:
-                if points:
-                    return points
-
-            prev_start_angle = start_angle
-
-            # Interpolate angles for each of the 12 points
-            angles = interpolate_angles(start_angle, end_angle, POINTS_PER_PACKET)
-
-            for angle, (dist_mm, intensity) in zip(angles, pkt["points_raw"], strict=False):
-                if dist_mm > 0:  # 0 = invalid/no return
-                    points.append(
-                        LidarPoint(
-                            angle=angle,
-                            distance=dist_mm / 1000.0,
-                            intensity=intensity,
-                        )
-                    )
-
-        raise TimeoutError("No complete LiDAR scan received within timeout")
+        while True:
+            pkt = self._next_packet(deadline)
+            if _is_wrap(pkt["start_angle"], prev):
+                self._carry = pkt  # opens the next revolution
+                return LidarScan(points=points, lidar_ms_start=ms_start, lidar_ms_end=ms_end)
+            prev = pkt["start_angle"]
+            points.extend(self._packet_points(pkt))
+            ms_end = pkt["timestamp_ms"]
 
     def __enter__(self) -> LidarScanner:
         self.start()

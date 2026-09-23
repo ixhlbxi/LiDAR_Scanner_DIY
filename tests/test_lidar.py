@@ -38,6 +38,18 @@ def disabled_config():
     )
 
 
+@pytest.fixture
+def mock_serial():
+    mock_ser = MagicMock()
+    mock_ser_class = MagicMock(return_value=mock_ser)
+    with (
+        patch("rover.lidar._SERIAL_AVAILABLE", True),
+        patch("rover.lidar.serial") as mock_mod,
+    ):
+        mock_mod.Serial = mock_ser_class
+        yield mock_ser
+
+
 def build_packet(
     start_angle_deg: float = 0.0,
     end_angle_deg: float = 5.5,
@@ -214,17 +226,6 @@ class TestScannerNoSerial:
 
 
 class TestScannerWithMockSerial:
-    @pytest.fixture
-    def mock_serial(self):
-        mock_ser = MagicMock()
-        mock_ser_class = MagicMock(return_value=mock_ser)
-        with (
-            patch("rover.lidar._SERIAL_AVAILABLE", True),
-            patch("rover.lidar.serial") as mock_mod,
-        ):
-            mock_mod.Serial = mock_ser_class
-            yield mock_ser
-
     def test_start_opens_port(self, lidar_config, mock_serial):
         scanner = LidarScanner(lidar_config)
         scanner.start()
@@ -308,7 +309,8 @@ class TestScannerWithMockSerial:
 
         scanner = LidarScanner(lidar_config)
         scanner.start()
-        points = scanner.read_scan()
+        scan = scanner.read_scan(discard_stale=False)
+        points = scan.points
 
         assert len(points) > 0
         assert all(isinstance(p, LidarPoint) for p in points)
@@ -325,3 +327,157 @@ class TestScannerWithMockSerial:
             scanner = LidarScanner(lidar_config)
             scanner.start()
             assert not scanner.available
+
+
+# ---------------------------------------------------------------------------
+# Resync / VerLen / precompiled struct tests (T1-014, T1-044)
+# ---------------------------------------------------------------------------
+
+
+class TestPacketResync:
+    def test_parse_rejects_wrong_verlen(self):
+        pkt = bytearray(build_packet())
+        pkt[1] = 0x00
+        pkt[46] = crc8(bytes(pkt[:46]))  # keep CRC valid so only VerLen fails
+        assert parse_packet(bytes(pkt)) is None
+
+    def test_false_header_byte_does_not_drop_next_packet(self, lidar_config, mock_serial):
+        """A stray 0x54 data byte 1 byte before a real packet used to cost the
+        whole real packet (47-byte skip). Resync must advance one byte (T1-014)."""
+        real = build_packet(start_angle_deg=10.0, end_angle_deg=15.5)
+        stream = b"\x54" + real  # false header immediately followed by a real packet
+        mock_serial.in_waiting = len(stream)
+        mock_serial.read.return_value = stream
+        scanner = LidarScanner(lidar_config)
+        scanner.start()
+        result = scanner.read_packet()
+        assert result is not None
+        assert result["start_angle"] == pytest.approx(10.0)
+
+    def test_parse_packet_values_via_struct(self):
+        pkt = build_packet(
+            start_angle_deg=1.0,
+            end_angle_deg=2.0,
+            speed_dps=359.9,
+            timestamp_ms=4321,
+            distances_mm=list(range(100, 100 + POINTS_PER_PACKET)),
+            intensities=list(range(POINTS_PER_PACKET)),
+        )
+        r = parse_packet(pkt)
+        assert r["speed_dps"] == pytest.approx(359.9)
+        assert r["timestamp_ms"] == 4321
+        assert r["points_raw"][5] == (105, 5)
+
+
+# ---------------------------------------------------------------------------
+# read_scan: stale-discard, seam carry-over, LD19 timestamps (T1-012, T1-013)
+# ---------------------------------------------------------------------------
+
+
+def _revolution_packets(rev_index: int = 0, start_ms: int = 1000) -> list[bytes]:
+    """30 packets covering 0..360 in 12° packets; timestamps advance 3 ms each."""
+    pkts = []
+    for i in range(30):
+        s = i * 12.0
+        e = s + 11.0
+        pkts.append(build_packet(start_angle_deg=s, end_angle_deg=e, timestamp_ms=start_ms + 3 * i))
+    return pkts
+
+
+class TestReadScanRevolutions:
+    def _scanner(self, lidar_config, mock_serial, stream: bytes):
+        mock_serial.in_waiting = len(stream)
+        # first read returns everything, later reads return nothing
+        mock_serial.read.side_effect = [stream] + [b""] * 10_000
+        s = LidarScanner(lidar_config)
+        s.start()
+        return s
+
+    def test_read_scan_returns_one_full_revolution_with_timestamps(self, lidar_config, mock_serial):
+        stream = b"".join(
+            _revolution_packets(0, 1000)
+            + _revolution_packets(1, 2000)
+            + _revolution_packets(2, 3000)
+        )
+        s = self._scanner(lidar_config, mock_serial, stream)
+        scan = s.read_scan(discard_stale=False)
+        assert len(scan.points) == 30 * POINTS_PER_PACKET
+        assert scan.lidar_ms_start == 1000
+        assert scan.lidar_ms_end == 1000 + 3 * 29
+
+    def test_seam_packet_is_carried_into_next_scan(self, lidar_config, mock_serial):
+        """The packet that reveals the wrap (first packet of revolution 2) used to be
+        thrown away; it must open the next scan instead (T1-013)."""
+        stream = b"".join(
+            _revolution_packets(0, 1000)
+            + _revolution_packets(1, 2000)
+            + _revolution_packets(2, 3000)
+        )
+        s = self._scanner(lidar_config, mock_serial, stream)
+        first = s.read_scan(discard_stale=False)
+        second = s.read_scan(discard_stale=False)
+        assert len(second.points) == 30 * POINTS_PER_PACKET
+        assert second.lidar_ms_start == 2000  # revolution 2's very first packet, not its second
+        assert first.lidar_ms_end < second.lidar_ms_start
+
+    def test_read_scan_discards_buffered_packets_after_step(self, lidar_config, mock_serial):
+        """With discard_stale=True the driver flushes the serial input and skips to the
+        first wrap, so bytes buffered while the mast moved never land in the slice (T1-012)."""
+        stale = _revolution_packets(0, 100)[10:25]  # a partial revolution from 120°..300°
+        fresh = _revolution_packets(1, 5000) + _revolution_packets(2, 6000)
+        stream = b"".join(stale + fresh)
+        s = self._scanner(lidar_config, mock_serial, stream)
+        scan = s.read_scan(discard_stale=True)
+        mock_serial.reset_input_buffer.assert_called_once()
+        assert scan.lidar_ms_start == 5000
+        assert len(scan.points) == 30 * POINTS_PER_PACKET
+
+    def test_read_scan_times_out_without_wrap(self, lidar_config, mock_serial, monkeypatch):
+        stream = b"".join(_revolution_packets(0, 1000)[:5])
+        s = self._scanner(lidar_config, mock_serial, stream)
+        monkeypatch.setattr("rover.lidar._SCAN_TIMEOUT_SEC", 0.2)
+        with pytest.raises(TimeoutError):
+            s.read_scan(discard_stale=False)
+
+    def test_discard_after_carry_ignores_carried_packet(self, lidar_config, mock_serial):
+        """discard_stale=True after a prior discard_stale=False call must not
+        resume from the packet that call carried into `_carry` — the carry
+        (and anything else buffered) is discarded, not silently reused as the
+        start of the next scan."""
+        rev0 = _revolution_packets(0, 1000)
+        rev1 = _revolution_packets(1, 2000)  # becomes the carry after the first call
+        rev2 = _revolution_packets(2, 5000)  # discarded whole by the skip-to-wrap loop
+        rev3 = _revolution_packets(3, 6000)  # becomes the second scan
+        rev4 = _revolution_packets(4, 7000)  # reveals the closing wrap
+
+        state: dict = {"phase2_data": None}
+
+        def read_after_reset(n):
+            if state["phase2_data"] is not None:
+                data, state["phase2_data"] = state["phase2_data"], None
+                return data
+            return b""
+
+        def reset_input_buffer():
+            # Simulates fresh packets only starting to arrive once the mast has
+            # settled: the NEXT read() after this reset delivers rev2..rev4.
+            mock_serial.read.side_effect = read_after_reset
+            state["phase2_data"] = b"".join(rev2 + rev3 + rev4)
+
+        mock_serial.in_waiting = 1
+        mock_serial.read.side_effect = [b"".join(rev0 + rev1)] + [b""] * 10_000
+        mock_serial.reset_input_buffer.side_effect = reset_input_buffer
+
+        s = LidarScanner(lidar_config)
+        s.start()
+
+        first = s.read_scan(discard_stale=False)
+        assert first.lidar_ms_start == 1000
+        assert s._carry is not None
+        carried_ms = s._carry["timestamp_ms"]
+        assert carried_ms == 2000
+
+        second = s.read_scan(discard_stale=True)
+        mock_serial.reset_input_buffer.assert_called_once()
+        assert second.lidar_ms_start == 6000
+        assert second.lidar_ms_start != carried_ms
