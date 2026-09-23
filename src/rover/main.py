@@ -45,7 +45,7 @@ from rover.gnss import GnssFix, GnssReceiver
 from rover.imu import ImuDriver
 from rover.lidar import LidarScanner
 from rover.logger import SessionLogger
-from rover.ntrip import NtripClient, NtripStats
+from rover.ntrip import NtripClient
 from rover.stepper import StepperMotor
 from rover.telemetry import TelemetryRouter, status_from_config
 from rover.watchdog import Watchdog
@@ -269,7 +269,7 @@ def _scan_loop(
     session_logger: SessionLogger,
     telemetry: TelemetryRouter,
     watchdog: Watchdog | None,
-    ntrip_stats_holder: dict,
+    ntrip_client: NtripClient | None,
     stop_event: threading.Event,
     duration_sec: float | None,
 ) -> None:
@@ -430,8 +430,8 @@ def _scan_loop(
         now_monotonic = time.monotonic()
         if now_monotonic - last_publish >= publish_interval:
             status.timestamp_epoch = now
-            ntrip_stats = ntrip_stats_holder.get("stats")
-            if isinstance(ntrip_stats, NtripStats):
+            if ntrip_client is not None:
+                ntrip_stats = ntrip_client.stats
                 status.ntrip_connected = ntrip_stats.connected
                 status.ntrip_bytes_per_sec = ntrip_stats.bytes_received_this_sec
             telemetry.publish(status)
@@ -512,55 +512,50 @@ def run(
         }
     )
 
-    # --- Telemetry ---
-    telemetry = TelemetryRouter(config)
-    telemetry.start()
-
-    # --- NTRIP (Pi-mode only — ESP32 mode owns the path itself) ---
+    telemetry: TelemetryRouter | None = None
     ntrip_client: NtripClient | None = None
-    ntrip_stats_holder: dict = {"stats": None}
-
-    def _ntrip_stats_sink(stats: NtripStats) -> None:
-        ntrip_stats_holder["stats"] = stats
-
-    if config.ntrip.enabled and config.ntrip.client_location == "pi" and sensors.gnss is not None:
-        try:
-            ntrip_client = NtripClient(
-                config,
-                rtcm_sink=sensors.gnss.write_rtcm,
-                status_sink=_ntrip_stats_sink,
-            )
-            ntrip_client.start()
-        except Exception as e:
-            logger.warning("NtripClient start failed: %s — RTK degraded", e)
-            ntrip_client = None
-
-    # --- Watchdog ---
-    # Always constructed: start() sends READY=1 and, when enabled, runs the
-    # monitor thread; heartbeat() always pings systemd's WatchdogSec.
     watchdog: Watchdog | None = None
-    try:
-        watchdog = Watchdog(config.watchdog)
-        watchdog.start()
-    except Exception as e:
-        logger.warning("Watchdog start failed: %s — running without health monitor", e)
-        watchdog = None
-
-    # --- Acquisition loop ---
     exit_code = 0
     try:
+        # --- Telemetry ---
+        telemetry = TelemetryRouter(config)
+        telemetry.start()
+
+        # --- NTRIP (Pi-mode only — ESP32 mode owns the path itself) ---
+        if (
+            config.ntrip.enabled
+            and config.ntrip.client_location == "pi"
+            and sensors.gnss is not None
+        ):
+            try:
+                ntrip_client = NtripClient(config, rtcm_sink=sensors.gnss.write_rtcm)
+                ntrip_client.start()
+            except Exception as e:
+                logger.warning("NtripClient start failed: %s — RTK degraded", e)
+                ntrip_client = None
+
+        # --- Watchdog (always constructed: start() sends READY=1; the monitor
+        # thread only runs when enabled; heartbeat() always pings systemd) ---
+        try:
+            watchdog = Watchdog(config.watchdog)
+            watchdog.start()
+        except Exception as e:
+            logger.warning("Watchdog start failed: %s — running without health monitor", e)
+            watchdog = None
+
+        # --- Acquisition loop ---
         _scan_loop(
             config=config,
             sensors=sensors,
             session_logger=session_logger,
             telemetry=telemetry,
             watchdog=watchdog,
-            ntrip_stats_holder=ntrip_stats_holder,
+            ntrip_client=ntrip_client,
             stop_event=stop_event,
             duration_sec=duration_sec,
         )
     except Exception as e:
-        logger.exception("Acquisition loop crashed: %s", e)
+        logger.exception("Acquisition setup or loop crashed: %s", e)
         exit_code = 1
     finally:
         session_logger.write(
@@ -584,18 +579,17 @@ def run(
             except Exception as e:
                 logger.warning("NtripClient stop failed: %s", e)
 
-        try:
-            telemetry.stop()
-        except Exception as e:
-            logger.warning("TelemetryRouter stop failed: %s", e)
+        if telemetry is not None:
+            try:
+                telemetry.stop()
+            except Exception as e:
+                logger.warning("TelemetryRouter stop failed: %s", e)
 
         _stop_sensors(sensors)
 
-        # Metadata fields populated from runtime
         metadata: dict = {}
-        ntrip_stats = ntrip_stats_holder.get("stats")
-        if isinstance(ntrip_stats, NtripStats):
-            metadata["ntrip_stats"] = asdict(ntrip_stats)
+        if ntrip_client is not None:
+            metadata["ntrip_stats"] = asdict(ntrip_client.stats)
         metadata["lora_rtcm_used"] = config.lora.enabled and config.lora.role == "rtcm_rx+status_tx"
 
         try:

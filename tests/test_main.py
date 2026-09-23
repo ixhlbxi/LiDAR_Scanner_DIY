@@ -316,3 +316,27 @@ def test_settle_uses_stop_event(tmp_path: Path, monkeypatch) -> None:
     start = time.monotonic()
     assert main_mod.run(config_path=config_path, duration_sec=10.0, stop_event=stop) == 0
     assert time.monotonic() - start < 1.5
+
+
+def test_telemetry_constructor_failure_still_tears_down(tmp_path: Path, monkeypatch) -> None:
+    """A failure after sensors + logger are up must still write scan_abort and
+    close the session (T1-029)."""
+    import json
+
+    class _BoomRouter:
+        def __init__(self, *_a, **_kw) -> None:
+            raise RuntimeError("simulated telemetry failure")
+
+    monkeypatch.setattr(main_mod, "TelemetryRouter", _BoomRouter)
+    config_path = _write_all_disabled_config(tmp_path)
+    exit_code = main_mod.run(config_path=config_path, duration_sec=0.5)
+    assert exit_code == 1
+
+    session = next((tmp_path / "data").glob("test_*"))
+    events = [
+        json.loads(line)["event"]
+        for line in (session / "scan.jsonl").read_text().splitlines()
+        if '"event"' in line
+    ]
+    assert events[-1] == "scan_abort", events
+    assert (session / "metadata.json").exists(), "logger.stop() must still run"
