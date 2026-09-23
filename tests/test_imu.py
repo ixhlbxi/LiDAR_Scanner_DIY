@@ -1,6 +1,7 @@
 """Unit tests for rover.imu — runs anywhere, no hardware required."""
 
 import math
+import time as _time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -244,20 +245,32 @@ class TestImuWithMockI2C:
         assert driver._mag_enabled
 
     def test_ring_buffer_stores_samples(self, imu_config, mock_smbus):
+        # start() now also launches the sampling thread; under this fixture
+        # rover.imu.time is a bare MagicMock, so the thread's own pacing math
+        # hits a mock-vs-int comparison and self-terminates within a step or
+        # two, possibly recording a sample of its own first. Assert "at least
+        # the 5 manual reads" rather than an exact count that a second, real
+        # writer can no longer guarantee.
         driver = ImuDriver(imu_config)
         driver.start()
-        for _ in range(5):
-            driver.read_sample()
-        assert len(driver._ring_buffer) == 5
+        try:
+            for _ in range(5):
+                driver.read_sample()
+        finally:
+            driver.stop()
+        assert len(driver._ring_buffer) >= 5
 
     def test_get_sample_at_empty(self, imu_config, mock_smbus):
+        # Deliberately not started: get_sample_at only needs the ring buffer,
+        # which is empty until something (a manual read or the sampling
+        # thread) populates it — starting the thread here would race it.
         driver = ImuDriver(imu_config)
-        driver.start()
         assert driver.get_sample_at(0.0) is None
 
     def test_get_sample_at_finds_closest(self, imu_config, mock_smbus):
+        # Deliberately not started (see test_get_sample_at_empty): this test
+        # seeds the ring buffer directly and must own it exclusively.
         driver = ImuDriver(imu_config)
-        driver.start()
 
         # Manually add samples with known timestamps
         for t in [1.0, 2.0, 3.0, 4.0, 5.0]:
@@ -303,3 +316,109 @@ class TestImuWithMockI2C:
         driver.start()
         assert driver.available
         assert not driver._mag_enabled
+
+
+# ---------------------------------------------------------------------------
+# ImuDriver sampling thread tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_smbus_realtime():
+    """Like mock_smbus but leaves rover.imu.time entirely REAL, so the sampling
+    thread can pace itself with monotonic() and the test's own real-time waits
+    (`_time.sleep`) actually elapse.
+
+    Deliberately does NOT patch `rover.imu.time.sleep`: `rover.imu.time` is the
+    same singleton module object as this test file's own `time` (imported here
+    as `_time`) — `import time` always returns the one cached `sys.modules`
+    entry. Patching `.sleep` on it (as an early draft of this fixture did) does
+    not scope to `rover.imu`; it silently neuters every `_time.sleep(...)` call
+    in the tests below too, so `test_thread_samples_at_configured_rate`'s
+    "sleep 0.5s then drain" collapsed to "drain almost immediately," capturing
+    ~1 sample instead of ~100 — measured, not assumed. Leaving `time` real costs
+    the ~0.22 s of real `_init_mpu9250`/`_init_ak8963` sleeps per `start()`,
+    which is cheap next to the real waits these tests need anyway.
+    """
+    mock_bus = MagicMock()
+    mock_bus.read_byte_data.return_value = 0x71
+    mock_bus.read_i2c_block_data.return_value = [0] * 14
+    with (
+        patch("rover.imu._I2C_AVAILABLE", True),
+        patch("rover.imu.SMBus", MagicMock(return_value=mock_bus)),
+    ):
+        yield mock_bus
+
+
+class TestImuSamplingThread:
+    def test_thread_samples_at_configured_rate(self, imu_config, mock_smbus_realtime):
+        drv = ImuDriver(imu_config)  # sample_rate_hz = 200
+        drv.start()
+        try:
+            _time.sleep(0.5)
+            batch = drv.drain()
+        finally:
+            drv.stop()
+        # 200 Hz × 0.5 s = 100 nominal; accept a loaded CI box
+        assert 40 <= len(batch) <= 130, len(batch)
+        assert drv.drain() == []  # drained
+        assert drv.latest() is not None
+        assert all(isinstance(s, ImuSample) for s in batch)
+
+    def test_dt_uses_monotonic_clock(self, imu_config, mock_smbus_realtime, monkeypatch):
+        """A wall-clock jump (NTP/GNSS correction) must not feed a huge dt to the filter."""
+        drv = ImuDriver(imu_config)
+        seen: list[float] = []
+        real_update = drv._filter.update
+
+        def spy(gx, gy, gz, ax, ay, az, dt, *mag):
+            seen.append(dt)
+            return real_update(gx, gy, gz, ax, ay, az, dt, *mag)
+
+        monkeypatch.setattr(drv._filter, "update", spy)
+        monkeypatch.setattr("rover.imu.time.time", lambda: 1e9)  # frozen wall clock
+        drv.start()
+        try:
+            _time.sleep(0.2)
+        finally:
+            drv.stop()
+        assert seen and max(seen) < 0.1, (
+            "dt must come from monotonic(), not a frozen/jumping wall clock"
+        )
+
+    def test_sample_thread_stops_on_repeated_bus_errors(self, imu_config, mock_smbus_realtime):
+        drv = ImuDriver(imu_config)
+        drv.start()
+        mock_smbus_realtime.read_i2c_block_data.side_effect = OSError(121, "Remote I/O error")
+        deadline = _time.monotonic() + 3.0
+        while drv.available and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        try:
+            assert drv.available is False
+            assert drv._thread is None or not drv._thread.is_alive()
+        finally:
+            drv.stop()
+
+    def test_enable_magnetometer_is_honoured_by_thread(self, imu_config, mock_smbus_realtime):
+        drv = ImuDriver(imu_config)
+        drv.start()
+        try:
+            drv.enable_magnetometer(False)
+            drv.drain()
+            _time.sleep(0.1)
+            batch = drv.drain()
+            assert batch and all(s.mag is None for s in batch)
+            drv.enable_magnetometer(True)
+            drv.drain()
+            _time.sleep(0.1)
+            batch = drv.drain()
+            assert batch and any(s.mag is not None for s in batch)
+        finally:
+            drv.stop()
+
+    def test_stop_joins_thread(self, imu_config, mock_smbus_realtime):
+        drv = ImuDriver(imu_config)
+        drv.start()
+        t = drv._thread
+        drv.stop()
+        assert t is not None and not t.is_alive()

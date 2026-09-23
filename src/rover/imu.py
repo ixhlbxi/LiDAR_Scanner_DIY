@@ -4,11 +4,15 @@ MPU-9250 IMU polling and Madgwick sensor fusion.
 Reads accelerometer, gyroscope, and (optionally) magnetometer data
 via I2C, then runs a Madgwick filter to produce quaternion orientation.
 
-The magnetometer is disabled during motor operation (DEC-013) to avoid
-stepper EMI corruption.
+The driver samples on its own daemon thread once started, at
+config.sample_rate_hz, using time.monotonic() for dt. The magnetometer
+toggle (DEC-013, disabled during motor operation to avoid stepper EMI
+corruption) is honoured by the thread once per sample.
 
-Outputs quaternion orientation at fusion_output_hz (default 100 Hz).
-IMU samples are stored in a ring buffer for timestamp correlation
+Consumers pull samples via drain() (everything since the last drain) or
+latest() (most recent only); read_sample() remains for direct single
+reads (hardware diagnostics) and shares the bus lock with the thread.
+IMU samples are also stored in a ring buffer for timestamp correlation
 with LiDAR scans via slerp interpolation (DEC-014).
 
 Decision references:
@@ -21,8 +25,10 @@ Dependencies:
     smbus2
 
 Changelog:
-    0.1.0  2026-03-22  Stub
-    0.2.0  2026-03-22  Full implementation
+    0.1.0   2026-03-22  Stub
+    0.2.0   2026-03-22  Full implementation
+    0.11.0  2026-09-22  Sampling thread with monotonic dt, drain()/latest(),
+                         bus-error shutdown, MARG hard-iron offset wiring
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ import collections
 import logging
 import math
 import struct
+import threading
 import time
 from dataclasses import dataclass
 
@@ -58,7 +65,11 @@ _AK8963_REG_HXL = 0x03
 # Conversion factors
 _ACCEL_SCALE_2G = 9.81 / 16384.0  # m/s² per LSB at ±2g
 _GYRO_SCALE_250DPS = math.pi / (180.0 * 131.0)  # rad/s per LSB at ±250°/s
-_MAG_SCALE_14BIT = 0.15  # µT per LSB in 14-bit mode
+_MAG_SCALE_16BIT = 0.15  # µT per LSB in 16-bit mode (CNTL1 = 0x16)
+
+# After this many consecutive bus errors, the sampling thread gives up and
+# marks the subsystem unavailable rather than spinning forever.
+_IMU_MAX_CONSECUTIVE_ERRORS = 50
 
 # WHO_AM_I expected values
 WHO_AM_I_MPU9250 = 0x71
@@ -253,24 +264,45 @@ class MadgwickFilter:
 class ImuDriver:
     """MPU-9250 IMU driver with Madgwick fusion.
 
+    Samples on its own daemon thread once started, at ``config.sample_rate_hz``,
+    using ``time.monotonic()`` for ``dt`` so a wall-clock jump (NTP/GNSS
+    correction) never feeds a bogus interval to the filter. Consumers call
+    ``drain()`` (every sample since the last drain) or ``latest()`` (most
+    recent sample only); ``read_sample()`` remains for direct single reads
+    (hardware diagnostics) and shares the bus lock with the thread. The
+    magnetometer toggle (DEC-013) is read by the thread once per sample.
+
     Args:
         config: ImuConfig section from rover config.
+        mag_offset: Hard-iron magnetometer offset from ``[calibration]``, or None.
     """
 
-    def __init__(self, config: ImuConfig) -> None:
+    def __init__(
+        self, config: ImuConfig, mag_offset: tuple[float, float, float] | None = None
+    ) -> None:
         self._config = config
         self._available = False
         self._started = False
         self._mag_enabled = config.use_magnetometer
         self._bus = None
-        self._filter = MadgwickFilter(beta=config.fusion_beta)
-        self._last_time: float | None = None
+        self._filter = MadgwickFilter(beta=config.fusion_beta, mag_offset=mag_offset)
         self._identity: str | None = None
 
         # Ring buffer for timestamp correlation (DEC-014)
         self._ring_buffer: collections.deque[ImuSample] = collections.deque(
             maxlen=config.sample_rate_hz * 2,  # ~2 seconds of samples
         )
+
+        self._bus_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._pending: collections.deque[ImuSample] = collections.deque(
+            maxlen=config.sample_rate_hz * 10
+        )
+        self._latest: ImuSample | None = None
+        self._last_mono: float | None = None
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._consecutive_errors = 0
 
         if not config.enabled:
             logger.info("IMU disabled by config")
@@ -331,9 +363,16 @@ class ImuDriver:
 
         self._started = True
         self._available = True
-        self._last_time = None
         self._ring_buffer.clear()
-        logger.info("IMU started (%s)", self._identity)
+        self._pending.clear()
+        self._last_mono = None
+        self._consecutive_errors = 0
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._sample_loop, name="rover-imu", daemon=True)
+        self._thread.start()
+        logger.info(
+            "IMU started (%s), sampling at %d Hz", self._identity, self._config.sample_rate_hz
+        )
 
     def _init_mpu9250(self) -> None:
         """Wake up MPU-9250, verify identity, configure sample rate."""
@@ -393,9 +432,14 @@ class ImuDriver:
         time.sleep(0.01)
 
     def stop(self) -> None:
-        """Stop polling and close I2C bus."""
+        """Stop the sampling thread and close the I2C bus."""
         if not self._started:
             return
+
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
 
         try:
             if self._bus is not None:
@@ -408,8 +452,32 @@ class ImuDriver:
         self._available = False
         logger.info("IMU stopped")
 
+    def _read_one(self) -> ImuSample:
+        """One locked bus read + filter step. Raises OSError on bus failure."""
+        with self._bus_lock:
+            accel, gyro = self._read_accel_gyro()
+            mag = self._read_mag() if self._mag_enabled else None
+        now_mono = time.monotonic()
+        dt = (
+            (now_mono - self._last_mono)
+            if self._last_mono is not None
+            else 1.0 / self._config.sample_rate_hz
+        )
+        self._last_mono = now_mono
+        if mag is not None:
+            self._filter.update(*gyro, *accel, dt, *mag)
+        else:
+            self._filter.update(*gyro, *accel, dt)
+        return ImuSample(
+            timestamp=time.time(),
+            accel=accel,
+            gyro=gyro,
+            mag=mag,
+            orientation=self._filter.quaternion,
+        )
+
     def read_sample(self) -> ImuSample:
-        """Read current sensor data, run Madgwick filter, return fused sample.
+        """Read one sample now (hardware diagnostics). Also recorded in the buffers.
 
         Returns:
             ImuSample with accel, gyro, optional mag, and fused quaternion.
@@ -420,49 +488,67 @@ class ImuDriver:
         if not self._available or self._bus is None:
             raise RuntimeError("IMU not available")
 
-        now = time.time()
-        dt = (now - self._last_time) if self._last_time is not None else 0.005
-        self._last_time = now
-
-        accel, gyro = self._read_accel_gyro()
-        mag = self._read_mag() if self._mag_enabled else None
-
-        # Run Madgwick filter
-        self._filter.update(
-            gyro[0],
-            gyro[1],
-            gyro[2],
-            accel[0],
-            accel[1],
-            accel[2],
-            dt,
-        )
-
-        sample = ImuSample(
-            timestamp=now,
-            accel=accel,
-            gyro=gyro,
-            mag=mag,
-            orientation=self._filter.quaternion,
-        )
-
-        self._ring_buffer.append(sample)
+        sample = self._read_one()
+        with self._state_lock:
+            self._ring_buffer.append(sample)
+            self._pending.append(sample)
+            self._latest = sample
         return sample
+
+    def _sample_loop(self) -> None:
+        """Sampling-thread body: reads at config.sample_rate_hz until stopped."""
+        period = 1.0 / self._config.sample_rate_hz
+        next_t = time.monotonic()
+        while not self._stop_event.is_set():
+            try:
+                sample = self._read_one()
+            except OSError as e:
+                self._consecutive_errors += 1
+                if self._consecutive_errors >= _IMU_MAX_CONSECUTIVE_ERRORS:
+                    logger.warning(
+                        "IMU: %d consecutive bus errors — sampling stopped, subsystem unavailable (last: %s)",
+                        self._consecutive_errors,
+                        e,
+                    )
+                    self._available = False
+                    return
+                self._stop_event.wait(period)
+                continue
+            self._consecutive_errors = 0
+            with self._state_lock:
+                self._ring_buffer.append(sample)
+                self._pending.append(sample)
+                self._latest = sample
+            next_t += period
+            delay = next_t - time.monotonic()
+            if delay > 0:
+                self._stop_event.wait(delay)
+            else:
+                next_t = time.monotonic()  # fell behind; do not try to catch up
+
+    def drain(self) -> list[ImuSample]:
+        """Return and clear every sample recorded since the previous drain."""
+        with self._state_lock:
+            batch = list(self._pending)
+            self._pending.clear()
+        return batch
+
+    def latest(self) -> ImuSample | None:
+        """Return the most recently recorded sample, or None."""
+        with self._state_lock:
+            return self._latest
 
     def _read_accel_gyro(self) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
         """Read accel (m/s²) and gyro (rad/s) from MPU-9250."""
         addr = self._config.address
-        raw = self._bus.read_i2c_block_data(addr, _REG_ACCEL_XOUT_H, 14)
+        raw = bytes(self._bus.read_i2c_block_data(addr, _REG_ACCEL_XOUT_H, 14))
+        # >3h2x3h: accel x/y/z, 2 bytes skipped (temperature), gyro x/y/z
+        ax, ay, az, gx, gy, gz = struct.unpack(">3h2x3h", raw)
 
-        ax = struct.unpack(">h", bytes(raw[0:2]))[0] * _ACCEL_SCALE_2G
-        ay = struct.unpack(">h", bytes(raw[2:4]))[0] * _ACCEL_SCALE_2G
-        az = struct.unpack(">h", bytes(raw[4:6]))[0] * _ACCEL_SCALE_2G
-        # raw[6:8] = temperature, skip
-        gx = struct.unpack(">h", bytes(raw[8:10]))[0] * _GYRO_SCALE_250DPS
-        gy = struct.unpack(">h", bytes(raw[10:12]))[0] * _GYRO_SCALE_250DPS
-        gz = struct.unpack(">h", bytes(raw[12:14]))[0] * _GYRO_SCALE_250DPS
-
-        return (ax, ay, az), (gx, gy, gz)
+        return (
+            (ax * _ACCEL_SCALE_2G, ay * _ACCEL_SCALE_2G, az * _ACCEL_SCALE_2G),
+            (gx * _GYRO_SCALE_250DPS, gy * _GYRO_SCALE_250DPS, gz * _GYRO_SCALE_250DPS),
+        )
 
     def _read_mag(self) -> tuple[float, float, float] | None:
         """Read magnetometer (µT) from AK8963. Returns None if not ready."""
@@ -476,11 +562,9 @@ class ImuDriver:
             return None
 
         # AK8963 is little-endian
-        mx = struct.unpack("<h", bytes(raw[0:2]))[0] * _MAG_SCALE_14BIT
-        my = struct.unpack("<h", bytes(raw[2:4]))[0] * _MAG_SCALE_14BIT
-        mz = struct.unpack("<h", bytes(raw[4:6]))[0] * _MAG_SCALE_14BIT
+        mx, my, mz = struct.unpack("<3h", bytes(raw[:6]))
 
-        return (mx, my, mz)
+        return (mx * _MAG_SCALE_16BIT, my * _MAG_SCALE_16BIT, mz * _MAG_SCALE_16BIT)
 
     def enable_magnetometer(self, enable: bool) -> None:
         """Enable or disable magnetometer readings (DEC-013)."""
@@ -498,10 +582,11 @@ class ImuDriver:
         Returns:
             Closest ImuSample, or None if buffer is empty.
         """
-        if not self._ring_buffer:
-            return None
+        with self._state_lock:
+            if not self._ring_buffer:
+                return None
 
-        return min(self._ring_buffer, key=lambda s: abs(s.timestamp - timestamp))
+            return min(self._ring_buffer, key=lambda s: abs(s.timestamp - timestamp))
 
     def __enter__(self) -> ImuDriver:
         self.start()
