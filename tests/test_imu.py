@@ -30,7 +30,6 @@ def imu_config():
         bus=1,
         address=0x68,
         sample_rate_hz=200,
-        fusion_output_hz=100,
         use_magnetometer=False,
         fusion_beta=0.1,
     )
@@ -43,7 +42,6 @@ def disabled_config():
         bus=1,
         address=0x68,
         sample_rate_hz=200,
-        fusion_output_hz=100,
         use_magnetometer=False,
         fusion_beta=0.1,
     )

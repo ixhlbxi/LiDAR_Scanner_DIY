@@ -21,7 +21,6 @@ def cfg(tmp_path):
 [logging]
 output_dir = "{tmp_path.as_posix()}"
 session_prefix = "test"
-format = "jsonl"
 flush_interval_sec = 60.0
 rotate_size_mb = 0
 save_images = true

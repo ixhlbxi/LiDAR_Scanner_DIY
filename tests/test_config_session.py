@@ -385,7 +385,6 @@ class TestRoverConfigComposition:
             "camera",
             "logging",
             "watchdog",
-            "power",
             "calibration",
         ):
             assert hasattr(cfg, name), f"missing section {name}"

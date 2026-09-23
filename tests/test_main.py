@@ -59,7 +59,6 @@ enabled = false
 bus = 1
 address = 0x68
 sample_rate_hz = 200
-fusion_output_hz = 100
 use_magnetometer = false
 fusion_beta = 0.1
 
@@ -67,9 +66,6 @@ fusion_beta = 0.1
 enabled = false
 port = "/dev/null"
 baud = 115200
-rtcm_profile = "robust"
-survey_in_duration_sec = 300
-survey_in_accuracy_m = 0.02
 
 [ntrip]
 enabled = false
@@ -96,7 +92,6 @@ output_folder = "images"
 [logging]
 output_dir = "{(tmp_path / "data").as_posix()}"
 session_prefix = "test"
-format = "jsonl"
 flush_interval_sec = 1.0
 rotate_size_mb = 0
 save_images = false
@@ -105,12 +100,6 @@ save_images = false
 enabled = false
 timeout_sec = 30
 heartbeat_interval_sec = 5
-
-[power]
-monitor_battery = false
-battery_adc_channel = 0
-low_battery_mv = 10500
-critical_battery_mv = 10000
 """
     )
     return cfg
@@ -206,9 +195,6 @@ enabled = false
 [logging]
 output_dir = "{(tmp_path / "data").as_posix()}"
 session_prefix = "boomtest"
-
-[power]
-monitor_battery = false
 """
     )
 
