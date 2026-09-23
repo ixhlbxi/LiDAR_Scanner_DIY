@@ -337,3 +337,55 @@ class TestProjectToCrs:
         # Just check the result is finite and three columns
         assert out.shape == (1, 3)
         assert np.isfinite(out).all()
+
+
+# ---------------------------------------------------------------------------
+# Export units: Z scaled to the CRS unit, --units honoured, double PLY,
+# CRS-embed warning
+# ---------------------------------------------------------------------------
+
+
+class TestExportUnits:
+    def test_project_to_crs_scales_z_to_crs_unit(self, pyproj_mod):
+        """EPSG:6346 is ftUS: a 1 m rise must come out as ~3.2808 ft, not 1 (T1-009)."""
+        origin = (40.7128, -74.006, 10.0)
+        out = georef.project_to_crs(
+            np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]), origin, 6346, "ft"
+        )
+        dz = out[1, 2] - out[0, 2]
+        assert dz == pytest.approx(1.0 / georef.US_SURVEY_FOOT_M, rel=1e-6)
+        # Absolute Z is the ellipsoidal height in feet
+        assert out[0, 2] == pytest.approx(10.0 / georef.US_SURVEY_FOOT_M, rel=1e-6)
+
+    def test_units_m_on_ftus_crs_converts_all_axes(self, pyproj_mod):
+        origin = (40.7128, -74.006, 10.0)
+        pts = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        ft = georef.project_to_crs(pts, origin, 6346, "ft")
+        m = georef.project_to_crs(pts, origin, 6346, "m")
+        np.testing.assert_allclose(m, ft * georef.US_SURVEY_FOOT_M, rtol=1e-9)
+
+    def test_export_ply_is_double_precision(self, tmp_path):
+        xyz = np.array([[1_234_567.123456, 2.0, 3.0]])
+        inten = np.array([200], dtype=np.uint8)
+        out = tmp_path / "p.ply"
+        georef.export_ply(out, xyz, inten)
+        raw = out.read_bytes()
+        header, _, body = raw.partition(b"end_header\n")
+        assert b"property double x" in header
+        x = np.frombuffer(body[:8], dtype="<f8")[0]
+        assert x == pytest.approx(1_234_567.123456, abs=1e-6)
+
+    def test_export_las_warns_when_crs_cannot_be_embedded(self, tmp_path, monkeypatch, caplog):
+        laspy = pytest.importorskip("laspy")
+
+        class _NoCrsHeader(laspy.LasHeader):
+            def add_crs(self, *_a, **_k):
+                raise AttributeError("no add_crs")
+
+        monkeypatch.setattr(laspy, "LasHeader", _NoCrsHeader)
+        with caplog.at_level("WARNING", logger="georef"):
+            ok = georef.export_las(
+                tmp_path / "x.las", np.zeros((1, 3)), np.zeros(1, dtype=np.uint8), 6346
+            )
+        assert ok
+        assert any("CRS" in r.message for r in caplog.records)

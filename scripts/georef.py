@@ -23,6 +23,9 @@ Coordinate flow:
     ─(pyproj transform → target_crs_epsg from metadata.json or --crs)─►
     Target CRS (e.g. NAD83(2011) PA-N ft-US for arm_group profile)
 
+Heights are ellipsoidal (WGS84) throughout; no geoid model is applied. Z is
+scaled to the target CRS's horizontal unit so LAS/PLY axes agree.
+
 Defaults:
     * `target_crs_epsg = 0` (the personal-profile default) → no CRS conversion;
       output stays in local ENU meters.
@@ -42,6 +45,10 @@ Dependencies: numpy (required); laspy + pyproj (optional, install via `[post]`
 extra).
 
 Changelog:
+    0.11.0  2026-09-22  Rotation-aware session load (rotated scan/gnss segments,
+                        columnar lidar, batched IMU); mount + mast rotation applied
+                        before the IMU quaternion; Z scaled to the target CRS's
+                        horizontal unit; double-precision PLY; CRS-embed warning.
     0.10.0  2026-05-23  Initial implementation (Phase E of overhaul).
 """
 
@@ -49,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import importlib
 import json
 import logging
 import math
@@ -126,20 +134,9 @@ def _require_numpy():
     return _NP
 
 
-def _try_import_laspy():
+def _optional_import(name: str):
     try:
-        import laspy
-
-        return laspy
-    except ImportError:
-        return None
-
-
-def _try_import_pyproj():
-    try:
-        import pyproj
-
-        return pyproj
+        return importlib.import_module(name)
     except ImportError:
         return None
 
@@ -460,46 +457,44 @@ def _nearest_gnss(t_scan: float, gnss_sorted: list[dict]) -> dict | None:
 
 
 def project_to_crs(xyz, origin_lat_lon_alt, target_epsg: int, units: str):
-    """Convert Nx3 (East, North, Up) local-ENU meters to the target CRS.
+    """Convert N×3 local-ENU metres to the target CRS.
 
-    Args:
-        xyz: Nx3 float array in local ENU meters relative to origin.
-        origin_lat_lon_alt: (lat, lon, alt) WGS84 — the local ENU origin.
-        target_epsg: EPSG of the target CRS. 0 = no conversion (passthrough).
-        units: "m" or "ft" — controls output Z and (when target CRS allows)
-            horizontal units. For State-Plane ft-US codes (e.g. 6346) the CRS
-            itself defines the units; we don't double-scale.
-
-    Returns:
-        Nx3 array in target CRS units.
+    With ``target_epsg == 0`` the ENU frame is kept and only ``units`` applies.
+    Otherwise X/Y are projected with pyproj and Z (ellipsoidal height, metres)
+    is scaled to the CRS's horizontal unit so all three axes agree; if ``units``
+    then disagrees with the CRS unit, all three axes are converted (ft-US ↔ m)
+    and the choice is logged.
     """
     np = _require_numpy()
     if target_epsg == 0 or origin_lat_lon_alt[0] is None:
-        # No conversion; keep local ENU, optionally feet
-        if units == "ft":
-            return xyz * (1.0 / 0.3048006096012192)  # US Survey Foot
-        return xyz
+        return xyz / US_SURVEY_FOOT_M if units == "ft" else xyz
 
-    pyproj = _try_import_pyproj()
+    pyproj = _optional_import("pyproj")
     if pyproj is None:
         raise SystemExit(
             'pyproj is required when target_crs_epsg != 0 — install via `pip install -e ".[post]"`'
         )
-
-    origin_lat, origin_lon, origin_alt = origin_lat_lon_alt
-
-    # Convert each ENU point back to (lat, lon, alt) WGS84, then forward to target CRS.
-    # For typical rover baselines (<1 km) this is precise enough.
-    east, north, up = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-    lats, lons, alts = geodetic_from_enu(east, north, up, origin_lat, origin_lon, origin_alt)
-
-    transformer = pyproj.Transformer.from_crs("EPSG:4326", f"EPSG:{target_epsg}", always_xy=True)
-    # always_xy=True → x = lon, y = lat
+    lat0, lon0, alt0 = origin_lat_lon_alt
+    lats, lons, alts = geodetic_from_enu(xyz[:, 0], xyz[:, 1], xyz[:, 2], lat0, lon0, alt0)
+    crs = pyproj.CRS.from_epsg(target_epsg)
+    transformer = pyproj.Transformer.from_crs("EPSG:4326", crs, always_xy=True)
     xs, ys = transformer.transform(lons, lats)
-    zs = alts
-    # If the target CRS uses ft-US but the user explicitly asked for meters,
-    # divide by 0.3048006096012192. We trust the EPSG's native units by default.
-    return np.column_stack([xs, ys, zs])
+
+    # Metres per horizontal CRS unit (1.0 for metric CRSs, 0.3048006… for ftUS).
+    unit_m = float(crs.axis_info[0].unit_conversion_factor)
+    zs = alts / unit_m  # ellipsoidal height, same unit as X/Y
+    out = np.column_stack([xs, ys, zs])
+
+    crs_is_ft = abs(unit_m - US_SURVEY_FOOT_M) < 1e-9 or abs(unit_m - 0.3048) < 1e-9
+    if units == "m" and crs_is_ft:
+        logger.info("Converting EPSG:%d output from feet to metres per --units m", target_epsg)
+        out = out * unit_m
+    elif units == "ft" and not crs_is_ft:
+        logger.info(
+            "Converting EPSG:%d output from metres to US survey feet per --units ft", target_epsg
+        )
+        out = out / US_SURVEY_FOOT_M
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -515,9 +510,9 @@ def export_ply(out_path: Path, xyz, intensity) -> None:
         "ply\n"
         "format binary_little_endian 1.0\n"
         f"element vertex {n}\n"
-        "property float x\n"
-        "property float y\n"
-        "property float z\n"
+        "property double x\n"
+        "property double y\n"
+        "property double z\n"
         "property uchar red\n"
         "property uchar green\n"
         "property uchar blue\n"
@@ -526,9 +521,9 @@ def export_ply(out_path: Path, xyz, intensity) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
         f.write(header.encode("ascii"))
-        # Pack vertex bytes: 3 float32 + 3 uint8 = 15 bytes per point
-        vtx = np.zeros(n, dtype=[("xyz", "<f4", 3), ("rgb", "u1", 3)])
-        vtx["xyz"] = xyz.astype(np.float32)
+        # 3 float64 + 3 uint8 = 27 bytes per point
+        vtx = np.zeros(n, dtype=[("xyz", "<f8", 3), ("rgb", "u1", 3)])
+        vtx["xyz"] = xyz.astype(np.float64)
         gray = intensity.astype(np.uint8)
         vtx["rgb"][:, 0] = gray
         vtx["rgb"][:, 1] = gray
@@ -540,7 +535,7 @@ def export_ply(out_path: Path, xyz, intensity) -> None:
 def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
     """Write a LAS 1.4 point record format 6 file. Returns False if laspy
     isn't available."""
-    laspy = _try_import_laspy()
+    laspy = _optional_import("laspy")
     if laspy is None:
         logger.warning("laspy not installed — skipping LAS export (PLY still emitted)")
         return False
@@ -552,7 +547,11 @@ def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
             header.add_crs(f"EPSG:{target_epsg}")
         except AttributeError:
             # Older laspy versions name this differently
-            pass
+            logger.warning(
+                "laspy %s cannot embed CRS EPSG:%d — LAS written without CRS",
+                getattr(laspy, "__version__", "?"),
+                target_epsg,
+            )
 
     las = laspy.LasData(header)
     las.x = xyz[:, 0]
