@@ -107,6 +107,24 @@ operators can point it at the project folder per the contract.
 
 ---
 
+### CR-005 — Multi-client NTRIP caster on the Base-Station
+
+**What:** The sibling's caster (`base-station/rtk_base_manager.py`
+`NTRIPServer`) serves one client at a time. A newly authenticated client
+replaces the current one, so a drone and this rover on the same base session
+would evict each other every time either reconnects. Filed sibling-side as
+BACKLOG **NC-1** (§NTRIP Caster) on 2026-09-23.
+
+**Interim rule (owner, 2026-09-23):** the drone and this rover never share a
+base session.
+
+**Status:** ⏳ Pending sibling enhancement NC-1.
+
+**Rover-side ready:** yes — nothing changes on the rover; it is an ordinary
+NTRIP v1 client of `ARM_BASE`.
+
+---
+
 ## Rover-side deferred (from the 2026-09-22 super-audit)
 
 Items dispositioned `defer` or `track` in `docs/AUDIT_super_20260922_1810.md`, plus the

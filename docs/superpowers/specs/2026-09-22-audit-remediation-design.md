@@ -83,7 +83,24 @@ Five thematic stages in dependency order. Each stage is a branch off `main`, mer
 - **Lora protocol**: CRC body becomes `binascii.crc_hqx(data, 0xFFFF)`; golden frame hex constant added to the test file.
 - **Tests**: fake-caster socket pair covering 200, 401 in both profiles, 404, chunked rejection, header-tail forwarding, GGA timing; GNSS single-source selection; publisher cadence; build-flag parity. Test hygiene: hardware `test_lidar.py` imports from `rover.lidar`, `test_imu.py` drives `ImuDriver`, hardware scripts default to udev symlinks, `tmp_toml` fixture consolidated in `conftest.py`, dead fixtures removed, `test_main.py` config writes only differing keys.
 
-## 7. Stage 5 — Docs refresh and close-out
+## 6a. Amendment 2026-09-23 — new Stage 5 (scan geometry and field readiness); docs become Stage 6
+
+Owner rulings from the 2026-09-23 design session, after stage 4 merged (`167f4a2`) and a cross-check against `arm-drone-lidar-workflow` @ `e88c11b`. The stage below is inserted as a code stage, reviewed like stages 1-4; §7 is renumbered **Stage 6** in intent (its content is unchanged) and its tag moves to the stage 6 merge. §7's docs now also describe everything this stage changes.
+
+- **Mechanics (fixes a live defect).** Everything except the base rotates with the stepper. The main loop steps one direction forever, contradicting DEC-015 and wrapping every cable. Ruling: **360° forward sweep, then a fast rewind** with LiDAR records paused and a distinct rewinding scan state. DEC-015 is amended to "360 then rewind" (the alternative ±180 oscillation was offered and not chosen).
+- **IMU mount (S3-R3).** Decided at the bench. Georef and the transform helper take both mounts through a config key (`[imu].mount = "base" | "platform"`); for `platform`, georef strips mast yaw from the IMU quaternion.
+- **Yaw source.** Roll and pitch from the IMU every scan; yaw = one magnetometer heading taken at rest before the sweep, plus the commanded step angle. Step counts do not drift; gyro yaw during the sweep (magnetometer off per DEC-013) is not used.
+- **Heading reference (S3-R1).** Add the fixed NWU→ENU rotation, and compute magnetic declination from the session position with the World Magnetic Model automatically. No manual per-site value.
+- **Export heights.** Georef writes **both** an ellipsoidal output and a NAVD88 output (GEOID18, V-EPSG 6360 ftUS, H-EPSG 6563/6565 for PA). Raw JSONL stays ellipsoidal metres. Each file's header states its vertical datum.
+- **LoRa (revises DEC-031).** Status-only. The LoRa RTCM fallback and `RTCM_CHUNK` are retired; NTRIP is the only RTK path; CR-002 closes as not needed. STATUS/LINK frames stay for when the base learns v2 (CR-001, CR-003). **STATUS cadence 10 s**, matching the base beacon on the shared 915 MHz / SF7 / 0x12 channel.
+- **ESP32 NTRIP client (DEC-032) is kept.** Its open firmware findings (T1-034, T1-035, T1-051) stay deferred until a PlatformIO build and flash are possible.
+- **Output folder.** `arm_group` keeps `01_Raw/LiDAR/Rover/<session>/`; CR-004 stays open for the sibling SOP.
+- **GNSS hardware.** The rover uses the same hardware as the Base-Station: SparkFun GPS-RTK-SMA (ZED-F9P) with a u-blox ANN-MB-00. Antenna placement (on-axis vs lever arm) is decided when it is bought; georef accepts an antenna lever arm that rotates with the mast angle.
+- **Caster sharing.** The Base-Station caster is single-client (sibling BACKLOG NC-1, rover CR-005). Interim rule: the drone and the rover never share a base session.
+- **S4-R1** closes with an upgrade note in the stage 6 docs; config loading stays strict.
+- **Still open for the bench:** S3-R2 (LD19 angle direction vs mount orientation).
+
+## 7. Stage 5 — Docs refresh and close-out (Stage 6 after the 2026-09-23 amendment)
 
 Docs are written last, from the code, one commit per document.
 
