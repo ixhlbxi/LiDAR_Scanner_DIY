@@ -15,6 +15,7 @@
 - **DEC-015 (amended by §6a):** no slip ring. The mast never travels more than `sweep_deg` (≤ 360) from its home position, and returns home by rewinding. The one-direction-forever loop is the defect this stage fixes.
 - **Rewind is not scan data:** no lidar, camera or IMU records are logged while rewinding; `scan_state` publishes `SCAN_REWINDING` (new value 4). Status schema stays v2 (a new enum value is not a new field).
 - **Stop latency:** a rewind moves in chunks of at most 45°, so a SIGTERM mid-rewind is honoured within one chunk.
+- **No home switch:** every session calls its start position step 0, so a clean shutdown always returns the mast home before disabling the motor. The worst case is 360° at `rewind_rpm` 10, which takes 6 s, well inside systemd's default 90 s stop timeout; `rover.service` sets none. A crash or power loss mid-sweep leaves the mast out of position, and only a manual homing fixes that. That goes in the stage 6 docs and the pre-field checklist.
 - **Sensors never crash the system** (CLAUDE.md §5); a stepper failure during rewind goes through the same `_SensorGate("stepper")` as a scan step.
 - **Heading frames:** Madgwick's world frame is North-West-Up with x = magnetic north (S3-R1). Conversion to ENU is `R_enu = Rz(-D) · Rz(+90°) · R_nwu`, with D = magnetic declination, east-positive, in degrees. Grid convergence is handled by pyproj when ENU points are projected; do not add it by hand.
 - **Heading reference labels:** `"true"` (magnetometer rest heading + WMM declination), `"magnetic"` (rest heading, no declination available), `"relative"` (no magnetometer samples at rest; mast-0 forward = +X). The label is written to `export.json` and logged; it is never inferred silently.
@@ -646,6 +647,7 @@ git commit -m "feat(sweep): position-based 360-then-rewind planner; SCAN_REWINDI
   - lidar records gain `"sweep": int`.
   - event `{"type": "event", "timestamp": t, "event": "sweep_start", "details": {"sweep": k, "rest_sec": s}}`, written at the end of each rest, before the sweep's first step.
   - `metadata.json` gains `"geometry": {"imu_mount": str, "antenna_offset_m": list | None, "sweep_deg": float, "rewind_rpm": float, "rest_before_sweep_sec": float}`.
+  - `_return_home(sensors, config, session_logger) -> None` (module level, so tests can spy on it), called in `run()`'s teardown **before** `_stop_sensors`. It writes event `returned_home` `{"steps": n}` on success, or `return_home_failed` `{"steps_from_home": n, "error": str}` with an ERROR log, and never raises. There is no home switch (DEC-015): every session calls its start position step 0, so a clean stop must leave the mast at home. Crash and power-loss recovery is manual and goes into the stage 6 docs.
 
 Loop behaviour per action (stepper present and not tripped):
 
@@ -858,14 +860,15 @@ def test_no_records_logged_during_rewind(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_stop_during_rewind_is_prompt(tmp_path: Path, monkeypatch) -> None:
-    """Review Focus 2: a stop during a 360° rewind lands within one 45° chunk."""
-    moves: list[int] = []
+    """Review Focus 2: a stop during a rewind ends the loop after the current
+    45° chunk; teardown then returns the rest of the way home in one move."""
+    moves: list[tuple[int, float | None]] = []
     stop = threading.Event()
 
     class _SlowRewindStepper(_FakeStepper):
         def step(self, steps: int, rpm: float | None = None) -> None:
-            moves.append(steps)
-            if steps < 0:
+            moves.append((steps, rpm))
+            if steps < 0 and not stop.is_set():
                 time.sleep(0.2)  # a chunk takes time on real hardware
                 stop.set()  # SIGTERM arrives mid-rewind
             self._step += steps
@@ -877,7 +880,57 @@ def test_stop_during_rewind_is_prompt(tmp_path: Path, monkeypatch) -> None:
     assert main_mod.run(config_path=_sweep_config(tmp_path, sweep_deg=90.0, rest=0.0),
                         duration_sec=30.0, stop_event=stop) == 0
     assert time.monotonic() - t0 < 25.0
-    assert sum(1 for s in moves if s < 0) == 1, "loop kept rewinding after stop"
+    negatives = [(s, rpm) for s, rpm in moves if s < 0]
+    # 90° = 800 steps: one 400-step loop chunk, then the teardown's 400-step return home.
+    assert negatives == [(-400, 30.0), (-400, 30.0)], negatives
+    assert sum(s for s, _ in moves) == 0, "mast not home after shutdown"
+
+
+def test_shutdown_mid_sweep_returns_home(tmp_path: Path, monkeypatch) -> None:
+    """No home switch exists: the next session treats its start position as
+    step 0. A clean stop mid-sweep must therefore return the mast home, or the
+    cables wind a little further every session (DEC-015)."""
+    _FakeStepper.moves = []
+    monkeypatch.setattr(main_mod, "StepperMotor", _FakeStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
+    # 90° sweep takes ~4 s at 20 Hz; stopping at 1 s lands mid-sweep.
+    assert main_mod.run(config_path=_sweep_config(tmp_path, sweep_deg=90.0, rest=0.0),
+                        duration_sec=1.0) == 0
+    assert sum(s for s, _ in _FakeStepper.moves) == 0
+    last_steps, last_rpm = _FakeStepper.moves[-1]
+    assert last_steps < 0 and last_rpm == 30.0
+    recs, _meta = _records(tmp_path, "sw")
+    homes = [r for r in recs if r.get("event") == "returned_home"]
+    assert len(homes) == 1 and homes[0]["details"]["steps"] == -last_steps
+
+
+def test_return_home_failure_is_logged_not_raised(tmp_path: Path, monkeypatch) -> None:
+    """A stepper that fails during the return home must not crash teardown;
+    the session records that the mast is NOT home so the operator can fix it."""
+
+    class _FailsHomeStepper(_FakeStepper):
+        def step(self, steps: int, rpm: float | None = None) -> None:
+            if steps < 0 and rpm == 30.0 and self._step > 0 and stop_seen[0]:
+                raise RuntimeError("stall on the way home")
+            super().step(steps, rpm)
+
+    stop_seen = [False]
+    monkeypatch.setattr(main_mod, "StepperMotor", _FailsHomeStepper)
+    monkeypatch.setattr(main_mod, "LidarScanner", _StaticLidar)
+    monkeypatch.setattr(main_mod, "ImuDriver", _FakeImu)
+    real_return_home = main_mod._return_home
+
+    def _spy(*a, **kw):
+        stop_seen[0] = True
+        return real_return_home(*a, **kw)
+
+    monkeypatch.setattr(main_mod, "_return_home", _spy)
+    assert main_mod.run(config_path=_sweep_config(tmp_path, sweep_deg=90.0, rest=0.0),
+                        duration_sec=1.0) == 0
+    recs, _meta = _records(tmp_path, "sw")
+    fails = [r for r in recs if r.get("event") == "return_home_failed"]
+    assert len(fails) == 1 and fails[0]["details"]["steps_from_home"] > 0
 ```
 
 (Keep `test_stepper_failures_are_gated_and_still_publish` as is; with `rest_before_sweep_sec = 0.0` in `_stage3_config` its `fails == 5` expectation is unchanged.)
@@ -1027,6 +1080,46 @@ Add `"sweep": sweep_index,` to the lidar record dict (after `"step_index"`). Cha
 
 Remove the old `steps_per_increment`-driven `sensors.stepper.step(steps_per_increment)` call (the planner owns increments now); keep `steps_per_increment` only for the planner guard and `settle_sec`.
 
+Return home on shutdown — module-level helper:
+
+```python
+def _return_home(sensors: _Sensors, config: RoverConfig, session_logger: SessionLogger) -> None:
+    """Rewind the mast to step 0 before the stepper is disabled.
+
+    There is no home switch (DEC-015, no slip ring): the next session calls
+    wherever the mast stands "step 0". Without this, every stop mid-sweep
+    would wind the cables a little further. Never raises — a failure is
+    logged and recorded so the operator knows to home the mast by hand.
+    """
+    stepper = sensors.stepper
+    if stepper is None or not stepper.available:
+        return
+    n = stepper.current_step
+    if n == 0:
+        return
+    if sensors.imu is not None and sensors.imu.available:
+        sensors.imu.enable_magnetometer(False)  # DEC-013
+    try:
+        stepper.step(-n, rpm=config.stepper.rewind_rpm)
+    except Exception as e:
+        logger.error("mast NOT home (%d steps out): %s — home it by hand before the next session", n, e)
+        session_logger.write(
+            {
+                "type": "event",
+                "timestamp": time.time(),
+                "event": "return_home_failed",
+                "details": {"steps_from_home": stepper.current_step, "error": str(e)},
+            }
+        )
+        return
+    logger.info("mast returned home (%d steps)", n)
+    session_logger.write(
+        {"type": "event", "timestamp": time.time(), "event": "returned_home", "details": {"steps": n}}
+    )
+```
+
+In `run()`'s `finally` block, call `_return_home(sensors, config, session_logger)` immediately before `_stop_sensors(sensors)` (after the telemetry stop). Leave the other `_stop_sensors(sensors)` call site alone. It is the `SessionLogger.start()` failure path, which runs before the loop: the mast has not moved, and there is no started logger to write the event to.
+
 In `run()`, next to the `ntrip_stats` metadata:
 
 ```python
@@ -1050,6 +1143,8 @@ Module docstring changelog:
                          forever and would wind every cable around the rod.
                          Lidar records carry "sweep"; a sweep_start event ends
                          each rest; metadata.json carries a "geometry" block.
+                         Teardown returns the mast home (no home switch exists)
+                         and records returned_home / return_home_failed.
 ```
 
 - [ ] **Step 4: Run the tests**
@@ -1833,4 +1928,5 @@ git commit -m "feat(georef): ellipsoidal + NAVD88 (GEOID18) export with a ballpa
    - Mark **CR-002** `❌ Not needed — DEC-031 amended 2026-09-23, LoRa is status-only`.
    - Update **CR-001/CR-003** text: LoRa carries STATUS/LINK only.
    - File a firmware row in "Rover-side deferred": *`firmware/esp32-rover`: retire the `lora_rtcm_relay` env and the RTCM_CHUNK receive handler; make `ntrip_client` the only RTCM mode — needs a PlatformIO build + flash.*
-4. Stage 6 (docs) plan inherits: DEC-015 and DEC-031 amendments written into `docs/DECISIONS.md`; HARDWARE.md mounting table (IMU mount is a config choice; antenna = SparkFun GPS-RTK-SMA + ANN-MB-00, placement TBD); SPECIFICATIONS.md record format (`sweep`, `sweep_start`, `geometry`, `export.json`); the S4-R1 upgrade note; the EPSG 6346 doc fixes carried from stage 3.
+4. File a rover-side row: *no mast home switch — after a crash or power loss mid-sweep the mast position is unknown and must be homed by hand; a limit switch or index mark is the v1.1 fix.* Add a matching step to `deploy/SMOKE_CHECKLIST.md` in stage 6.
+5. Stage 6 (docs) plan inherits: DEC-015 and DEC-031 amendments written into `docs/DECISIONS.md`; HARDWARE.md mounting table (IMU mount is a config choice; antenna = SparkFun GPS-RTK-SMA + ANN-MB-00, placement TBD); SPECIFICATIONS.md record format (`sweep`, `sweep_start`, `geometry`, `export.json`); the S4-R1 upgrade note; the EPSG 6346 doc fixes carried from stage 3.
