@@ -27,8 +27,25 @@ Coordinate flow:
     ─(pyproj transform → target_crs_epsg from metadata.json or --crs)─►
     Target CRS (e.g. NAD83(2011) PA-N ft-US for arm_group profile)
 
-Heights are ellipsoidal (WGS84) throughout; no geoid model is applied. Z is
-scaled to the target CRS's horizontal unit so LAS/PLY axes agree.
+For a projected export (`target_crs_epsg` resolves to a non-zero embedded
+EPSG), two point clouds are written: `<prefix>_ellipsoidal.{ply,las}` carries
+the raw ellipsoidal (NAD83(2011)) heights this pipeline has always produced,
+and `<prefix>_navd88.{ply,las}` converts those heights to NAVD88 via the
+GEOID18 grid (source CRS NAD83(2011) geographic 3D EPSG:6319, target compound
+`EPSG:<horizontal>+6360` for a ftUS CRS or `+5703` for a metric one). PROJ
+does not raise when the GEOID18 grid is unavailable locally and the network
+is off or fails — it silently returns a "ballpark" transform that leaves
+ellipsoidal heights unchanged — so the NAVD88 path checks transformer
+availability explicitly and refuses any result whose undulation is under 1 m
+everywhere (`GeoidUnavailable`). When that happens (or the grid genuinely
+can't be fetched — `projsync --file us_noaa_g2018u0.tif` installs it), the
+ellipsoidal files are still written, `export.json` names the failure, and the
+process exits **3**. An unprojected export (local ENU, or a units mismatch
+that dropped the CRS label) keeps the single `<prefix>.{ply,las}` naming and
+carries ellipsoidal/relative heights only — NAVD88 needs a real horizontal
+CRS to locate the geoid. Every export also writes `export/export.json`,
+naming each file's horizontal and vertical datum plus the heading reference,
+declination, IMU mount and antenna offset used to build the cloud (Task 6).
 
 Defaults:
     * `target_crs_epsg = 0` (the personal-profile default) → no CRS conversion;
@@ -45,6 +62,8 @@ Failure modes:
     * Session has no GNSS records → emits points in raw LiDAR frame and warns;
       useful for indoor / no-fix scans. The exported LAS carries no CRS in
       this case either, for the same reason.
+    * GEOID18 grid unavailable → ellipsoidal files written, NAVD88 skipped,
+      exit 3.
 
 Decision references: DEC-014, DEC-022, DEC-024, DEC-034.
 
@@ -52,6 +71,12 @@ Dependencies: numpy (required); laspy + pyproj (optional, install via `[post]`
 extra).
 
 Changelog:
+    0.15.0  2026-09-23  Dual export for projected CRSs: <prefix>_ellipsoidal
+                        and <prefix>_navd88 (GEOID18, EPSG:<H>+6360/5703, source
+                        NAD83(2011) 3D EPSG:6319); refuses PROJ's silent ballpark
+                        vertical (|N| < 1 m) and exits 3 with the ellipsoidal
+                        files written; export.json manifest names every file's
+                        horizontal and vertical datum and the heading reference.
     0.14.0  2026-09-23  Heading model (S3-R1, S3-R3): Madgwick NWU converted
                         to ENU with WMM declination; yaw from a per-sweep rest
                         heading, never from gyro yaw during the sweep; tilt per
@@ -791,18 +816,89 @@ def project_to_crs(xyz, origin_lat_lon_alt, target_epsg: int, units: str):
 
 
 # ---------------------------------------------------------------------------
+# NAVD88 (GEOID18) vertical datum conversion
+# ---------------------------------------------------------------------------
+
+
+class GeoidUnavailable(RuntimeError):
+    """NAVD88 heights cannot be produced honestly (grid missing, or PROJ fell
+    back to a ballpark vertical transform)."""
+
+
+_GEOID_GRID = "us_noaa_g2018u0.tif"
+_NAVD88_VERTICAL = {True: 6360, False: 5703}  # ftUS CRS → 6360, metric → 5703
+
+
+def _geoid_transformer(target_epsg: int):
+    """GEOID18 transformer NAD83(2011) 3D (EPSG:6319) → EPSG:<H>+<NAVD88>.
+
+    PROJ does not raise when the geoid grid is missing: it silently returns a
+    'ballpark' transform that leaves ellipsoidal heights unchanged (measured
+    2026-09-23, pyproj 3.7.2, even with only_best=True). So availability is
+    checked explicitly, and the PROJ network (cdn.proj.org) is tried once.
+    """
+    import warnings
+
+    pyproj = _optional_import("pyproj")
+    if pyproj is None:
+        raise GeoidUnavailable('pyproj not installed — install via `pip install -e ".[post]"`')
+    from pyproj.transformer import TransformerGroup
+
+    crs = pyproj.CRS.from_epsg(target_epsg)
+    unit_m = float(crs.axis_info[0].unit_conversion_factor)
+    is_ft = abs(unit_m - US_SURVEY_FOOT_M) < 1e-9 or abs(unit_m - 0.3048) < 1e-9
+    compound = f"EPSG:{target_epsg}+{_NAVD88_VERTICAL[is_ft]}"
+
+    def _group():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return TransformerGroup("EPSG:6319", compound, always_xy=True)
+
+    group = _group()
+    if not group.best_available and not pyproj.network.is_network_enabled():
+        logger.info("GEOID18 grid not found locally; fetching %s from cdn.proj.org", _GEOID_GRID)
+        pyproj.network.set_network_enabled(True)
+        group = _group()
+    if not group.best_available or not group.transformers:
+        raise GeoidUnavailable(
+            f"GEOID18 grid {_GEOID_GRID} unavailable — run `projsync --file {_GEOID_GRID}` "
+            "or allow network access, then re-export"
+        )
+    return group.transformers[0], compound, unit_m
+
+
+def navd88_from_enu(xyz, origin_lat_lon_alt, target_epsg: int):
+    """Local ENU metres → (x, y, NAVD88 height) in target_epsg's unit, via GEOID18."""
+    np = _require_numpy()
+    transformer, compound, unit_m = _geoid_transformer(target_epsg)
+    lat0, lon0, alt0 = origin_lat_lon_alt
+    lats, lons, alts = geodetic_from_enu(xyz[:, 0], xyz[:, 1], xyz[:, 2], lat0, lon0, alt0)
+    xs, ys, zs = transformer.transform(lons, lats, alts)
+    zs = np.asarray(zs, dtype=float)
+    undulation = np.asarray(alts, dtype=float) - zs * unit_m
+    # CONUS geoid heights run about -8 m to -53 m; |N| < 1 m everywhere means
+    # PROJ handed back ellipsoidal heights through a ballpark transform.
+    if not np.all(np.isfinite(zs)) or float(np.max(np.abs(undulation))) < 1.0:
+        raise GeoidUnavailable(
+            "transform returned ellipsoidal heights (ballpark) — refusing to label them NAVD88"
+        )
+    return np.column_stack([np.asarray(xs), np.asarray(ys), zs]), compound
+
+
+# ---------------------------------------------------------------------------
 # Exporters
 # ---------------------------------------------------------------------------
 
 
-def export_ply(out_path: Path, xyz, intensity) -> None:
+def export_ply(out_path: Path, xyz, intensity, comments: tuple[str, ...] | list[str] = ()) -> None:
     """Write a binary little-endian PLY file with intensity-as-color."""
     np = _require_numpy()
     n = len(xyz)
     header = (
         "ply\n"
         "format binary_little_endian 1.0\n"
-        f"element vertex {n}\n"
+        + "".join(f"comment {c}\n" for c in comments)
+        + f"element vertex {n}\n"
         "property double x\n"
         "property double y\n"
         "property double z\n"
@@ -825,9 +921,13 @@ def export_ply(out_path: Path, xyz, intensity) -> None:
     logger.info("PLY written: %s (%d points)", out_path, n)
 
 
-def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
+def export_las(out_path: Path, xyz, intensity, target_epsg: int | str) -> bool:
     """Write a LAS 1.4 point record format 6 file. Returns False if laspy
-    isn't available."""
+    isn't available.
+
+    ``target_epsg`` is an int for a single CRS (``0`` = no CRS embedded) or a
+    compound-CRS string such as ``"EPSG:6563+6360"`` for a NAVD88 export.
+    """
     laspy = _optional_import("laspy")
     if laspy is None:
         logger.warning("laspy not installed — skipping LAS export (PLY still emitted)")
@@ -835,16 +935,21 @@ def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
     np = _require_numpy()
 
     header = laspy.LasHeader(point_format=6, version="1.4")
-    if target_epsg > 0:
+    has_crs = isinstance(target_epsg, str) or target_epsg > 0
+    if has_crs:
         try:
-            header.add_crs(f"EPSG:{target_epsg}")
+            if isinstance(target_epsg, str):
+                pyproj = _optional_import("pyproj")
+                header.add_crs(pyproj.CRS(target_epsg))
+            else:
+                header.add_crs(f"EPSG:{target_epsg}")
         except Exception as e:
             # Broad on purpose: an older/incompatible laspy version, a pyproj
             # error surfacing through add_crs(), or anything else that can go
             # wrong embedding the CRS must still leave the LAS file written —
             # the geometry is correct even when the label isn't embeddable.
             logger.warning(
-                "laspy %s cannot embed CRS EPSG:%d — LAS written without CRS (%s)",
+                "laspy %s cannot embed CRS %s — LAS written without CRS (%s)",
                 getattr(laspy, "__version__", "?"),
                 target_epsg,
                 e,
@@ -859,7 +964,7 @@ def export_las(out_path: Path, xyz, intensity, target_epsg: int) -> bool:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     las.write(str(out_path))
-    logger.info("LAS written: %s (%d points, EPSG:%d)", out_path, len(xyz), target_epsg)
+    logger.info("LAS written: %s (%d points, %s)", out_path, len(xyz), target_epsg)
     return True
 
 
@@ -928,23 +1033,77 @@ def main(argv: list[str] | None = None) -> int:
         units,
     )
 
-    xyz, intensity, origin = session_to_pointcloud(session)
-    if len(xyz) == 0:
+    info: dict = {}
+    xyz_enu, intensity, origin = session_to_pointcloud(session, info=info)
+    if len(xyz_enu) == 0:
         logger.error("No points to export")
         return 1
 
     epsg_to_embed = target_epsg
+    xyz = xyz_enu
     if target_epsg != 0 or units == "ft":
-        xyz, epsg_to_embed = project_to_crs(xyz, origin, target_epsg, units)
+        xyz, epsg_to_embed = project_to_crs(xyz_enu, origin, target_epsg, units)
 
     prefix = args.out_prefix or session_dir.name
     out_dir = session_dir / "export"
-    export_ply(out_dir / f"{prefix}.ply", xyz, intensity)
-    if not args.no_las:
-        export_las(out_dir / f"{prefix}.las", xyz, intensity, epsg_to_embed)
+    files: list[dict] = []
+    navd88_error: str | None = None
+    exit_code = 0
+    if epsg_to_embed != 0:
+        name = f"{prefix}_ellipsoidal"
+        vertical = "ellipsoidal NAD83(2011)"
+        export_ply(
+            out_dir / f"{name}.ply",
+            xyz,
+            intensity,
+            comments=(f"vertical {vertical}", f"horizontal EPSG:{epsg_to_embed}"),
+        )
+        if not args.no_las:
+            export_las(out_dir / f"{name}.las", xyz, intensity, epsg_to_embed)
+        files.append(
+            {"path": f"{name}.ply", "horizontal": f"EPSG:{epsg_to_embed}", "vertical": vertical}
+        )
+        try:
+            xyz_n, compound = navd88_from_enu(xyz_enu, origin, epsg_to_embed)
+        except GeoidUnavailable as e:
+            navd88_error = str(e)
+            logger.error("NAVD88 export skipped: %s", e)
+            exit_code = 3
+        else:
+            name = f"{prefix}_navd88"
+            vertical = f"NAVD88 (GEOID18) EPSG:{compound.split('+')[1]}"
+            export_ply(
+                out_dir / f"{name}.ply",
+                xyz_n,
+                intensity,
+                comments=(f"vertical {vertical}", f"horizontal EPSG:{epsg_to_embed}"),
+            )
+            if not args.no_las:
+                export_las(out_dir / f"{name}.las", xyz_n, intensity, compound)
+            files.append(
+                {
+                    "path": f"{name}.ply",
+                    "horizontal": f"EPSG:{epsg_to_embed}",
+                    "vertical": vertical,
+                }
+            )
+    else:
+        vertical = "local ENU (ellipsoidal offsets)" if origin[0] is not None else "LiDAR-relative"
+        export_ply(out_dir / f"{prefix}.ply", xyz, intensity, comments=(f"vertical {vertical}",))
+        if not args.no_las:
+            export_las(out_dir / f"{prefix}.las", xyz, intensity, 0)
+        files.append({"path": f"{prefix}.ply", "horizontal": "none", "vertical": vertical})
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "files": files,
+        "navd88_error": navd88_error,
+        **info,
+    }
+    (out_dir / "export.json").write_text(json.dumps(manifest, indent=2))
 
     logger.info("Export complete: %s", out_dir)
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

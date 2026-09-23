@@ -279,7 +279,7 @@ class TestPipelinePly:
         with pytest.raises(SystemExit):
             georef.main([str(sess)])
 
-    def test_arm_group_with_crs_override(self, tmp_path):
+    def test_arm_group_with_crs_override(self, tmp_path, monkeypatch):
         sess = _make_session(tmp_path, profile="arm_group", target_crs=0)
         # Without pyproj, target_epsg != 0 should fail fast
         try:
@@ -293,8 +293,135 @@ class TestPipelinePly:
             with pytest.raises(SystemExit):
                 georef.main([str(sess), "--crs", "6563"])
         else:
-            rc = georef.main([str(sess), "--crs", "6563", "--no-las"])
+            # EPSG:6563 is natively ftUS; the session's own "units": "m"
+            # (from _make_session, hardcoded for every profile) would trip
+            # the pre-existing units/CRS-mismatch guard (T1-A) and force
+            # epsg_to_embed back to 0, skipping the dual-export path this
+            # override is meant to exercise -- so --units ft matches the
+            # requested CRS the way a real arm_group capture would.
+            monkeypatch.setattr(georef, "_geoid_transformer", _fake_geoid(-33.3))
+            rc = georef.main([str(sess), "--crs", "6563", "--units", "ft", "--no-las"])
             assert rc == 0
+            out = sess / "export"
+            assert (out / f"{sess.name}_ellipsoidal.ply").exists()
+            assert (out / f"{sess.name}_navd88.ply").exists()
+
+
+# ---------------------------------------------------------------------------
+# NAVD88 (GEOID18) export: dual ellipsoidal/NAVD88 output, ballpark guard,
+# export.json manifest (Task 7)
+# ---------------------------------------------------------------------------
+
+
+def _fake_geoid(undulation_m: float, unit_m: float = 0.3048006096012192):
+    """Stand-in for _geoid_transformer: real pyproj horizontal, fixed geoid undulation."""
+
+    def _factory(target_epsg: int):
+        import pyproj
+
+        horiz = pyproj.Transformer.from_crs("EPSG:6319", f"EPSG:{target_epsg}", always_xy=True)
+
+        class _T:
+            def transform(self, lons, lats, alts):
+                xs, ys = horiz.transform(lons, lats)
+                return xs, ys, (np.asarray(alts) - undulation_m) / unit_m
+
+        return _T(), f"EPSG:{target_epsg}+6360", unit_m
+
+    return _factory
+
+
+def _grid_available() -> bool:
+    pytest.importorskip("pyproj")
+    import warnings
+
+    from pyproj.transformer import TransformerGroup
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return TransformerGroup("EPSG:6319", "EPSG:6563+6360", always_xy=True).best_available
+
+
+class TestNavd88Export:
+    def _arm_session(self, tmp_path):
+        """EPSG:6563 (PA North) is natively ftUS; `_make_session` hardcodes
+        "units": "m" for every profile, which would trip the pre-existing
+        units/CRS-mismatch guard (T1-A, TestExportUnits) and force
+        epsg_to_embed back to 0 — never exercising the dual-export path this
+        class exists to test. A real arm_group session records units that
+        match its own target_crs_epsg, so the metadata is corrected here to
+        "ft" rather than passing --units on every call."""
+        sess = _make_session(tmp_path, profile="arm_group", target_crs=6563)
+        meta_path = sess / "metadata.json"
+        meta = json.loads(meta_path.read_text())
+        meta["session"]["units"] = "ft"
+        meta_path.write_text(json.dumps(meta))
+        return sess
+
+    def test_ballpark_transform_is_refused(self, monkeypatch):
+        """Review Focus 1: PROJ's ballpark vertical returns ellipsoidal heights
+        unchanged (measured 2026-09-23, even with only_best=True). Undulation 0
+        must raise, never be labelled NAVD88."""
+        pytest.importorskip("pyproj")
+        monkeypatch.setattr(georef, "_geoid_transformer", _fake_geoid(0.0))
+        xyz = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+        with pytest.raises(georef.GeoidUnavailable, match="ballpark"):
+            georef.navd88_from_enu(xyz, (40.79, -77.86, 300.0), 6563)
+
+    def test_missing_grid_writes_ellipsoidal_only_and_exits_3(self, tmp_path, monkeypatch, caplog):
+        pytest.importorskip("pyproj")
+
+        def _no_grid(_epsg):
+            raise georef.GeoidUnavailable("GEOID18 grid us_noaa_g2018u0.tif unavailable")
+
+        monkeypatch.setattr(georef, "_geoid_transformer", _no_grid)
+        sess = self._arm_session(tmp_path)
+        with caplog.at_level("ERROR", logger="georef"):
+            rc = georef.main([str(sess), "--no-las"])
+        assert rc == 3
+        out = sess / "export"
+        assert (out / f"{sess.name}_ellipsoidal.ply").exists()
+        assert not (out / f"{sess.name}_navd88.ply").exists()
+        manifest = json.loads((out / "export.json").read_text())
+        assert "us_noaa_g2018u0" in manifest["navd88_error"]
+        assert [f["vertical"] for f in manifest["files"]] == ["ellipsoidal NAD83(2011)"]
+        assert any("NAVD88" in r.message for r in caplog.records)
+
+    def test_manifest_and_ply_headers_name_their_datum(self, tmp_path, monkeypatch):
+        pytest.importorskip("pyproj")
+        monkeypatch.setattr(georef, "_geoid_transformer", _fake_geoid(-33.3))
+        sess = self._arm_session(tmp_path)
+        assert georef.main([str(sess), "--no-las"]) == 0
+        out = sess / "export"
+        manifest = json.loads((out / "export.json").read_text())
+        verticals = {f["path"]: f["vertical"] for f in manifest["files"]}
+        assert verticals[f"{sess.name}_ellipsoidal.ply"] == "ellipsoidal NAD83(2011)"
+        assert verticals[f"{sess.name}_navd88.ply"] == "NAVD88 (GEOID18) EPSG:6360"
+        assert manifest["navd88_error"] is None
+        assert manifest["heading_reference"] == "relative"
+        head = (out / f"{sess.name}_navd88.ply").read_bytes().split(b"end_header")[0]
+        assert b"comment vertical NAVD88 (GEOID18) EPSG:6360" in head
+
+    def test_navd88_z_is_ellipsoidal_minus_undulation(self, tmp_path, monkeypatch):
+        pytest.importorskip("pyproj")
+        monkeypatch.setattr(georef, "_geoid_transformer", _fake_geoid(-33.3))
+        xyz = np.array([[0.0, 0.0, 0.0]])
+        out, compound = georef.navd88_from_enu(xyz, (40.79, -77.86, 300.0), 6563)
+        assert compound == "EPSG:6563+6360"
+        assert out[0, 2] == pytest.approx((300.0 + 33.3) / 0.3048006096012192, abs=1e-6)
+
+    def test_real_geoid18_known_answer(self):
+        """pyproj + the real GEOID18 grid. Skips (with the reason) only when the
+        grid is not on this machine — install it with
+        `projsync --file us_noaa_g2018u0.tif` to run it."""
+        if not _grid_available():
+            pytest.skip("GEOID18 grid us_noaa_g2018u0.tif not installed locally")
+        transformer, compound, unit_m = georef._geoid_transformer(6563)
+        x, y, z = transformer.transform(-77.86, 40.79, 300.0)
+        assert compound == "EPSG:6563+6360"
+        assert z == pytest.approx(1093.5003, abs=0.001)
+        transformer5, _c, _u = georef._geoid_transformer(6565)
+        assert transformer5.transform(-76.3, 40.0, 100.0)[2] == pytest.approx(439.5313, abs=0.001)
 
 
 # ---------------------------------------------------------------------------
