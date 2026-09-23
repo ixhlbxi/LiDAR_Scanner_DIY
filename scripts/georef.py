@@ -14,11 +14,15 @@ logs in SI / WGS84 / local ENU; CRS conversion happens here.
 Coordinate flow:
 
     LiDAR polar (angle, distance)  →  local Cartesian (forward, left, up)
-    ─(T_lidar_imu — identity in v1.0 absent calibration; DEC-024)─►
-    IMU frame
-    ─(slerp(t_scan) using IMU ring buffer; DEC-014)─►
-    World-aligned per-scan orientation
-    ─(GNSS antenna position; T_body_gnss zero in v1.0 absent calibration)─►
+    ─(mount, then Rz(mast_angle_deg))─►
+    Body frame
+    ─(per-scan tilt: Madgwick quaternion at t_scan, mount correction removed
+      for imu_mount == "platform" (DEC-024); yaw from the sweep's rest
+      heading, NEVER from in-sweep gyro yaw — DEC-013)─►
+    World-aligned per-scan orientation, Madgwick's NWU converted to ENU via
+    Rz(-D) · Rz(+90°), D = WMM declination at the GNSS origin (S3-R1)
+    ─(GNSS antenna position; rotating antenna lever arm subtracted when
+      antenna_offset_m is set, S3-R3)─►
     Local ENU (origin = first valid GNSS fix in the session)
     ─(pyproj transform → target_crs_epsg from metadata.json or --crs)─►
     Target CRS (e.g. NAD83(2011) PA-N ft-US for arm_group profile)
@@ -48,6 +52,11 @@ Dependencies: numpy (required); laspy + pyproj (optional, install via `[post]`
 extra).
 
 Changelog:
+    0.14.0  2026-09-23  Heading model (S3-R1, S3-R3): Madgwick NWU converted
+                        to ENU with WMM declination; yaw from a per-sweep rest
+                        heading, never from gyro yaw during the sweep; tilt per
+                        scan; imu_mount "base" | "platform"; rotating antenna
+                        lever arm; heading labelled true/magnetic/relative.
     0.13.1  2026-09-23  load_session() dedup fix round 1: gnss*.jsonl records
                         now sort ahead of scan-embedded ones so a timestamp
                         tie keeps the authoritative gnss-file version, and
@@ -84,7 +93,7 @@ import logging
 import math
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger("georef")
@@ -183,6 +192,7 @@ class SessionData:
     lidar_records: list[dict]
     imu_records: list[dict]
     gnss_records: list[dict]
+    sweep_starts: dict[int, float] = field(default_factory=dict)
 
 
 _SEGMENT_RE = re.compile(r"^(scan|gnss)(?:_(\d+))?\.jsonl$")
@@ -238,6 +248,7 @@ def load_session(session_dir: Path) -> SessionData:
     lidar: list[dict] = []
     imu: list[dict] = []
     scan_gnss: list[dict] = []
+    sweep_starts: dict[int, float] = {}
     for rec in _iter_jsonl(scan_files):
         t = rec.get("type")
         if t == "lidar":
@@ -246,6 +257,9 @@ def load_session(session_dir: Path) -> SessionData:
             imu.extend(_flatten_imu_batch(rec))
         elif t == "gnss":
             scan_gnss.append(rec)
+        elif t == "event" and rec.get("event") == "sweep_start":
+            k = int((rec.get("details") or {}).get("sweep", 0))
+            sweep_starts.setdefault(k, float(rec["timestamp"]))
 
     # gnss*.jsonl is the unconditional, AUTHORITATIVE GNSS source (T1-053:
     # the logger no longer mirrors GNSS records into scan*.jsonl). Records
@@ -287,7 +301,13 @@ def load_session(session_dir: Path) -> SessionData:
         len(gnss),
         len(scan_files),
     )
-    return SessionData(metadata=metadata, lidar_records=lidar, imu_records=imu, gnss_records=gnss)
+    return SessionData(
+        metadata=metadata,
+        lidar_records=lidar,
+        imu_records=imu,
+        gnss_records=gnss,
+        sweep_starts=sweep_starts,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +504,42 @@ def magnetic_declination_deg(lat: float, lon: float, when_epoch: float) -> float
     return float(result.d)
 
 
+def _yaw_deg(r) -> float:
+    return math.degrees(math.atan2(float(r[1, 0]), float(r[0, 0])))
+
+
+def _nwu_to_enu(declination_deg: float | None):
+    """Madgwick world (North-West-Up, x = magnetic north) → ENU, true north when
+    the declination is known: Rz(-D) · Rz(+90°)."""
+    return _rot_z(-(declination_deg or 0.0)) @ _rot_z(90.0)
+
+
+def _circular_mean_deg(angles: list[float]) -> float:
+    s = sum(math.sin(math.radians(a)) for a in angles)
+    c = sum(math.cos(math.radians(a)) for a in angles)
+    return math.degrees(math.atan2(s, c))
+
+
+def _rest_samples_by_sweep(session: SessionData, imu_sorted: list[dict]) -> dict[int, list[dict]]:
+    """Mag-bearing IMU samples in (end of previous sweep, rest end of this sweep]."""
+    by_sweep: dict[int, list[dict]] = {}
+    for rec in session.lidar_records:
+        by_sweep.setdefault(int(rec.get("sweep", 0)), []).append(rec)
+    out: dict[int, list[dict]] = {}
+    prev_end = float("-inf")
+    for k in sorted(by_sweep):
+        recs = by_sweep[k]
+        first = min(r["timestamp"] for r in recs)
+        rest_end = session.sweep_starts.get(k, first)
+        out[k] = [
+            s
+            for s in imu_sorted
+            if s.get("mag") is not None and prev_end < s["timestamp"] <= rest_end
+        ]
+        prev_end = max(r["timestamp"] for r in recs)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Point cloud assembly
 # ---------------------------------------------------------------------------
@@ -511,12 +567,22 @@ def lidar_points_to_local(lidar_record: dict, quat):
     return world, inten
 
 
-def session_to_pointcloud(session: SessionData):
+def session_to_pointcloud(session: SessionData, info: dict | None = None):
     """Assemble all lidar records into one Nx3 point cloud (local ENU meters)
     plus an aligned intensity array.
 
     Origin is the first valid GNSS fix (fix_type >= 2). When no fix is available,
     the origin is the rover itself (all points are in LiDAR-relative meters).
+
+    Heading model (S3-R1, S3-R3): per-scan tilt comes from the IMU (mount
+    correction removed for a platform-mounted IMU); yaw comes from a
+    per-sweep rest heading derived from magnetometer samples taken while the
+    mast is home, converted from Madgwick's NWU world frame to ENU using the
+    WMM declination at the session's GNSS origin, never from in-sweep gyro
+    yaw. See the module docstring's coordinate-flow block.
+
+    When ``info`` is given, it is filled with
+    ``{"heading_reference", "declination_deg", "imu_mount", "antenna_offset_m"}``.
     """
     np = _require_numpy()
     imu_sorted = sorted(session.imu_records, key=lambda r: r["timestamp"])
@@ -529,19 +595,6 @@ def session_to_pointcloud(session: SessionData):
         mast_angles = {rec.get("mast_angle_deg", 0.0) for rec in session.lidar_records}
         if len(mast_angles) == 1:
             logger.warning("mast angle never changed: output is planar (continuous mode?)")
-
-    # DEC-013 / DEC-012: a 6-DOF Madgwick filter (no magnetometer) has no
-    # absolute heading reference, so its yaw is pure gyro-integration drift —
-    # meaningless on a rover that is stationary between scans. When nothing in
-    # the session ever supplied a magnetometer sample, strip yaw from every
-    # orientation and let the commanded mast angle (already applied in
-    # lidar_points_to_local via _rot_z) stand in for heading instead.
-    strip_yaw = not any(r.get("mag") is not None for r in session.imu_records)
-    if strip_yaw:
-        logger.info(
-            "no magnetometer data: using IMU roll/pitch only; yaw from the "
-            "commanded mast angle (6-DOF gyro yaw drifts on a static rover)"
-        )
 
     if not gnss_sorted:
         logger.warning(
@@ -561,13 +614,57 @@ def session_to_pointcloud(session: SessionData):
             origin_alt,
         )
 
+    geometry = session.metadata.get("geometry") or {}
+    mount = geometry.get("imu_mount", "base")
+    antenna = geometry.get("antenna_offset_m")
+    arm_platform = np.asarray(antenna, dtype=float) if antenna else None
+
+    rest = _rest_samples_by_sweep(session, imu_sorted)
+    have_rest = any(rest.values())
+    declination = None
+    if have_rest and origin_lat is not None and session.lidar_records:
+        t_first = min(r["timestamp"] for r in session.lidar_records)
+        declination = magnetic_declination_deg(origin_lat, origin_lon, t_first)
+    enu = _nwu_to_enu(declination)
+    yaw_ref: dict[int, float] = {}
+    for k, samples in rest.items():
+        if samples:
+            yaw_ref[k] = _circular_mean_deg(
+                [_yaw_deg(enu @ _quat_to_rotmat(s["orientation"])) for s in samples]
+            )
+    if not have_rest:
+        label = "relative"
+        logger.info(
+            "no magnetometer data at rest: heading is relative (mast-0 forward = +X); "
+            "tilt from the IMU, yaw from the commanded mast angle"
+        )
+    else:
+        label = "true" if declination is not None else "magnetic"
+        missing = sorted(k for k in rest if k not in yaw_ref)
+        if missing:
+            logger.warning("sweeps %s have no rest heading; reusing the nearest sweep's", missing)
+        for k in missing:
+            earlier = [j for j in yaw_ref if j < k]
+            yaw_ref[k] = yaw_ref[max(earlier)] if earlier else yaw_ref[min(yaw_ref)]
+    logger.info("heading reference: %s (declination %s)", label, declination)
+    if info is not None:
+        info.update(
+            heading_reference=label,
+            declination_deg=declination,
+            imu_mount=mount,
+            antenna_offset_m=antenna,
+        )
+
     chunks_xyz = []
     chunks_int = []
     for rec in session.lidar_records:
-        quat = orientation_at(rec["timestamp"], imu_sorted)
-        if strip_yaw:
-            quat = _strip_yaw(quat)
-        pts_local, intens = lidar_points_to_local(rec, quat)
+        mast = float(rec.get("mast_angle_deg", 0.0))
+        q_t = orientation_at(rec["timestamp"], imu_sorted)
+        m_imu = mast if mount == "platform" else 0.0
+        tilt = _strip_yaw(_rotmat_to_quat(_quat_to_rotmat(q_t) @ _rot_z(-m_imu)))
+        r_world = _rot_z(yaw_ref.get(int(rec.get("sweep", 0)), 0.0)) @ _quat_to_rotmat(tilt)
+        q_world = _rotmat_to_quat(r_world)
+        pts_local, intens = lidar_points_to_local(rec, q_world)
         if pts_local.size == 0:
             continue
 
@@ -585,6 +682,10 @@ def session_to_pointcloud(session: SessionData):
                     origin_alt,
                 )
                 pts_local = pts_local + np.array([dE, dN, dU])
+            if arm_platform is not None:
+                # GNSS fix is the antenna; the LiDAR sits at antenna minus the
+                # lever arm, rotated with the mast and the world orientation.
+                pts_local = pts_local - r_world @ (_rot_z(mast) @ arm_platform)
 
         chunks_xyz.append(pts_local)
         chunks_int.append(intens)

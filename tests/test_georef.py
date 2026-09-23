@@ -619,11 +619,14 @@ class TestYawStripWithoutMag:
         assert any("no magnetometer data" in r.message for r in caplog.records)
 
     def test_yaw_kept_with_mag(self, tmp_path):
+        """With mag at rest the heading is kept and converted from Madgwick's
+        NWU frame to ENU (S3-R1). A 90° yaw in NWU turns body forward from
+        magnetic north (NWU +x) to west (NWU +y), which is ENU -x. No GNSS, so
+        no declination: the label is "magnetic"."""
         sess = self._session(tmp_path, mag=[1.0, 2.0, 3.0])
         data = georef.load_session(sess)
         xyz, _intensity, _origin = georef.session_to_pointcloud(data)
-        # Yaw kept: the IMU's 90° Z rotation carries the point to the left.
-        np.testing.assert_allclose(xyz[0], [0.0, 1.0, 0.0], atol=1e-9)
+        np.testing.assert_allclose(xyz[0], [-1.0, 0.0, 0.0], atol=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -689,3 +692,218 @@ class TestDeclination:
         with caplog.at_level("WARNING", logger="georef"):
             assert georef.magnetic_declination_deg(40.79, -77.86, self._WHEN) is None
         assert any("pygeomag" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Heading model (S3-R1, S3-R3): NWU->ENU, per-sweep rest heading, tilt per
+# scan, IMU mount, rotating antenna lever arm.
+# ---------------------------------------------------------------------------
+
+
+def _heading_session(
+    tmp_path: Path,
+    *,
+    name: str = "hd",
+    rest_q=(1.0, 0.0, 0.0, 0.0),
+    scan_q=None,
+    mag=(20.0, 0.0, -40.0),
+    with_gnss: bool = True,
+    mast_angles=(0.0,),
+    mount: str = "base",
+    antenna_offset=None,
+    when: float = 1790121600.0,
+    platform_q_follows_mast: bool = False,
+) -> Path:
+    """Rest IMU sample (with mag) at `when`, sweep_start at when+0.1, one lidar
+    point 1 m straight ahead per mast angle, GNSS fix at State College."""
+    sess = tmp_path / name
+    sess.mkdir()
+    meta = {
+        "session": {"profile": "personal", "target_crs_epsg": 0, "units": "m"},
+        "geometry": {"imu_mount": mount, "antenna_offset_m": antenna_offset},
+    }
+    (sess / "metadata.json").write_text(json.dumps(meta))
+    lines = [json.dumps(_imu_batch([when], orientation=rest_q, mag=list(mag) if mag else None))]
+    lines.append(
+        json.dumps(
+            {
+                "type": "event",
+                "timestamp": when + 0.1,
+                "event": "sweep_start",
+                "details": {"sweep": 0, "rest_sec": 0.1},
+            }
+        )
+    )
+    if with_gnss:
+        lines.append(
+            json.dumps(
+                {
+                    "type": "gnss",
+                    "timestamp": when + 0.2,
+                    "fix_type": 5,
+                    "lat": 40.79,
+                    "lon": -77.86,
+                    "alt": 300.0,
+                    "hdop": 0.8,
+                    "vdop": 1.0,
+                    "sat_count": 18,
+                    "rtk_age": 1.0,
+                }
+            )
+        )
+    for i, m in enumerate(mast_angles):
+        t = when + 1.0 + i
+        q = scan_q if scan_q is not None else rest_q
+        if platform_q_follows_mast:
+            # IMU on the platform: R_platform = R_base · Rz(mast)
+            q = tuple(
+                float(v)
+                for v in georef._rotmat_to_quat(georef._quat_to_rotmat(q) @ georef._rot_z(m))
+            )
+        lines.append(json.dumps(_imu_batch([t - 0.01, t + 0.01], orientation=q, mag=None)))
+        rec = _lidar_record(t, i, float(m), [0.0], [1.0], [1])
+        rec["sweep"] = 0
+        lines.append(json.dumps(rec))
+    (sess / "scan.jsonl").write_text("\n".join(lines) + "\n")
+    return sess
+
+
+class TestHeadingModel:
+    D_STATE_COLLEGE = -10.5348  # Task 5 known answer, 2026-09-23
+
+    def test_true_north_known_answer(self, tmp_path):
+        """Body forward = magnetic north at rest (identity NWU quaternion). With
+        D = -10.53°, a point 1 m ahead lies at true azimuth 349.47°:
+        ENU (-sin 10.53°, cos 10.53°, 0)."""
+        pytest.importorskip("pygeomag", reason="pygeomag not installed (post/dev extra)")
+        import math
+
+        data = georef.load_session(_heading_session(tmp_path))
+        info: dict = {}
+        xyz, _i, _o = georef.session_to_pointcloud(data, info=info)
+        d = math.radians(-self.D_STATE_COLLEGE)
+        np.testing.assert_allclose(xyz[0], [-math.sin(d), math.cos(d), 0.0], atol=1e-3)
+        assert info["heading_reference"] == "true"
+        assert info["declination_deg"] == pytest.approx(self.D_STATE_COLLEGE, abs=0.01)
+
+    def test_magnetic_label_without_gnss(self, tmp_path):
+        """Review Focus 4: mag at rest, no GNSS → 'magnetic', no declination,
+        forward = magnetic north = ENU +y."""
+        data = georef.load_session(_heading_session(tmp_path, with_gnss=False))
+        info: dict = {}
+        xyz, _i, _o = georef.session_to_pointcloud(data, info=info)
+        np.testing.assert_allclose(xyz[0], [0.0, 1.0, 0.0], atol=1e-9)
+        assert info["heading_reference"] == "magnetic"
+        assert info["declination_deg"] is None
+
+    def test_relative_label_without_mag(self, tmp_path):
+        data = georef.load_session(_heading_session(tmp_path, mag=None, with_gnss=False))
+        info: dict = {}
+        xyz, _i, _o = georef.session_to_pointcloud(data, info=info)
+        np.testing.assert_allclose(xyz[0], [1.0, 0.0, 0.0], atol=1e-9)
+        assert info["heading_reference"] == "relative"
+
+    def test_gyro_yaw_drift_during_sweep_is_ignored(self, tmp_path):
+        """The scan-time quaternion carries 30° of gyro yaw drift (mag off while
+        stepping, DEC-013). Yaw comes from the rest heading, so the point stays put."""
+        import math
+
+        h = math.radians(30.0) / 2
+        drifted = (math.cos(h), 0.0, 0.0, math.sin(h))
+        data = georef.load_session(_heading_session(tmp_path, scan_q=drifted, with_gnss=False))
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        np.testing.assert_allclose(xyz[0], [0.0, 1.0, 0.0], atol=1e-9)
+
+    def test_tilt_applied_per_scan(self, tmp_path):
+        """Base tilted 10° about body X, relative heading: at mast 90° the
+        forward point goes left, then the tilt lifts it: (0, cos10°, sin10°)."""
+        import math
+
+        h = math.radians(10.0) / 2
+        tilted = (math.cos(h), math.sin(h), 0.0, 0.0)
+        data = georef.load_session(
+            _heading_session(
+                tmp_path, rest_q=tilted, mag=None, with_gnss=False, mast_angles=(90.0,)
+            )
+        )
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        t = math.radians(10.0)
+        np.testing.assert_allclose(xyz[0], [0.0, math.cos(t), math.sin(t)], atol=1e-9)
+
+    def test_platform_mount_matches_base_mount(self, tmp_path):
+        """An IMU riding the mast reports R_base · Rz(mast). With mount =
+        'platform' the mast rotation is removed before the tilt is taken, so
+        the cloud equals the base-mount cloud of the same scene.
+
+        The base is TILTED 10° about X on purpose: with a level base, strip_yaw
+        would discard a pure mast yaw anyway, and the test would pass even if
+        the mount were ignored. With a tilt, ignoring the mount makes the tilt
+        axis turn with the mast (strip_yaw(Rx·Rz(m)) != Rx), so the clouds differ."""
+        import math
+
+        h = math.radians(10.0) / 2
+        tilted = (math.cos(h), math.sin(h), 0.0, 0.0)
+        masts = (0.0, 45.0, 90.0, 135.0)
+        base = georef.session_to_pointcloud(
+            georef.load_session(
+                _heading_session(
+                    tmp_path, name="b", rest_q=tilted, mast_angles=masts, with_gnss=False
+                )
+            )
+        )[0]
+        plat = georef.session_to_pointcloud(
+            georef.load_session(
+                _heading_session(
+                    tmp_path,
+                    name="p",
+                    rest_q=tilted,
+                    mast_angles=masts,
+                    with_gnss=False,
+                    mount="platform",
+                    platform_q_follows_mast=True,
+                )
+            )
+        )[0]
+        np.testing.assert_allclose(plat, base, atol=1e-9)
+        # Same scene with the mount wrongly declared "base" must NOT match.
+        wrong = georef.session_to_pointcloud(
+            georef.load_session(
+                _heading_session(
+                    tmp_path,
+                    name="w",
+                    rest_q=tilted,
+                    mast_angles=masts,
+                    with_gnss=False,
+                    mount="base",
+                    platform_q_follows_mast=True,
+                )
+            )
+        )[0]
+        assert not np.allclose(wrong, base, atol=1e-6)
+
+    def test_lever_arm_on_axis(self, tmp_path):
+        """Antenna 0.5 m above the LiDAR: every point drops 0.5 m (relative heading)."""
+        data = georef.load_session(
+            _heading_session(tmp_path, mag=None, antenna_offset=[0.0, 0.0, 0.5])
+        )
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        np.testing.assert_allclose(xyz[0], [1.0, 0.0, -0.5], atol=1e-6)
+
+    def test_lever_arm_rotates_with_mast(self, tmp_path):
+        """Antenna 0.2 m ahead and 0.5 m up at mast 0; at mast 90° the arm
+        points left: forward point (0, 1, 0) minus arm (0, 0.2, 0.5)."""
+        data = georef.load_session(
+            _heading_session(
+                tmp_path, mag=None, antenna_offset=[0.2, 0.0, 0.5], mast_angles=(90.0,)
+            )
+        )
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        np.testing.assert_allclose(xyz[0], [0.0, 0.8, -0.5], atol=1e-6)
+
+    def test_old_session_without_geometry_or_events_loads(self, tmp_path):
+        """Pre-stage-5 sessions: no geometry, no sweep field, no sweep_start."""
+        sess = _make_session(tmp_path)
+        data = georef.load_session(sess)
+        assert data.sweep_starts == {}
+        xyz, _i, _o = georef.session_to_pointcloud(data)
+        assert len(xyz) == 4
