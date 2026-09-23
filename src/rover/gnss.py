@@ -7,13 +7,19 @@ Two responsibilities, owned by GnssReceiver:
    used opportunistically when pyubx2 is available (gives us a finer fix-type
    discrimination including RTK FLOAT vs FIX).
 
-   Source selection: when pyubx2 is active (`_ubx_active`), NAV-PVT is the
-   sole position source for the life of the receiver — a GGA sentence that
-   arrives in the same session only contributes its `rtk_age` to the latest
-   NAV-PVT fix (see `_record_fix`). Without pyubx2, GGA is the only source
-   there is. Heights from both paths are normalised to ellipsoidal (WGS84)
-   metres before they reach GnssFix — GGA field 9 (MSL) is corrected by field
-   11 (geoid separation); NAV-PVT uses `height`, not `hMSL`.
+   Source selection: `_ubx_active` becomes True only once a NAV-PVT message
+   has actually been parsed — constructing the UBXReader doesn't guarantee
+   the F9P ever emits one. Once active, NAV-PVT is the sole position source;
+   a GGA sentence arriving in the same session only contributes its
+   `rtk_age` to the latest NAV-PVT fix (see `_record_fix`). If NAV-PVT then
+   goes quiet for more than `_NAVPVT_STALE_SEC`, GGA resumes as the source
+   (one warning logged) until NAV-PVT reappears. Without pyubx2, GGA is the
+   only source there ever is. A GGA-carried `rtk_age` merged onto a NAV-PVT
+   fix expires after `_RTK_AGE_VALID_SEC` rather than freezing forever if
+   RTCM stops arriving. Heights from both paths are normalised to
+   ellipsoidal (WGS84) metres before they reach GnssFix — GGA field 9 (MSL)
+   is corrected by field 11 (geoid separation); NAV-PVT uses `height`, not
+   `hMSL`.
 
 2. **Write** RTCM3 corrections **to** the F9P when [ntrip].client_location =
    "pi". This is the data path that supersedes the original DEC-006 "Pi never in
@@ -49,6 +55,13 @@ Changelog:
                         subscribe()/_callbacks removed; line_buf capped;
                         FIX_* constants imported from rover.lora_protocol
                         (T1-019, T1-020, T1-049, S2-R1).
+    0.11.1  2026-09-23  Fix round 1: NAV-PVT becomes the source only once a
+                        NAV-PVT message has actually been parsed (not merely
+                        when the UBXReader is constructed), and GGA resumes
+                        as the source if NAV-PVT goes quiet for more than
+                        _NAVPVT_STALE_SEC; a carried-forward rtk_age expires
+                        after _RTK_AGE_VALID_SEC instead of freezing forever;
+                        write_rtcm's serial-None check moved inside the lock.
 """
 
 from __future__ import annotations
@@ -237,6 +250,8 @@ def parse_gga(sentence: str) -> GnssFix | None:
 # ---------------------------------------------------------------------------
 
 _LINE_BUF_MAX = 1024  # cap on the NMEA-only read buffer; drop oldest overflow
+_NAVPVT_STALE_SEC = 5.0  # no NAV-PVT for this long while active → GGA resumes as source
+_RTK_AGE_VALID_SEC = 10.0  # a carried-forward rtk_age older than this is dropped (unknown)
 
 
 class GnssReceiver:
@@ -256,7 +271,9 @@ class GnssReceiver:
         self._serial_lock = threading.Lock()  # protects write_rtcm() and close() only
         self._lock = threading.Lock()
         self._latest: GnssFix | None = None
-        self._ubx_active = False  # True once a pyubx2 UBXReader is live (NAV-PVT sole source)
+        self._ubx_active = False  # True once a NAV-PVT message has actually been parsed
+        self._last_navpvt_mono = 0.0  # time.monotonic() of the most recent NAV-PVT parse
+        self._rtk_age_mono = 0.0  # time.monotonic() when the last valid rtk_age was merged
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -323,7 +340,9 @@ class GnssReceiver:
             from pyubx2 import UBXReader  # type: ignore[import-not-found]
 
             ubx_reader = UBXReader(self._serial, protfilter=3)  # NMEA+UBX
-            self._ubx_active = True
+            # _ubx_active is set True only once a NAV-PVT message is actually
+            # parsed (see _read_with_pyubx2) — constructing the reader doesn't
+            # guarantee the F9P ever emits one.
         except ImportError:
             logger.info("pyubx2 not available — GnssReceiver using NMEA-GGA only")
         except Exception as e:
@@ -383,20 +402,30 @@ class GnssReceiver:
             if fix is not None:
                 self._record_fix(fix, source="gga")
         elif identity == "NAV-PVT":
+            # NAV-PVT becomes the position source only once it's actually seen.
+            self._ubx_active = True
+            self._last_navpvt_mono = time.monotonic()
             self._record_fix(_fix_from_nav_pvt(parsed), source="nav_pvt")
 
     def _record_fix(self, fix: GnssFix, source: str) -> None:
         with self._lock:
             if source == "gga" and self._ubx_active:
-                # NAV-PVT is the position source; GGA only contributes the RTCM age.
-                if self._latest is not None and fix.rtk_age >= 0:
-                    self._latest = dataclasses.replace(self._latest, rtk_age=fix.rtk_age)
-                return
+                if time.monotonic() - self._last_navpvt_mono > _NAVPVT_STALE_SEC:
+                    logger.warning("NAV-PVT stopped; falling back to GGA")
+                    self._ubx_active = False
+                    # Fall through — GGA is accepted as the source below.
+                else:
+                    # NAV-PVT is the position source; GGA only contributes the RTCM age.
+                    if self._latest is not None and fix.rtk_age >= 0:
+                        self._latest = dataclasses.replace(self._latest, rtk_age=fix.rtk_age)
+                        self._rtk_age_mono = time.monotonic()
+                    return
             if (
                 source == "nav_pvt"
                 and self._latest is not None
                 and self._latest.rtk_age >= 0
                 and fix.rtk_age < 0
+                and time.monotonic() - self._rtk_age_mono <= _RTK_AGE_VALID_SEC
             ):
                 fix = dataclasses.replace(fix, rtk_age=self._latest.rtk_age)
             self._latest = fix
@@ -424,9 +453,9 @@ class GnssReceiver:
                 self._ntrip_cfg.client_location,
             )
             return
-        if self._serial is None:
-            return
         with self._serial_lock:
+            if self._serial is None:
+                return
             try:
                 self._serial.write(data)
             except OSError as e:

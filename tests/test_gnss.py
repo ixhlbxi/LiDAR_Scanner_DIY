@@ -1,5 +1,8 @@
 """Unit tests for rover.gnss NMEA-GGA parser. No serial / no hardware."""
 
+import threading
+import time
+
 import pytest
 
 from rover.gnss import GnssFix, parse_gga
@@ -199,6 +202,8 @@ class TestStage4Gnss:
         r._lock = __import__("threading").Lock()
         r._latest = None
         r._ubx_active = True
+        r._last_navpvt_mono = time.monotonic()  # fresh — not stale
+        r._rtk_age_mono = 0.0
         nav = GnssFix(timestamp=1.0, fix_type=5, lat=40.0, lon=-75.0, alt=5.0, pdop=1.1)
         r._record_fix(nav, source="nav_pvt")
         gga = GnssFix(timestamp=1.2, fix_type=5, lat=41.0, lon=-76.0, alt=99.0, rtk_age=2.5)
@@ -214,6 +219,8 @@ class TestStage4Gnss:
         r._lock = __import__("threading").Lock()
         r._latest = None
         r._ubx_active = False
+        r._last_navpvt_mono = 0.0
+        r._rtk_age_mono = 0.0
         gga = GnssFix(timestamp=1.2, fix_type=5, lat=41.0, lon=-76.0, alt=99.0, rtk_age=2.5)
         r._record_fix(gga, source="gga")
         assert r.latest_fix().lat == 41.0
@@ -222,3 +229,73 @@ class TestStage4Gnss:
         from rover.gnss import GnssReceiver
 
         assert not hasattr(GnssReceiver, "subscribe")
+
+    def test_gga_is_source_until_first_nav_pvt(self):
+        """A fresh receiver has never seen NAV-PVT — GGA is the source until it
+        actually arrives, not merely because pyubx2 is importable (fix round 1,
+        Finding 1)."""
+        from rover.gnss import GnssReceiver
+
+        r = GnssReceiver.__new__(GnssReceiver)
+        r._lock = threading.Lock()
+        r._latest = None
+        r._ubx_active = False
+        r._last_navpvt_mono = 0.0
+        r._rtk_age_mono = 0.0
+
+        gga1 = GnssFix(timestamp=1.0, fix_type=2, lat=10.0, lon=-20.0, alt=1.0)
+        r._record_fix(gga1, source="gga")
+        assert r.latest_fix().lat == 10.0  # GGA is the source before any NAV-PVT is seen
+
+        nav = GnssFix(timestamp=2.0, fix_type=5, lat=40.0, lon=-75.0, alt=5.0, pdop=1.1)
+        r._ubx_active = True
+        r._last_navpvt_mono = time.monotonic()
+        r._record_fix(nav, source="nav_pvt")
+        assert r.latest_fix().lat == 40.0  # first NAV-PVT takes over as the source
+
+        gga2 = GnssFix(timestamp=2.2, fix_type=5, lat=41.0, lon=-76.0, alt=99.0, rtk_age=2.5)
+        r._record_fix(gga2, source="gga")
+        latest = r.latest_fix()
+        assert latest.lat == 40.0  # still the NAV-PVT position
+        assert latest.rtk_age == 2.5  # GGA only merged its age
+
+    def test_gga_resumes_when_nav_pvt_goes_stale(self):
+        """If NAV-PVT stops arriving, GGA must resume as the source rather than
+        being dropped forever (fix round 1, Finding 1)."""
+        from rover.gnss import GnssReceiver
+
+        r = GnssReceiver.__new__(GnssReceiver)
+        r._lock = threading.Lock()
+        r._latest = GnssFix(timestamp=1.0, fix_type=5, lat=40.0, lon=-75.0, alt=5.0)
+        r._ubx_active = True
+        r._last_navpvt_mono = time.monotonic() - 10  # stale: > _NAVPVT_STALE_SEC (5.0)
+        r._rtk_age_mono = 0.0
+
+        gga = GnssFix(timestamp=2.0, fix_type=2, lat=41.0, lon=-76.0, alt=99.0)
+        r._record_fix(gga, source="gga")
+        latest = r.latest_fix()
+        assert latest.lat == 41.0  # GGA resumed as the source
+        assert r._ubx_active is False
+
+    def test_carried_rtk_age_expires(self):
+        """A carried-forward rtk_age must not freeze indefinitely (fix round 1,
+        Finding 2)."""
+        from rover.gnss import GnssReceiver
+
+        r = GnssReceiver.__new__(GnssReceiver)
+        r._lock = threading.Lock()
+        r._ubx_active = True
+        r._last_navpvt_mono = time.monotonic()
+        r._rtk_age_mono = 0.0
+        r._latest = GnssFix(timestamp=1.0, fix_type=5, lat=40.0, lon=-75.0, alt=5.0)
+
+        gga = GnssFix(timestamp=1.2, fix_type=5, lat=41.0, lon=-76.0, alt=99.0, rtk_age=2.5)
+        r._record_fix(gga, source="gga")
+        assert r.latest_fix().rtk_age == 2.5  # merged
+
+        # Simulate that the merge happened 30 s ago — well past _RTK_AGE_VALID_SEC (10.0).
+        r._rtk_age_mono = time.monotonic() - 30
+        r._last_navpvt_mono = time.monotonic()
+        nav2 = GnssFix(timestamp=2.0, fix_type=5, lat=40.1, lon=-75.1, alt=6.0)
+        r._record_fix(nav2, source="nav_pvt")
+        assert r.latest_fix().rtk_age == -1.0  # expired; not carried forward
