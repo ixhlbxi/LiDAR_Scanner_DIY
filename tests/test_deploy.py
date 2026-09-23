@@ -56,3 +56,10 @@ def test_install_sh_installs_configs_without_overwriting() -> None:
     assert "rover-telemetry.service" in after_reload, "both units restarted"
     assert "/var/lib/rover/data" in after_reload, "closing message names the scan folder"
     assert "/var/lib/rover/bench" in after_reload, "closing message names the bench folder"
+
+
+def test_install_sh_checks_gpio_backend() -> None:
+    sh = (REPO / "deploy/install.sh").read_text(encoding="utf-8")
+    assert 'python3 -c "import RPi.GPIO as g; print(g.__file__)"' in sh
+    assert "import RPi.GPIO" in sh
+    assert "python3-rpi-lgpio" in sh

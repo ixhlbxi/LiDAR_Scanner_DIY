@@ -95,6 +95,11 @@ if [[ "$DRY_RUN" == false ]] && ! command -v rsync >/dev/null 2>&1; then
     echo "  REFUSED: rsync not found — apt install rsync"
     fail=1
 fi
+gpio_file=$(python3 -c "import RPi.GPIO as g; print(g.__file__)" 2>/dev/null || true)
+if [[ -n "$gpio_file" && "$gpio_file" != *lgpio* ]]; then
+    echo "  WARNING: legacy RPi.GPIO backend at $gpio_file (DEC-029) — the stepper will refuse to run."
+    echo "           Fix: sudo apt remove python3-rpi.gpio && sudo apt install python3-rpi-lgpio"
+fi
 if [[ $fail -ne 0 ]]; then
     exit 3
 fi

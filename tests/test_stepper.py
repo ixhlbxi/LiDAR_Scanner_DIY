@@ -292,3 +292,35 @@ class TestStepperWithMockGPIO:
         motor = StepperMotor(stepper_config)
         motor.start()
         assert not motor.available
+
+
+# ---------------------------------------------------------------------------
+# GPIO backend detection (DEC-029)
+# ---------------------------------------------------------------------------
+
+
+def test_backend_detection_names_lgpio():
+    from rover import stepper
+
+    fake = type(
+        "G",
+        (),
+        {"__file__": "/usr/lib/python3/dist-packages/RPi/_GPIO.cpython-311-aarch64-linux-gnu.so"},
+    )()
+    assert stepper._detect_backend(fake) == "RPi.GPIO"
+    fake2 = type(
+        "G", (), {"__file__": "/usr/lib/python3/dist-packages/rpi_lgpio/RPi/GPIO/__init__.py"}
+    )()
+    assert stepper._detect_backend(fake2) == "rpi-lgpio"
+    assert stepper._detect_backend(None) == "none"
+
+
+def test_start_refuses_legacy_backend(stepper_config, monkeypatch):
+    from rover import stepper
+
+    monkeypatch.setattr(stepper, "_GPIO_AVAILABLE", True)
+    monkeypatch.setattr(stepper, "GPIO", __import__("unittest.mock").mock.MagicMock())
+    monkeypatch.setattr(stepper, "GPIO_BACKEND", "RPi.GPIO")
+    m = stepper.StepperMotor(stepper_config)
+    m.start()
+    assert m.available is False

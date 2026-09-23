@@ -38,6 +38,15 @@ logger = logging.getLogger(__name__)
 # Suppress lgpio temp file clutter (DEC-029) — must be set before import
 os.environ.setdefault("LG_WD", "/tmp")
 
+
+def _detect_backend(gpio_module: object) -> str:
+    """'rpi-lgpio' (DEC-029 drop-in), 'RPi.GPIO' (legacy, broken on Bookworm), or 'none'."""
+    if gpio_module is None:
+        return "none"
+    path = (getattr(gpio_module, "__file__", "") or "").replace("\\", "/").lower()
+    return "rpi-lgpio" if "lgpio" in path else "RPi.GPIO"
+
+
 try:
     import RPi.GPIO as GPIO  # rpi-lgpio is a drop-in replacement
 
@@ -45,6 +54,14 @@ try:
 except ImportError:
     GPIO = None  # type: ignore[assignment]
     _GPIO_AVAILABLE = False
+
+GPIO_BACKEND = _detect_backend(GPIO)
+if GPIO_BACKEND == "RPi.GPIO":
+    logger.warning(
+        "Legacy RPi.GPIO backend detected (%s) — broken on Bookworm (DEC-029); "
+        "install rpi-lgpio: sudo apt remove python3-rpi.gpio && sudo apt install python3-rpi-lgpio",
+        getattr(GPIO, "__file__", "?"),
+    )
 
 
 class StepperMotor:
@@ -100,6 +117,10 @@ class StepperMotor:
 
         if not _GPIO_AVAILABLE:
             logger.warning("Cannot start stepper: GPIO unavailable")
+            return
+
+        if GPIO_BACKEND == "RPi.GPIO":
+            logger.warning("Refusing to drive the stepper on the legacy RPi.GPIO backend (DEC-029)")
             return
 
         if self._started:
