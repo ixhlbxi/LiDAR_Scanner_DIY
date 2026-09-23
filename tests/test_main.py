@@ -668,3 +668,77 @@ def test_round_trip_produces_points(tmp_path: Path, monkeypatch) -> None:
     assert len(xyz) > 0
     assert len(intensity) == len(xyz)
     assert len(session_data.lidar_records) == len(_StaticLidar.calls)
+
+
+def test_run_aborts_on_401_in_arm_group(tmp_path: Path, monkeypatch) -> None:
+    """BASE_STATION_INTEGRATION §7: refuse to start in arm_group on a 401 (T1-004)."""
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def _serve():
+        conn, _ = srv.accept()
+        conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 401 Unauthorized\r\n\r\n")
+        conn.close()
+        srv.close()
+
+    threading.Thread(target=_serve, daemon=True).start()
+
+    class _FakeGnss:
+        def __init__(self, *_a, **_kw): ...
+        @property
+        def available(self):
+            return True
+
+        def start(self): ...
+        def stop(self): ...
+        def latest_fix(self):
+            return None
+
+        def write_rtcm(self, b): ...
+
+    monkeypatch.setattr(main_mod, "GnssReceiver", _FakeGnss)
+    cfg = tmp_path / "ag.toml"
+    cfg.write_text(
+        f"""
+[session]
+profile = "arm_group"
+project_code = "TEST"
+target_crs_epsg = 6346
+[base_station_integration]
+enabled = true
+status_json_path = "{(tmp_path / "status.json").as_posix()}"
+[gnss]
+enabled = true
+[ntrip]
+enabled = true
+client_location = "pi"
+caster_host = "127.0.0.1"
+caster_port = {port}
+mountpoint = "ARM_BASE"
+[lidar]
+enabled = false
+[stepper]
+enabled = false
+[imu]
+enabled = false
+[camera]
+enabled = false
+[lora]
+enabled = false
+role = "disabled"
+[telemetry]
+http_enabled = false
+[watchdog]
+enabled = false
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "ag"
+"""
+    )
+    assert main_mod.run(config_path=cfg, duration_sec=5.0) == 4

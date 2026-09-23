@@ -19,10 +19,18 @@ password. RTCM bytes arrive as the response body — no chunked encoding, no
 content-length — we read until the socket dies, then reconnect.
 
 Public API:
-    NtripClient(config, rtcm_sink, status_sink=None)
+    NtripClient(config, rtcm_sink, status_sink=None, gga_source=None)
         rtcm_sink:  callable(bytes) -> None  — typically gnss.write_rtcm
-        status_sink: optional callable(dict) -> None — receives connection stats
-    .start() / .stop()
+        status_sink: optional callable(NtripStats) -> None — receives a
+            connection-stats snapshot on connect/disconnect/per-second bytes
+        gga_source: optional callable() -> GnssFix | None — the rover's own
+            latest fix, sent upstream as `$GPGGA` for VRS casters
+    .start() / .stop() — stop() shuts down the live socket so a thread
+        blocked in recv() doesn't outlive the caller
+    .fatal_error — str | None; set on 401/404 in the arm_group profile, after
+        which the background loop has exited (BASE_STATION_INTEGRATION.md §7)
+    .stats — an NtripStats snapshot (dataclasses.replace); mutating the
+        returned object never affects the client's own state
     .build_request(host, mountpoint, username, password, user_agent="...")
         — exposed for unit testing without a real caster
 
@@ -35,11 +43,20 @@ without any network or hardware.
 
 Changelog:
     0.10.0  2026-05-23  Initial implementation (Phase C of overhaul).
+    0.11.0  2026-09-23  Profile-aware fatal errors (401/404 latch fatal_error
+                         and stop the loop in arm_group; run() aborts with
+                         exit 4 — BASE_STATION_INTEGRATION.md §7); stop()
+                         shuts down the live socket instead of waiting out
+                         the read timeout; .stats returns a snapshot; the
+                         per-second byte rate is computed from a monotonic
+                         window instead of wall-clock second boundaries;
+                         unused _device_name dropped.
 """
 
 from __future__ import annotations
 
 import base64
+import dataclasses
 import logging
 import os
 import socket
@@ -47,9 +64,13 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from rover import __version__
 from rover.config import RoverConfig
+
+if TYPE_CHECKING:
+    from rover.gnss import GnssFix
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +212,11 @@ class NtripClient:
         status_sink: Optional callable receiving an NtripStats snapshot on
             connect / disconnect / per-second bytes. Used to feed
             TelemetryRouter.publish().
+        gga_source: Optional callable returning the latest GnssFix (or None).
+            When set and `[ntrip].gga_send_interval_sec` > 0, the connection
+            sends a `$GPGGA` sentence upstream at that cadence for VRS-style
+            casters that steer corrections off the rover's own position
+            (Task 2 wires this up; unused until then).
     """
 
     def __init__(
@@ -198,19 +224,34 @@ class NtripClient:
         config: RoverConfig,
         rtcm_sink: Callable[[bytes], None],
         status_sink: Callable[[NtripStats], None] | None = None,
+        gga_source: Callable[[], GnssFix | None] | None = None,
     ) -> None:
         self._cfg = config.ntrip
-        self._device_name = config.general.device_name
+        self._profile = config.session.profile
         self._rtcm_sink = rtcm_sink
         self._status_sink = status_sink
+        self._gga_source = gga_source
         self._stats = NtripStats()
+        self._stats_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._sock: socket.socket | None = None
+        self._fatal_error: str | None = None
         self._password = self._resolve_password()
+        self._window_start = time.monotonic()
+        self._window_bytes = 0
 
     @property
     def stats(self) -> NtripStats:
-        return self._stats
+        """A snapshot; mutating it does not affect the client."""
+        with self._stats_lock:
+            return dataclasses.replace(self._stats)
+
+    @property
+    def fatal_error(self) -> str | None:
+        """Set when the caster rejected us in a way that will not self-heal
+        (401/404) and the profile is arm_group; the loop has exited."""
+        return self._fatal_error
 
     def _resolve_password(self) -> str:
         """Read password from environment per `[ntrip].password_env`.
@@ -222,7 +263,11 @@ class NtripClient:
         env_name = self._cfg.password_env
         if not env_name:
             return ""
-        return os.environ.get(env_name, "")
+        value = os.environ.get(env_name)
+        if value is None:
+            logger.info("NTRIP password env var %r is not set; using blank password", env_name)
+            return ""
+        return value
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -260,10 +305,40 @@ class NtripClient:
         )
 
     def stop(self) -> None:
+        """Stop the background loop and close the live socket promptly.
+
+        Setting the stop event alone is not enough: a thread blocked in
+        sock.recv() only notices at the next read timeout (up to
+        _READ_TIMEOUT_SEC, 30s). shutdown() unblocks a pending recv() on
+        POSIX; Windows sockets don't reliably wake a cross-thread recv() on
+        shutdown() alone (measured on this platform — the reader thread
+        stayed blocked for the full join timeout), so close() follows it —
+        that does interrupt the read, with an OSError the read loop treats
+        as just another transient error.
+        """
         self._stop_event.set()
+        sock = self._sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
+
+    # ------------------------------------------------------------------
+    # Internal — stats bookkeeping (all mutation goes through the lock)
+    # ------------------------------------------------------------------
+
+    def _bump_error(self, message: str) -> None:
+        with self._stats_lock:
+            self._stats.error_count += 1
+            self._stats.last_error = message
 
     # ------------------------------------------------------------------
     # Internal — run loop with exponential backoff
@@ -271,25 +346,38 @@ class NtripClient:
 
     def _run_loop(self) -> None:
         backoff = _BACKOFF_INITIAL_SEC
+        warned_fatal = False
         while not self._stop_event.is_set():
             try:
                 self._one_connection()
                 # Successful connection — reset backoff
                 backoff = _BACKOFF_INITIAL_SEC
+                warned_fatal = False
             except NtripError as e:
-                # Fatal-per-attempt (auth, bad mountpoint) — log loudly
-                self._stats.error_count += 1
-                self._stats.last_error = str(e)
-                logger.error("NTRIP fatal error: %s", e)
+                # Fatal-per-attempt (auth, bad mountpoint).
+                self._bump_error(str(e))
+                if self._profile == "arm_group":
+                    self._fatal_error = str(e)
+                    logger.error("NTRIP fatal in arm_group profile — refusing to continue: %s", e)
+                    self._publish_stats()
+                    return
+                if not warned_fatal:
+                    logger.warning(
+                        "NTRIP caster rejected us (%s); retrying every %.0fs",
+                        e,
+                        _BACKOFF_MAX_SEC,
+                    )
+                    warned_fatal = True
+                else:
+                    logger.debug("NTRIP still rejected: %s", e)
+                backoff = _BACKOFF_MAX_SEC
                 self._publish_stats()
             except (OSError, TimeoutError) as e:
-                self._stats.error_count += 1
-                self._stats.last_error = str(e)
+                self._bump_error(str(e))
                 logger.info("NTRIP transient error: %s", e)
                 self._publish_stats()
             except Exception as e:  # pragma: no cover — defensive
-                self._stats.error_count += 1
-                self._stats.last_error = f"unexpected: {e!r}"
+                self._bump_error(f"unexpected: {e!r}")
                 logger.exception("NTRIP unexpected error")
                 self._publish_stats()
 
@@ -302,7 +390,8 @@ class NtripClient:
 
     def _one_connection(self) -> None:
         """Single connect-and-stream cycle. Returns when the stream ends or is closed."""
-        self._stats.last_connect_attempt_epoch = time.time()
+        with self._stats_lock:
+            self._stats.last_connect_attempt_epoch = time.time()
         self._publish_stats()
 
         sock = socket.create_connection(
@@ -310,6 +399,7 @@ class NtripClient:
             timeout=_CONNECT_TIMEOUT_SEC,
         )
         sock.settimeout(_READ_TIMEOUT_SEC)
+        self._sock = sock
 
         try:
             request = build_request(
@@ -333,9 +423,10 @@ class NtripClient:
             if code != 200:
                 raise NtripError(f"caster returned HTTP {code} {reason!r}")
 
-            self._stats.connected = True
-            self._stats.connect_count += 1
-            self._stats.last_error = ""
+            with self._stats_lock:
+                self._stats.connected = True
+                self._stats.connect_count += 1
+                self._stats.last_error = ""
             self._publish_stats()
             logger.info(
                 "NTRIP connected to %s:%d/%s",
@@ -351,7 +442,9 @@ class NtripClient:
                 sock.close()
             except OSError:
                 pass
-            self._stats.connected = False
+            self._sock = None
+            with self._stats_lock:
+                self._stats.connected = False
             self._publish_stats()
 
     def _read_until(self, sock: socket.socket, marker: bytes, limit: int) -> bytes:
@@ -372,22 +465,29 @@ class NtripClient:
 
         The caster simply streams bytes — there's no chunked encoding, no
         framing. Whatever arrives is RTCM3 raw bytes that the F9P knows how to
-        parse on its own.
+        parse on its own. The received-bytes-per-second stat is computed from
+        a monotonic window rather than wall-clock second boundaries, so it
+        isn't skewed by a clock step.
         """
-        sec_marker = int(time.time())
-        sec_bytes = 0
+        self._window_start = time.monotonic()
+        self._window_bytes = 0
         while not self._stop_event.is_set():
             try:
                 chunk = sock.recv(_READ_CHUNK_SIZE)
             except TimeoutError:
                 logger.info("NTRIP read timeout; will reconnect")
+                with self._stats_lock:
+                    self._stats.bytes_received_this_sec = 0
                 return
             if not chunk:
                 logger.info("NTRIP caster closed connection; will reconnect")
+                with self._stats_lock:
+                    self._stats.bytes_received_this_sec = 0
                 return
 
-            self._stats.bytes_received_total += len(chunk)
-            self._stats.last_byte_epoch = time.time()
+            with self._stats_lock:
+                self._stats.bytes_received_total += len(chunk)
+                self._stats.last_byte_epoch = time.time()
 
             try:
                 self._rtcm_sink(chunk)
@@ -395,19 +495,21 @@ class NtripClient:
                 # Sink errors should not kill the NTRIP loop — log and keep going
                 logger.warning("RTCM sink raised: %s", e)
 
-            now_sec = int(time.time())
-            if now_sec != sec_marker:
-                self._stats.bytes_received_this_sec = sec_bytes
+            now = time.monotonic()
+            self._window_bytes += len(chunk)
+            if now - self._window_start >= 1.0:
+                with self._stats_lock:
+                    self._stats.bytes_received_this_sec = int(
+                        self._window_bytes / (now - self._window_start)
+                    )
+                self._window_start, self._window_bytes = now, 0
                 self._publish_stats()
-                sec_marker = now_sec
-                sec_bytes = 0
-            sec_bytes += len(chunk)
 
     def _publish_stats(self) -> None:
         if self._status_sink is None:
             return
         try:
-            self._status_sink(self._stats)
+            self._status_sink(self.stats)
         except Exception as e:  # pragma: no cover — defensive
             logger.warning("ntrip status_sink raised: %s", e)
 

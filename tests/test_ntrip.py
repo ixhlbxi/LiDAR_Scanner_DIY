@@ -1,12 +1,18 @@
 """Unit tests for rover.ntrip helpers — no real caster, no hardware."""
 
 import base64
+import socket
+import threading
+import time
+from dataclasses import replace
 
 import pytest
 
+from rover.config import load_config
 from rover.ntrip import (
     NTRIP_VERSION,
     USER_AGENT,
+    NtripClient,
     NtripError,
     build_request,
     parse_response_status,
@@ -96,3 +102,111 @@ class TestParseResponseStatus:
         code, reason = parse_response_status(b"HTTP/1.1 200 \r\n\r\n")
         assert code == 200
         assert reason == ""
+
+
+# ---------------------------------------------------------------------------
+# NtripClient — live-socket tests against a one-shot fake caster
+# ---------------------------------------------------------------------------
+
+
+def _cfg(tmp_path, profile="personal", extra=""):
+    p = tmp_path / "c.toml"
+    p.write_text(
+        f"""
+[session]
+profile = "{profile}"
+project_code = "{"TEST" if profile == "arm_group" else ""}"
+target_crs_epsg = {6346 if profile == "arm_group" else 0}
+
+[base_station_integration]
+enabled = {"true" if profile == "arm_group" else "false"}
+status_json_path = "{(tmp_path / "status.json").as_posix()}"
+
+[gnss]
+enabled = true
+
+[ntrip]
+enabled = true
+client_location = "pi"
+caster_host = "127.0.0.1"
+caster_port = 1
+mountpoint = "ARM_BASE"
+{extra}
+"""
+    )
+    return load_config(p)
+
+
+class _FakeCaster:
+    """One-shot TCP caster on 127.0.0.1: answers with `response` then optionally
+    streams `body`."""
+
+    def __init__(self, response: bytes, body: bytes = b"", hold_open: float = 0.0):
+        self.srv = socket.socket()
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(1)
+        self.port = self.srv.getsockname()[1]
+        self.response, self.body, self.hold_open = response, body, hold_open
+        self.received = b""
+        self.t = threading.Thread(target=self._serve, daemon=True)
+        self.t.start()
+
+    def _serve(self):
+        conn, _ = self.srv.accept()
+        conn.settimeout(2.0)
+        try:
+            self.received = conn.recv(4096)
+            conn.sendall(self.response + self.body)
+            if self.hold_open:
+                time.sleep(self.hold_open)
+        finally:
+            conn.close()
+            self.srv.close()
+
+
+def _client(cfg, caster, sink=None, **kw):
+    cfg = replace(cfg, ntrip=replace(cfg.ntrip, caster_port=caster.port))
+    return NtripClient(cfg, rtcm_sink=sink or (lambda b: None), **kw)
+
+
+class TestFatalErrors:
+    def test_401_in_arm_group_sets_fatal_and_stops(self, tmp_path):
+        caster = _FakeCaster(b"HTTP/1.1 401 Unauthorized\r\n\r\n")
+        c = _client(_cfg(tmp_path, "arm_group"), caster)
+        c.start()
+        deadline = time.monotonic() + 3
+        while c.fatal_error is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        try:
+            assert c.fatal_error is not None and "401" in c.fatal_error
+            assert not c._thread.is_alive()
+        finally:
+            c.stop()
+
+    def test_401_in_personal_is_not_fatal(self, tmp_path):
+        caster = _FakeCaster(b"HTTP/1.1 401 Unauthorized\r\n\r\n")
+        c = _client(_cfg(tmp_path, "personal"), caster)
+        c.start()
+        time.sleep(0.5)
+        try:
+            assert c.fatal_error is None
+            assert c.stats.error_count >= 1
+        finally:
+            c.stop()
+
+    def test_stats_property_is_a_snapshot(self, tmp_path):
+        caster = _FakeCaster(b"HTTP/1.1 401 Unauthorized\r\n\r\n")
+        c = _client(_cfg(tmp_path), caster)
+        a = c.stats
+        a.error_count = 999
+        assert c.stats.error_count != 999
+
+    def test_stop_closes_live_socket_promptly(self, tmp_path):
+        caster = _FakeCaster(b"ICY 200 OK\r\n\r\n", body=b"\xd3\x00", hold_open=5.0)
+        got = []
+        c = _client(_cfg(tmp_path), caster, sink=got.append)
+        c.start()
+        time.sleep(0.3)
+        t0 = time.monotonic()
+        c.stop()
+        assert time.monotonic() - t0 < 2.0, "stop() must not wait out the 30 s read timeout"

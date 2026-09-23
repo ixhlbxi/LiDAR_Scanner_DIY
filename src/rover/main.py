@@ -37,6 +37,13 @@ Changelog:
     0.11.1  2026-09-23  Lidar record timestamp captured immediately after
                          read_scan() returns instead of later alongside
                          other records' `now`.
+    0.11.2  2026-09-23  run() aborts with exit 4 when NtripClient reports a
+                         fatal caster rejection (401/404 in arm_group) within
+                         _NTRIP_FATAL_GRACE_SEC of start
+                         (BASE_STATION_INTEGRATION.md §7); a fatal discovered
+                         later, mid-session, sets SCAN_ERROR and logs once
+                         instead of aborting a session that already has valid
+                         data logged.
 """
 
 from __future__ import annotations
@@ -92,6 +99,20 @@ _IDLE_SETTLE_SEC = 1.0
 # RuntimeError/TimeoutError catch previously let them escape and crash the
 # process. Module-level so it documents itself next to _IDLE_SETTLE_SEC.
 _SENSOR_ERRORS = (RuntimeError, TimeoutError, OSError)
+
+# How long to wait, right after NtripClient.start(), for a fatal caster
+# rejection (401/404 in the arm_group profile) before proceeding — long
+# enough for the connect + handshake round trip, short enough that a healthy
+# caster doesn't visibly delay scan start. BASE_STATION_INTEGRATION.md §7.
+_NTRIP_FATAL_GRACE_SEC = 3.0
+
+
+class _FatalStartupError(RuntimeError):
+    """Raised to abort run() before the acquisition loop starts.
+
+    Distinct from the generic Exception catch further down so run() can map
+    it to its own exit code (4) instead of the generic crash code (1).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +353,7 @@ def _scan_loop(
     lidar_gate = _SensorGate("lidar")
     imu_gate = _SensorGate("imu")
     camera_gate = _SensorGate("camera")
+    ntrip_fatal_noted = False
 
     while not stop_event.is_set():
         # Honor duration timeout for bench runs
@@ -488,6 +510,17 @@ def _scan_loop(
                 ntrip_stats = ntrip_client.stats
                 status.ntrip_connected = ntrip_stats.connected
                 status.ntrip_bytes_per_sec = ntrip_stats.bytes_received_this_sec
+                # A fatal rejection discovered after startup (e.g. the caster
+                # reboots into a bad auth state mid-session) is not grounds to
+                # abort — the data already logged is still valid — but it must
+                # be visible, once, rather than silently degrading to no RTCM.
+                if ntrip_client.fatal_error is not None and not ntrip_fatal_noted:
+                    ntrip_fatal_noted = True
+                    status.scan_state = SCAN_ERROR
+                    logger.error(
+                        "NTRIP fatal mid-session (continuing scan without RTK corrections): %s",
+                        ntrip_client.fatal_error,
+                    )
             telemetry.publish(status)
             last_publish = now_monotonic
 
@@ -588,6 +621,17 @@ def run(
                 logger.warning("NtripClient start failed: %s — RTK degraded", e)
                 ntrip_client = None
 
+            if ntrip_client is not None:
+                # A caster rejection in arm_group must stop the session before any
+                # scan data is written (BASE_STATION_INTEGRATION.md §7).
+                deadline = time.monotonic() + _NTRIP_FATAL_GRACE_SEC
+                while time.monotonic() < deadline and ntrip_client.fatal_error is None:
+                    if stop_event.wait(0.05):
+                        break
+                if ntrip_client.fatal_error is not None:
+                    logger.error("Aborting: %s", ntrip_client.fatal_error)
+                    raise _FatalStartupError(ntrip_client.fatal_error)
+
         # --- Watchdog (always constructed: start() sends READY=1; the monitor
         # thread only runs when enabled; heartbeat() always pings systemd) ---
         try:
@@ -608,6 +652,10 @@ def run(
             stop_event=stop_event,
             duration_sec=duration_sec,
         )
+    except _FatalStartupError:
+        # Already logged with full context at the raise site; a bare ERROR
+        # line here would duplicate it without adding anything.
+        exit_code = 4
     except Exception as e:
         logger.exception("Acquisition setup or loop crashed: %s", e)
         exit_code = 1
