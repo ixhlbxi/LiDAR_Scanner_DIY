@@ -38,6 +38,18 @@ def disabled_config():
     )
 
 
+@pytest.fixture
+def mock_serial():
+    mock_ser = MagicMock()
+    mock_ser_class = MagicMock(return_value=mock_ser)
+    with (
+        patch("rover.lidar._SERIAL_AVAILABLE", True),
+        patch("rover.lidar.serial") as mock_mod,
+    ):
+        mock_mod.Serial = mock_ser_class
+        yield mock_ser
+
+
 def build_packet(
     start_angle_deg: float = 0.0,
     end_angle_deg: float = 5.5,
@@ -214,17 +226,6 @@ class TestScannerNoSerial:
 
 
 class TestScannerWithMockSerial:
-    @pytest.fixture
-    def mock_serial(self):
-        mock_ser = MagicMock()
-        mock_ser_class = MagicMock(return_value=mock_ser)
-        with (
-            patch("rover.lidar._SERIAL_AVAILABLE", True),
-            patch("rover.lidar.serial") as mock_mod,
-        ):
-            mock_mod.Serial = mock_ser_class
-            yield mock_ser
-
     def test_start_opens_port(self, lidar_config, mock_serial):
         scanner = LidarScanner(lidar_config)
         scanner.start()
@@ -325,3 +326,43 @@ class TestScannerWithMockSerial:
             scanner = LidarScanner(lidar_config)
             scanner.start()
             assert not scanner.available
+
+
+# ---------------------------------------------------------------------------
+# Resync / VerLen / precompiled struct tests (T1-014, T1-044)
+# ---------------------------------------------------------------------------
+
+
+class TestPacketResync:
+    def test_parse_rejects_wrong_verlen(self):
+        pkt = bytearray(build_packet())
+        pkt[1] = 0x00
+        pkt[46] = crc8(bytes(pkt[:46]))  # keep CRC valid so only VerLen fails
+        assert parse_packet(bytes(pkt)) is None
+
+    def test_false_header_byte_does_not_drop_next_packet(self, lidar_config, mock_serial):
+        """A stray 0x54 data byte 1 byte before a real packet used to cost the
+        whole real packet (47-byte skip). Resync must advance one byte (T1-014)."""
+        real = build_packet(start_angle_deg=10.0, end_angle_deg=15.5)
+        stream = b"\x54" + real  # false header immediately followed by a real packet
+        mock_serial.in_waiting = len(stream)
+        mock_serial.read.return_value = stream
+        scanner = LidarScanner(lidar_config)
+        scanner.start()
+        result = scanner.read_packet()
+        assert result is not None
+        assert result["start_angle"] == pytest.approx(10.0)
+
+    def test_parse_packet_values_via_struct(self):
+        pkt = build_packet(
+            start_angle_deg=1.0,
+            end_angle_deg=2.0,
+            speed_dps=359.9,
+            timestamp_ms=4321,
+            distances_mm=list(range(100, 100 + POINTS_PER_PACKET)),
+            intensities=list(range(POINTS_PER_PACKET)),
+        )
+        r = parse_packet(pkt)
+        assert r["speed_dps"] == pytest.approx(359.9)
+        assert r["timestamp_ms"] == 4321
+        assert r["points_raw"][5] == (105, 5)

@@ -305,6 +305,11 @@ except ImportError:
     serial = None  # type: ignore[assignment]
     _SERIAL_AVAILABLE = False
 
+PACKET_VERLEN = 0x2C  # byte 1: (packet type 2 << 5) | 12 points
+# Header(1) VerLen(1) speed(H) start(H) 12x(dist H, intensity B) end(H) timestamp(H) — 46 bytes, CRC is byte 46
+_PACKET_STRUCT = struct.Struct("<xxHH" + "HB" * POINTS_PER_PACKET + "HH")
+assert _PACKET_STRUCT.size == PACKET_LENGTH - 1
+
 
 def crc8(data: bytes) -> int:
     """Compute CRC8 over data using the LD19 lookup table."""
@@ -323,27 +328,21 @@ def parse_packet(packet: bytes) -> dict | None:
     """
     if len(packet) != PACKET_LENGTH or packet[0] != PACKET_HEADER:
         return None
-
-    # CRC8 over bytes 0..45, compare to byte 46
+    if packet[1] != PACKET_VERLEN:
+        return None
     if crc8(packet[:46]) != packet[46]:
         return None
 
-    speed = struct.unpack_from("<H", packet, 2)[0] / 100.0  # °/s
-    start_angle = struct.unpack_from("<H", packet, 4)[0] / 100.0  # °
-    end_angle = struct.unpack_from("<H", packet, 42)[0] / 100.0  # °
-    timestamp_ms = struct.unpack_from("<H", packet, 44)[0]
-
-    points_raw = []
-    for i in range(POINTS_PER_PACKET):
-        offset = 6 + i * 3
-        dist_mm = struct.unpack_from("<H", packet, offset)[0]
-        intensity = packet[offset + 2]
-        points_raw.append((dist_mm, intensity))
+    fields = _PACKET_STRUCT.unpack_from(packet, 0)
+    speed_raw, start_raw = fields[0], fields[1]
+    end_raw, timestamp_ms = fields[-2], fields[-1]
+    body = fields[2:-2]
+    points_raw = [(body[i], body[i + 1]) for i in range(0, len(body), 2)]
 
     return {
-        "speed_dps": speed,
-        "start_angle": start_angle,
-        "end_angle": end_angle,
+        "speed_dps": speed_raw / 100.0,
+        "start_angle": start_raw / 100.0,
+        "end_angle": end_raw / 100.0,
         "timestamp_ms": timestamp_ms,
         "points_raw": points_raw,
     }
@@ -475,17 +474,18 @@ class LidarScanner:
                 self._buf.clear()
                 return None
             if idx > 0:
-                self._buf = self._buf[idx:]
+                del self._buf[:idx]
             if len(self._buf) < PACKET_LENGTH:
                 return None
 
             raw = bytes(self._buf[:PACKET_LENGTH])
-            self._buf = self._buf[PACKET_LENGTH:]
-
             result = parse_packet(raw)
             if result is not None:
+                del self._buf[:PACKET_LENGTH]
                 return result
-            # CRC failure — try next header
+            # Not a packet at this offset (VerLen or CRC): drop ONE byte and re-search,
+            # so a 0x54 data byte cannot swallow the real packet behind it.
+            del self._buf[:1]
 
         return None
 
