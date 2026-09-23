@@ -10,7 +10,7 @@ log_level = "INFO"                # DEBUG, INFO, WARNING, ERROR
 profile = "personal"              # "personal" | "arm_group"
 project_code = ""                 # required when profile = "arm_group"
 mission_tag = ""                  # optional; uppercased; tags artifacts in metadata.json
-target_crs_epsg = 0               # 0 = WGS84 / local ENU; e.g. 6346 = NAD83(2011) PA-N ft-US
+target_crs_epsg = 0               # 0 = WGS84 / local ENU; e.g. 6563 = NAD83(2011) PA-N ft-US
 units = "m"                       # "m" | "ft" — controls georef.py default output units
 
 [lidar]

@@ -82,25 +82,32 @@ US_SURVEY_FOOT_M = 0.3048006096012192
 #   sibling repo uses NAD83(HARN) State Plane codes in meters (e.g. PA_NORTH=2271)
 #                 because their NTRIP base-setup workflow is HARN/meters native.
 #   this rover uses NAD83(2011) State Plane codes in US Survey Foot (e.g.
-#                 PA_NORTH=6346) because BASE_STATION_INTEGRATION.md §5 specifies
+#                 PA_NORTH=6563) because BASE_STATION_INTEGRATION.md §5 specifies
 #                 that as the rover-output contract for arm_group profile.
 #
 # If you need the sibling's HARN codes here (rare — you'd be using rover output
 # in a HARN-native workflow), pass --crs directly with the EPSG code; this dict
 # is only consulted for the friendly-name lookup in CLI logs.
+#
+# Every code below is verified against pyproj 3.7.2 (test_zone_epsg_table_
+# resolves_to_named_ftus_crs): each must resolve to the named NAD83(2011) ftUS
+# State Plane CRS with unit_conversion_factor == US_SURVEY_FOOT_M. An earlier
+# table had 9 of 12 codes wrong (e.g. PA_NORTH=6346, which is actually
+# NAD83(2011) / UTM zone 17N, metric) — fixed 2026-09-22.
 ZONE_EPSG: dict[str, int] = {
-    "PA_NORTH": 6346,  # NAD83(2011) / Pennsylvania North (ftUS)
-    "PA_SOUTH": 6347,  # NAD83(2011) / Pennsylvania South (ftUS)
+    "PA_NORTH": 6563,  # NAD83(2011) / Pennsylvania North (ftUS)
+    "PA_SOUTH": 6565,  # NAD83(2011) / Pennsylvania South (ftUS)
     "NJ": 6527,  # NAD83(2011) / New Jersey (ftUS)
-    "MD": 6487,  # NAD83(2011) / Maryland (ftUS)
-    "DE": 6446,  # NAD83(2011) / Delaware (ftUS)
-    "NY_EAST": 6535,  # NAD83(2011) / New York East (ftUS)
-    "NY_CENTRAL": 6536,  # NAD83(2011) / New York Central (ftUS)
-    "NY_WEST": 6537,  # NAD83(2011) / New York West (ftUS)
-    "VA_NORTH": 6592,  # NAD83(2011) / Virginia North (ftUS)
-    "VA_SOUTH": 6593,  # NAD83(2011) / Virginia South (ftUS)
+    "MD": 6488,  # NAD83(2011) / Maryland (ftUS)
+    "DE": 6436,  # NAD83(2011) / Delaware (ftUS)
+    "NY_EAST": 6537,  # NAD83(2011) / New York East (ftUS)
+    "NY_CENTRAL": 6535,  # NAD83(2011) / New York Central (ftUS)
+    "NY_WEST": 6541,  # NAD83(2011) / New York West (ftUS)
+    "NY_LONG_ISLAND": 6539,  # NAD83(2011) / New York Long Island (ftUS)
+    "VA_NORTH": 6593,  # NAD83(2011) / Virginia North (ftUS)
+    "VA_SOUTH": 6595,  # NAD83(2011) / Virginia South (ftUS)
     "WV_NORTH": 6601,  # NAD83(2011) / West Virginia North (ftUS)
-    "WV_SOUTH": 6602,  # NAD83(2011) / West Virginia South (ftUS)
+    "WV_SOUTH": 6603,  # NAD83(2011) / West Virginia South (ftUS)
 }
 
 

@@ -644,7 +644,7 @@ def _validate(raw: dict) -> None:
         if se["target_crs_epsg"] == 0:
             raise ValueError(
                 "[session] profile = 'arm_group' requires target_crs_epsg > 0 "
-                "(e.g. 6346 = NAD83(2011) PA-N ft-US)"
+                "(e.g. 6563 = NAD83(2011) PA-N ft-US)"
             )
         if not bsi["enabled"]:
             raise ValueError(

@@ -224,9 +224,9 @@ class TestPipelinePly:
 
         if not has_pyproj:
             with pytest.raises(SystemExit):
-                georef.main([str(sess), "--crs", "6346"])
+                georef.main([str(sess), "--crs", "6563"])
         else:
-            rc = georef.main([str(sess), "--crs", "6346", "--no-las"])
+            rc = georef.main([str(sess), "--crs", "6563", "--no-las"])
             assert rc == 0
 
 
@@ -318,6 +318,45 @@ def pyproj_mod():
     )
 
 
+# Geographic words expected in each zone's pyproj CRS name — abbreviated keys
+# (NJ, MD, DE) don't literally appear in their CRS names ("New Jersey", etc.),
+# so this maps each ZONE_EPSG key to the substring its resolved crs.name must
+# contain, independent of the key's own spelling.
+_ZONE_NAME_WORDS = {
+    "PA_NORTH": "Pennsylvania North",
+    "PA_SOUTH": "Pennsylvania South",
+    "NJ": "New Jersey",
+    "MD": "Maryland",
+    "DE": "Delaware",
+    "NY_EAST": "New York East",
+    "NY_CENTRAL": "New York Central",
+    "NY_WEST": "New York West",
+    "NY_LONG_ISLAND": "New York Long Island",
+    "VA_NORTH": "Virginia North",
+    "VA_SOUTH": "Virginia South",
+    "WV_NORTH": "West Virginia North",
+    "WV_SOUTH": "West Virginia South",
+}
+
+
+class TestZoneEpsg:
+    def test_zone_epsg_table_resolves_to_named_ftus_crs(self, pyproj_mod):
+        """Every ZONE_EPSG code must be a real NAD83(2011) ftUS State Plane CRS
+        under the zone's own name (T1-009) — not e.g. a UTM zone."""
+        assert set(georef.ZONE_EPSG) == set(_ZONE_NAME_WORDS)
+        for name, code in georef.ZONE_EPSG.items():
+            crs = pyproj_mod.CRS.from_epsg(code)
+            assert _ZONE_NAME_WORDS[name] in crs.name, (
+                f"{name}={code} resolved to {crs.name!r}, expected "
+                f"{_ZONE_NAME_WORDS[name]!r} in the name"
+            )
+            assert crs.name.endswith("(ftUS)"), f"{name}={code} is {crs.name!r}, not ftUS"
+            unit = crs.axis_info[0].unit_conversion_factor
+            assert abs(unit - georef.US_SURVEY_FOOT_M) < 1e-9, (
+                f"{name}={code} unit_conversion_factor={unit}, expected US survey foot"
+            )
+
+
 class TestProjectToCrs:
     def test_passthrough_when_epsg_zero(self):
         xyz = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
@@ -333,7 +372,7 @@ class TestProjectToCrs:
     def test_local_enu_to_pa_north_ftus(self, pyproj_mod):
         # 0 displacement should land roughly on the origin's projected coords
         origin = (40.7128, -74.006, 10.0)
-        out = georef.project_to_crs(np.array([[0.0, 0.0, 0.0]]), origin, 6346, "ft")
+        out = georef.project_to_crs(np.array([[0.0, 0.0, 0.0]]), origin, 6563, "ft")
         # Just check the result is finite and three columns
         assert out.shape == (1, 3)
         assert np.isfinite(out).all()
@@ -347,10 +386,10 @@ class TestProjectToCrs:
 
 class TestExportUnits:
     def test_project_to_crs_scales_z_to_crs_unit(self, pyproj_mod):
-        """EPSG:6346 is ftUS: a 1 m rise must come out as ~3.2808 ft, not 1 (T1-009)."""
+        """EPSG:6563 is ftUS: a 1 m rise must come out as ~3.2808 ft, not 1 (T1-009)."""
         origin = (40.7128, -74.006, 10.0)
         out = georef.project_to_crs(
-            np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]), origin, 6346, "ft"
+            np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]), origin, 6563, "ft"
         )
         dz = out[1, 2] - out[0, 2]
         assert dz == pytest.approx(1.0 / georef.US_SURVEY_FOOT_M, rel=1e-6)
@@ -360,9 +399,44 @@ class TestExportUnits:
     def test_units_m_on_ftus_crs_converts_all_axes(self, pyproj_mod):
         origin = (40.7128, -74.006, 10.0)
         pts = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
-        ft = georef.project_to_crs(pts, origin, 6346, "ft")
-        m = georef.project_to_crs(pts, origin, 6346, "m")
+        ft = georef.project_to_crs(pts, origin, 6563, "ft")
+        m = georef.project_to_crs(pts, origin, 6563, "m")
         np.testing.assert_allclose(m, ft * georef.US_SURVEY_FOOT_M, rtol=1e-9)
+
+    def test_project_to_crs_native_ft_no_double_scaling(self, pyproj_mod, caplog):
+        """EPSG:6563 (PA North) is natively ftUS: --units ft must take the
+        unit-native path, not the units-disagree conversion path (T1-009).
+        A prior test used EPSG:6346 believing it ftUS; 6346 is actually UTM
+        17N (metric), so it silently exercised the mismatch-conversion branch
+        instead and got the same numbers by coincidence — this test pins the
+        native-ft branch specifically."""
+        origin = (40.7128, -74.006, 10.0)
+        with caplog.at_level("INFO", logger="georef"):
+            out = georef.project_to_crs(
+                np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]), origin, 6563, "ft"
+            )
+        dz = out[1, 2] - out[0, 2]
+        assert dz == pytest.approx(1.0 / georef.US_SURVEY_FOOT_M, rel=1e-6)
+        assert not any("Converting EPSG" in r.message for r in caplog.records)
+
+        crs = pyproj_mod.CRS.from_epsg(6563)
+        transformer = pyproj_mod.Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+        exp_x, exp_y = transformer.transform(origin[1], origin[0])
+        assert out[0, 0] == pytest.approx(exp_x, abs=1e-6)
+        assert out[0, 1] == pytest.approx(exp_y, abs=1e-6)
+
+    def test_project_to_crs_metric_crs_units_m_unscaled(self, pyproj_mod):
+        """EPSG:6564 (PA South, metric) with --units m: no CRS-unit scaling and
+        no ft/m mismatch conversion — Z stays exactly origin_alt + up (T1-009)."""
+        origin = (40.7128, -74.006, 10.0)
+        out = georef.project_to_crs(np.array([[0.0, 0.0, 1.0]]), origin, 6564, "m")
+        assert out[0, 2] == origin[2] + 1.0
+
+        crs = pyproj_mod.CRS.from_epsg(6564)
+        transformer = pyproj_mod.Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+        exp_x, exp_y = transformer.transform(origin[1], origin[0])
+        assert out[0, 0] == pytest.approx(exp_x, abs=1e-6)
+        assert out[0, 1] == pytest.approx(exp_y, abs=1e-6)
 
     def test_export_ply_is_double_precision(self, tmp_path):
         xyz = np.array([[1_234_567.123456, 2.0, 3.0]])
@@ -385,7 +459,7 @@ class TestExportUnits:
         monkeypatch.setattr(laspy, "LasHeader", _NoCrsHeader)
         with caplog.at_level("WARNING", logger="georef"):
             ok = georef.export_las(
-                tmp_path / "x.las", np.zeros((1, 3)), np.zeros(1, dtype=np.uint8), 6346
+                tmp_path / "x.las", np.zeros((1, 3)), np.zeros(1, dtype=np.uint8), 6563
             )
         assert ok
         assert any("CRS" in r.message for r in caplog.records)
