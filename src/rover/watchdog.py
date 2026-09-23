@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -95,11 +96,18 @@ def _default_on_timeout() -> None:
     """Default timeout action: end the whole process so systemd restarts it.
 
     ``sys.exit`` would only end the monitor thread (SystemExit is swallowed by
-    threading); ``os._exit`` bypasses the hung main thread. Logging handlers are
-    flushed first so the ERROR line above reaches the journal.
+    threading); ``os._exit`` bypasses the hung main thread. The message is
+    written directly to stderr, not via ``logging``, so this path cannot block
+    on a logging handler lock.
     """
-    logger.error("Watchdog timeout — exiting with code 2")
-    logging.shutdown()
+    # Deliberately NOT via logging: the hung main thread may hold a logging
+    # handler lock, and this path must never block. Under systemd, stderr goes
+    # to the journal.
+    try:
+        sys.stderr.write("rover.watchdog: heartbeat timeout — exiting with code 2\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
     os._exit(2)
 
 

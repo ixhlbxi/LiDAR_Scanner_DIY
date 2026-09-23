@@ -125,6 +125,23 @@ def test_sd_notify_reuses_one_socket(monkeypatch, tmp_path) -> None:
     wd_mod._reset_notify_socket_for_tests()
 
 
+def test_default_timeout_path_does_not_use_logging(monkeypatch, capsys) -> None:
+    """The default timeout callback must not touch logging (T1-001 fix round 1):
+    the hung main thread may hold a logging handler lock, so this path writes
+    straight to stderr and calls os._exit — never logger.error/logging.shutdown."""
+    exit_mock = mock.MagicMock()
+    monkeypatch.setattr(wd_mod.os, "_exit", exit_mock)
+    monkeypatch.setattr(wd_mod.logging, "shutdown", mock.MagicMock())
+    monkeypatch.setattr(wd_mod.logger, "error", mock.MagicMock())
+
+    wd_mod._default_on_timeout()
+
+    exit_mock.assert_called_once_with(2)
+    wd_mod.logging.shutdown.assert_not_called()
+    wd_mod.logger.error.assert_not_called()
+    assert "heartbeat timeout" in capsys.readouterr().err
+
+
 def test_sd_notify_reconnects_after_send_failure(monkeypatch) -> None:
     """A send failure drops the cached socket so the next call reconnects."""
     monkeypatch.setenv("NOTIFY_SOCKET", "@rover-test-notify")
