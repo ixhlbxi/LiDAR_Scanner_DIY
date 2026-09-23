@@ -2,7 +2,11 @@
 Description=PiLiDAR-RTK Rover — acquisition orchestrator
 # No After=/Wants=multi-user.target here; combined with WantedBy=multi-user.target
 # in [Install] that creates an ordering cycle systemd resolves by deleting our
-# start job. Caught in sibling repo (DEC-013 of arm-drone-lidar-workflow).
+# start job.
+# Both rover.service and rover-telemetry.service own RuntimeDirectory=rover
+# (stopping one removes /run/rover out from under the other) and the same
+# F9P serial port, so they must never run together.
+Conflicts=rover-telemetry.service
 
 [Service]
 # Type=notify lets the rover send READY=1 once main loop is up and WATCHDOG=1
@@ -46,7 +50,16 @@ NoNewPrivileges=true
 # /run/rover/ — atomic status.json (DEC-033 channel A) goes here.
 # /var/log/rover/ — future log destination if file logging is enabled.
 # /etc/rover/ — config + secret + mission tag file (Stage C convention).
+# /run/rover is also granted by RuntimeDirectory= below; kept here for clarity.
 ReadWritePaths=/run/rover /var/log/rover /etc/rover
+# systemd creates and owns these; StateDirectory is where sessions land by
+# default (config/default.toml output_dir). To write somewhere else, add a
+# drop-in: `systemctl edit rover` → [Service] ReadWritePaths=/path/to/projects
+StateDirectory=rover
+RuntimeDirectory=rover
+# rpi-lgpio writes its working files to $LG_WD; ProtectSystem=strict makes the
+# real /tmp read-only, so give the service a private one.
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

@@ -110,3 +110,43 @@ class TestGnssFixDefaults:
         assert fix.lat == 0.0
         assert fix.lon == 0.0
         assert fix.rtk_age == -1.0
+
+
+def test_fix_from_nav_pvt_uses_pyubx2_scaled_attributes() -> None:
+    """pyubx2 already scales lat/lon to degrees and pDOP to 0.01 units and
+    expands the flags byte into carrSoln; dividing again zeroes the fix (T1-006)."""
+    import pyubx2
+
+    from rover.gnss import _fix_from_nav_pvt
+
+    msg = pyubx2.UBXMessage(
+        "NAV",
+        "NAV-PVT",
+        pyubx2.GET,
+        fixType=3,
+        carrSoln=2,
+        numSV=18,
+        lat=40.712800,
+        lon=-74.006000,
+        hMSL=10500,
+        pDOP=1.2,
+    )
+    # Sanity: the library really does expose scaled values. If this constructor
+    # rejects `carrSoln=` as a kwarg on the installed pyubx2, build the same
+    # message with `flags=0b10000000` instead (carrSoln lives in bits 6-7 of
+    # flags) and keep the assertions below unchanged.
+    assert abs(msg.lat - 40.7128) < 1e-6
+    assert msg.carrSoln == 2
+
+    # Round-trip through a real parse rather than handing _fix_from_nav_pvt the
+    # hand-built UBXMessage directly — this exercises the actual attribute
+    # population path pyubx2 uses when parsing bytes off the wire.
+    parsed = pyubx2.UBXReader.parse(msg.serialize())
+
+    fix = _fix_from_nav_pvt(parsed)
+    assert abs(fix.lat - 40.7128) < 1e-6
+    assert abs(fix.lon - (-74.006)) < 1e-6
+    assert abs(fix.alt - 10.5) < 1e-6
+    assert fix.fix_type == 5  # RTK FIX
+    assert abs(fix.hdop - 1.2) < 1e-6
+    assert fix.sat_count == 18

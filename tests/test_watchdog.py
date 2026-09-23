@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
+from unittest import mock
 
 import pytest
 
+from rover import watchdog as wd_mod
 from rover.config import WatchdogConfig
 from rover.watchdog import Watchdog
 
@@ -76,3 +82,106 @@ def test_stop_is_idempotent(fast_config: WatchdogConfig) -> None:
     wd.start()
     wd.stop()
     wd.stop()  # should not raise
+
+
+def test_default_timeout_exits_process_with_code_2() -> None:
+    """The default callback must end the PROCESS, not just the monitor thread (T1-001)."""
+    script = (
+        "import time\n"
+        "from rover.config import WatchdogConfig\n"
+        "from rover.watchdog import Watchdog\n"
+        "wd = Watchdog(WatchdogConfig(enabled=True, timeout_sec=1, heartbeat_interval_sec=1))\n"
+        "wd.start()\n"
+        "time.sleep(10)\n"  # never heartbeats; must be killed long before this
+        "print('STILL ALIVE')\n"
+    )
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=8,
+        env={**os.environ, "PYTHONPATH": src_dir},
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "STILL ALIVE" not in proc.stdout
+
+
+def test_sd_notify_reuses_one_socket(monkeypatch, tmp_path) -> None:
+    """One connected datagram socket per process, not one per heartbeat."""
+    monkeypatch.setenv("NOTIFY_SOCKET", "@rover-test-notify")
+    # socket.socket is already mocked below; AF_UNIX itself is a plain module
+    # attribute the real socket module doesn't define on every platform (e.g. the
+    # official python.org Windows builds) — stub it so the test runs everywhere.
+    monkeypatch.setattr(wd_mod.socket, "AF_UNIX", 1, raising=False)
+    wd_mod._reset_notify_socket_for_tests()
+    fake = mock.MagicMock()
+    with mock.patch("rover.watchdog.socket.socket", return_value=fake) as ctor:
+        wd_mod._sd_notify("READY=1\n")
+        wd_mod._sd_notify("WATCHDOG=1\n")
+        wd_mod._sd_notify("WATCHDOG=1\n")
+    assert ctor.call_count == 1
+    assert fake.sendall.call_count == 3
+    wd_mod._reset_notify_socket_for_tests()
+
+
+def test_default_timeout_path_does_not_use_logging(monkeypatch, capfd) -> None:
+    """The default timeout callback must not touch logging (T1-001 fix round 1):
+    the hung main thread may hold a logging handler lock, so this path writes
+    straight to fd 2 and calls os._exit — never logger.error/logging.shutdown.
+    ``_emergency_write`` now goes through ``os.write(2, ...)`` rather than
+    ``sys.stderr``, so this must use ``capfd`` (fd-level capture) — ``capsys``
+    does not see raw fd writes."""
+    exit_mock = mock.MagicMock()
+    monkeypatch.setattr(wd_mod.os, "_exit", exit_mock)
+    monkeypatch.setattr(wd_mod.logging, "shutdown", mock.MagicMock())
+    monkeypatch.setattr(wd_mod.logger, "error", mock.MagicMock())
+
+    wd_mod._default_on_timeout()
+
+    exit_mock.assert_called_once_with(2)
+    wd_mod.logging.shutdown.assert_not_called()
+    wd_mod.logger.error.assert_not_called()
+    assert "heartbeat timeout" in capfd.readouterr().err
+
+
+def test_run_loop_timeout_notice_is_lock_free(
+    fast_config: WatchdogConfig, monkeypatch, capfd
+) -> None:
+    """_run_loop's own timeout notice must also be lock-free (T1-001 fix round 2):
+    it fires before the on_timeout callback runs, so — like _default_on_timeout —
+    it must not touch logging. logger.error is only used afterward, and only if
+    the callback returns instead of ending the process. ``_emergency_write`` now
+    goes through ``os.write(2, ...)`` rather than ``sys.stderr``, so this must use
+    ``capfd`` (fd-level capture) — ``capsys`` does not see raw fd writes."""
+    fired = threading.Event()
+    logger_mock = mock.MagicMock()
+    monkeypatch.setattr(wd_mod.logger, "error", logger_mock)
+
+    def _on_timeout() -> None:
+        assert logger_mock.call_count == 0, "logger.error was called before the callback ran"
+        fired.set()
+
+    wd = Watchdog(fast_config, on_timeout=_on_timeout)
+    wd.start()
+    try:
+        assert fired.wait(timeout=4.0), "watchdog did not fire on missing heartbeat"
+    finally:
+        wd.stop()
+
+    assert "heartbeat timeout" in capfd.readouterr().err
+
+
+def test_sd_notify_reconnects_after_send_failure(monkeypatch) -> None:
+    """A send failure drops the cached socket so the next call reconnects."""
+    monkeypatch.setenv("NOTIFY_SOCKET", "@rover-test-notify")
+    monkeypatch.setattr(wd_mod.socket, "AF_UNIX", 1, raising=False)
+    wd_mod._reset_notify_socket_for_tests()
+    first = mock.MagicMock()
+    first.sendall.side_effect = OSError("boom")
+    second = mock.MagicMock()
+    with mock.patch("rover.watchdog.socket.socket", side_effect=[first, second]) as ctor:
+        wd_mod._sd_notify("READY=1\n")  # connects `first`, sendall raises, dropped
+        wd_mod._sd_notify("READY=1\n")  # reconnects: constructs `second`
+    assert ctor.call_count == 2
+    wd_mod._reset_notify_socket_for_tests()

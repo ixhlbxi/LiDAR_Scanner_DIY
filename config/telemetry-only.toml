@@ -50,7 +50,7 @@ enabled = true                    # status.json publisher ON
 http_enabled = true               # local HTTP /status endpoint ON
 
 [logging]
-output_dir = "/var/log/rover/bench"
+output_dir = "/var/lib/rover/bench"  # under systemd StateDirectory (see deploy/systemd/rover.service); kept separate from scan sessions
 session_prefix = "bench"
 save_images = false
 

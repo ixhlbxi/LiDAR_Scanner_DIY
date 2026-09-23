@@ -3,6 +3,10 @@ Description=PiLiDAR-RTK Rover — telemetry-only mode (no stepper / no scan)
 # Use this for indoor bench tests where you want the rover's status.json +
 # HTTP /status endpoint live, but don't want the motor spinning. Points at
 # a separate config that disables stepper / lidar / camera / imu.
+# Both rover.service and rover-telemetry.service own RuntimeDirectory=rover
+# (stopping one removes /run/rover out from under the other) and the same
+# F9P serial port, so they must never run together.
+Conflicts=rover.service
 
 [Service]
 Type=notify
@@ -21,7 +25,16 @@ User=root
 ProtectSystem=strict
 ProtectHome=true
 NoNewPrivileges=true
+# /run/rover is also granted by RuntimeDirectory= below; kept here for clarity.
 ReadWritePaths=/run/rover /var/log/rover /etc/rover
+# systemd creates and owns these; StateDirectory is where sessions land by
+# default (config/default.toml output_dir). To write somewhere else, add a
+# drop-in: `systemctl edit rover` → [Service] ReadWritePaths=/path/to/projects
+StateDirectory=rover
+RuntimeDirectory=rover
+# rpi-lgpio writes its working files to $LG_WD; ProtectSystem=strict makes the
+# real /tmp read-only, so give the service a private one.
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

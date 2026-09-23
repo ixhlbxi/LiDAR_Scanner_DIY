@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import queue
 import shutil
 import threading
@@ -30,9 +31,13 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from rover import __version__
+from rover._io import atomic_write_json
 from rover.config import RoverConfig
 
 logger = logging.getLogger(__name__)
+
+_QUEUE_MAX = 10_000  # records buffered between flushes before dropping oldest
+_FSYNC_EVERY = 10  # periodic flushes between fsync calls
 
 
 class SessionLogger:
@@ -52,7 +57,6 @@ class SessionLogger:
         self._lc = config.logging
 
         self._session_dir: Path | None = None
-        self._images_dir: Path | None = None
         self._start_time: datetime | None = None
 
         # File handles
@@ -66,12 +70,16 @@ class SessionLogger:
         self._gnss_index: int = 0
 
         # Thread-safe write queue
-        self._queue: queue.Queue[dict] = queue.Queue()
+        self._queue: queue.Queue[dict] = queue.Queue(maxsize=_QUEUE_MAX)
 
         # Flush timer
         self._flush_timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._running = False
+
+        self._degraded = False
+        self._dropped = 0
+        self._flush_count = 0
 
     # ------------------------------------------------------------------
     # Properties
@@ -83,9 +91,14 @@ class SessionLogger:
         return self._session_dir
 
     @property
-    def images_dir(self) -> Path | None:
-        """Path to the images subdirectory, or None if not started."""
-        return self._images_dir
+    def degraded(self) -> bool:
+        """True once any flush has failed; the logger keeps running regardless."""
+        return self._degraded
+
+    @property
+    def dropped_records(self) -> int:
+        """Records discarded because the queue was full."""
+        return self._dropped
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -110,11 +123,6 @@ class SessionLogger:
 
         self._session_dir = Path(self._lc.output_dir) / session_name
         self._session_dir.mkdir(parents=True, exist_ok=True)
-
-        # Images directory
-        if self._config.camera.enabled and self._lc.save_images:
-            self._images_dir = self._session_dir / self._config.camera.output_folder
-            self._images_dir.mkdir(exist_ok=True)
 
         # Copy config to session directory
         self._copy_config()
@@ -145,7 +153,33 @@ class SessionLogger:
         """
         if not self._running:
             raise RuntimeError("SessionLogger is not running")
-        self._queue.put(record)
+        try:
+            self._queue.put_nowait(record)
+        except queue.Full:
+            # Drop the oldest so a stalled disk cannot eat all memory. The whole
+            # recovery is locked so a concurrent _flush() draining the queue
+            # between our get_nowait() and put_nowait() can't cause a phantom
+            # drop count (Empty means nothing of ours was actually lost) or an
+            # uncounted real drop (Full again means our put really did fail).
+            with self._lock:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    self._note_dropped()
+                try:
+                    self._queue.put_nowait(record)
+                except queue.Full:
+                    # Another producer refilled it since we made room for
+                    # ourselves — drop this record instead.
+                    self._note_dropped()
+
+    def _note_dropped(self) -> None:
+        """Increment the drop counter and warn at a decaying frequency."""
+        self._dropped += 1
+        if self._dropped in (1, 100, 1000) or self._dropped % 10_000 == 0:
+            logger.warning("SessionLogger queue full — dropped %d records so far", self._dropped)
 
     def stop(self, metadata: dict[str, Any] | None = None) -> None:
         """Flush remaining records, write metadata, and close files.
@@ -166,10 +200,19 @@ class SessionLogger:
             self._flush_timer = None
 
         # Final drain
-        self._flush()
+        try:
+            self._flush()
+            self._fsync_files()
+        except Exception as e:
+            logger.error("SessionLogger final flush failed: %s", e)
+            self._degraded = True
 
         # Write metadata
-        self._write_metadata(metadata)
+        try:
+            self._write_metadata(metadata)
+        except Exception as e:
+            logger.error("SessionLogger metadata write failed: %s", e)
+            self._degraded = True
 
         # Close files
         self._close_files()
@@ -207,9 +250,18 @@ class SessionLogger:
         self._flush_timer.start()
 
     def _periodic_flush(self) -> None:
-        """Called by timer: flush queue then reschedule."""
-        self._flush()
-        self._schedule_flush()
+        """Called by timer: flush, then ALWAYS reschedule (T1-011)."""
+        try:
+            self._flush()
+            self._flush_count += 1
+            if self._flush_count % _FSYNC_EVERY == 0:
+                self._fsync_files()
+        except Exception as e:
+            if not self._degraded:
+                logger.error("SessionLogger flush failed — continuing degraded: %s", e)
+            self._degraded = True
+        finally:
+            self._schedule_flush()
 
     def _flush(self) -> None:
         """Drain the queue and write all records to disk."""
@@ -262,22 +314,48 @@ class SessionLogger:
                 self._rotate_file("gnss")
 
     def _rotate_file(self, which: str) -> None:
-        """Close current file and open a new numbered one."""
+        """Open a new numbered file, then close and swap out the current one.
+
+        Opens the new segment FIRST. If that ``open()`` fails (ENOSPC,
+        EROFS, ...), the current file handle is never touched and the index
+        is never advanced — the old file stays open and writable and every
+        later flush keeps landing in it. Closing the old file before opening
+        the new one (the previous order) left the stream closed with no
+        replacement on a failed open, wedging every subsequent flush.
+        """
         assert self._session_dir is not None
 
         if which == "scan":
+            next_index = self._scan_index + 1
+            next_path = self._session_dir / f"scan_{next_index:03d}.jsonl"
+            try:
+                new_file = open(next_path, "a", encoding="utf-8")
+            except OSError as e:
+                if not self._degraded:
+                    logger.error("Rotation of scan log to %s failed: %s", next_path.name, e)
+                self._degraded = True
+                return
             if self._scan_file is not None and not self._scan_file.closed:
                 self._scan_file.close()
-            self._scan_index += 1
-            self._scan_path = self._session_dir / f"scan_{self._scan_index:03d}.jsonl"
-            self._scan_file = open(self._scan_path, "a", encoding="utf-8")
+            self._scan_index = next_index
+            self._scan_path = next_path
+            self._scan_file = new_file
             logger.info("Rotated scan log to %s", self._scan_path.name)
         elif which == "gnss":
+            next_index = self._gnss_index + 1
+            next_path = self._session_dir / f"gnss_{next_index:03d}.jsonl"
+            try:
+                new_file = open(next_path, "a", encoding="utf-8")
+            except OSError as e:
+                if not self._degraded:
+                    logger.error("Rotation of gnss log to %s failed: %s", next_path.name, e)
+                self._degraded = True
+                return
             if self._gnss_file is not None and not self._gnss_file.closed:
                 self._gnss_file.close()
-            self._gnss_index += 1
-            self._gnss_path = self._session_dir / f"gnss_{self._gnss_index:03d}.jsonl"
-            self._gnss_file = open(self._gnss_path, "a", encoding="utf-8")
+            self._gnss_index = next_index
+            self._gnss_path = next_path
+            self._gnss_file = new_file
             logger.info("Rotated gnss log to %s", self._gnss_path.name)
 
     # ------------------------------------------------------------------
@@ -304,6 +382,8 @@ class SessionLogger:
             "device_name": self._config.general.device_name,
             "firmware_version": __version__,
             "config_hash": config_hash,
+            "logger_degraded": self._degraded,
+            "dropped_records": self._dropped,
             "session": {
                 "profile": sess.profile,
                 "project_code": sess.project_code,
@@ -317,7 +397,7 @@ class SessionLogger:
             meta.update(extra)
 
         meta_path = self._session_dir / "metadata.json"
-        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        atomic_write_json(meta_path, meta)
         logger.info("Metadata written: %s", meta_path)
 
     def _compute_config_hash(self) -> str | None:
@@ -335,6 +415,12 @@ class SessionLogger:
             return hashlib.sha256(data).hexdigest()
 
         return None
+
+    def _fsync_files(self) -> None:
+        for f in (self._scan_file, self._gnss_file):
+            if f is not None and not f.closed:
+                f.flush()
+                os.fsync(f.fileno())
 
     def _close_files(self) -> None:
         """Close all open file handles."""

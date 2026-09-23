@@ -1,8 +1,11 @@
 """Unit tests for rover.logger — runs anywhere, no hardware required."""
 
+import builtins
 import json
+import queue
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -84,14 +87,14 @@ class TestSessionDirectory:
         finally:
             lg.stop()
 
-    def test_images_dir_created_when_camera_enabled(self, cfg):
+    def test_images_dir_not_precreated_by_start(self, cfg):
+        """The logger no longer owns the images directory (T1-031) — the
+        camera creates it lazily on first capture, so start() must not."""
         config, config_path = cfg
         lg = SessionLogger(config, config_path)
-        lg.start()
+        session_dir = lg.start()
         try:
-            assert lg.images_dir is not None
-            assert lg.images_dir.exists()
-            assert lg.images_dir.name == config.camera.output_folder
+            assert not (session_dir / config.camera.output_folder).exists()
         finally:
             lg.stop()
 
@@ -323,6 +326,52 @@ rotate_size_mb = 1
         finally:
             lg.stop()
 
+    def test_rotation_open_failure_keeps_old_file_writable(self, small_rotate_cfg, monkeypatch):
+        """A failed open() of the new segment must not wedge every later
+        flush: the old file is opened-first/closed-last, so a failed
+        rotation leaves it untouched and writable, degrades the logger once
+        (like a failed flush), and does not advance the rotation index."""
+        config, config_path = small_rotate_cfg
+        lg = SessionLogger(config, config_path)
+        session_dir = lg.start()
+        try:
+            lg.write({"type": "imu", "timestamp": 1.0})
+            lg._flush()
+
+            # Pad scan.jsonl past the 1 MB rotate threshold.
+            with open(session_dir / "scan.jsonl", "a") as f:
+                f.write("x" * (1024 * 1024 + 1))
+
+            real_open = builtins.open
+
+            def _open_scan_001_fails(file, *args, **kwargs):
+                if "scan_001" in str(file):
+                    raise OSError(28, "No space left on device")
+                return real_open(file, *args, **kwargs)
+
+            # rover.logger uses the builtin `open` directly (no module-level
+            # binding to patch), so patch the builtin itself.
+            monkeypatch.setattr(builtins, "open", _open_scan_001_fails)
+
+            # This flush's size check triggers _maybe_rotate -> the failed open().
+            lg.write({"type": "imu", "timestamp": 2.0})
+            lg._flush()
+
+            assert not (session_dir / "scan_001.jsonl").exists()
+            assert lg.degraded is True
+
+            # The old handle must still be open and writable: write one more
+            # record and confirm it lands in scan.jsonl, not lost.
+            lg.write({"type": "imu", "timestamp": 3.0, "marker": "after-failed-rotation"})
+        finally:
+            lg.stop()
+
+        assert lg.degraded is True
+        # The 1 MB padding above is raw bytes, not a JSONL record, so scan
+        # every line for the marker rather than json.loads-ing each one.
+        text = (session_dir / "scan.jsonl").read_text()
+        assert '"marker":"after-failed-rotation"' in text
+
     def test_no_rotation_when_disabled(self, cfg):
         config, config_path = cfg
         lg = SessionLogger(config, config_path)
@@ -399,3 +448,153 @@ class TestDoubleStop:
         lg.start()
         lg.stop()
         lg.stop()  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# Fault-tolerant flush (T1-011, T1-032)
+# ---------------------------------------------------------------------------
+
+
+def test_flush_failure_keeps_timer_alive(fast_flush_cfg, monkeypatch):
+    """A write error inside the timer thread must not stop future flushes (T1-011).
+
+    Polls with a deadline instead of a fixed sleep to avoid CI flakiness —
+    a fixed 0.3 s wait can fire before a slow CI runner's timer thread does."""
+    config, path = fast_flush_cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    try:
+        calls = {"n": 0}
+        real = lg._write_record
+
+        def _boom(record):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(28, "No space left on device")
+            real(record)
+
+        monkeypatch.setattr(lg, "_write_record", _boom)
+        lg.write({"type": "event", "event": "first"})
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not lg.degraded:
+            time.sleep(0.01)
+        assert lg.degraded is True
+        assert lg._flush_timer is not None and lg._flush_timer.is_alive()
+
+        lg.write({"type": "event", "event": "second"})
+        deadline = time.monotonic() + 3.0
+        text = ""
+        while time.monotonic() < deadline:
+            text = (lg.session_dir / "scan.jsonl").read_text()
+            if '"second"' in text:
+                break
+            time.sleep(0.01)
+    finally:
+        lg.stop()
+    text = (lg.session_dir / "scan.jsonl").read_text()
+    assert '"second"' in text
+
+
+def test_queue_is_bounded_and_drops_oldest(cfg):
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    try:
+        from rover import logger as logger_mod
+
+        for i in range(logger_mod._QUEUE_MAX + 5):
+            lg.write({"type": "event", "i": i})
+        assert lg.dropped_records == 5
+    finally:
+        lg.stop()
+    lines = (lg.session_dir / "scan.jsonl").read_text().splitlines()
+    first = json.loads(lines[0])
+    assert first["i"] == 5, "oldest five must have been dropped"
+
+
+def test_stop_fsyncs_files(cfg, monkeypatch):
+    import os as os_mod
+
+    synced: list[int] = []
+    monkeypatch.setattr(os_mod, "fsync", lambda fd: synced.append(fd))
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.write({"type": "event", "event": "x"})
+    lg.stop()
+    assert len(synced) >= 2, "scan and gnss files must be fsync'd at stop"
+
+
+def test_metadata_written_atomically(cfg, monkeypatch):
+    from rover import logger as logger_mod
+
+    called: list[str] = []
+
+    def _fake_atomic(path, data):
+        called.append(str(path))
+        Path(path).write_text(json.dumps(data))
+
+    monkeypatch.setattr(logger_mod, "atomic_write_json", _fake_atomic)
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.stop()
+    assert called and called[0].endswith("metadata.json")
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 — stop() metadata guard, drop-oldest locking (T1-011, T1-033)
+# ---------------------------------------------------------------------------
+
+
+def test_stop_closes_files_when_metadata_write_fails(cfg, monkeypatch):
+    """A metadata-write failure must not skip _close_files() (Finding 1)."""
+    from rover import logger as logger_mod
+
+    def _boom(path, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(logger_mod, "atomic_write_json", _boom)
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    lg.write({"type": "event", "event": "x"})
+
+    lg.stop()  # must not raise
+
+    assert lg.degraded is True
+    assert lg._scan_file is None or lg._scan_file.closed
+    assert lg._gnss_file is None or lg._gnss_file.closed
+
+
+def test_write_drop_only_counts_real_drops(cfg, monkeypatch):
+    """A `queue.Empty` from the recovery `get_nowait()` means a concurrent
+    `_flush()` already drained the queue for real — it must not be counted as
+    a drop, and the record that triggered recovery must still be accepted
+    (Finding 2). Simulated by forcing the fast-path `put_nowait()` to look
+    full exactly once while the real queue is genuinely empty underneath —
+    the same race the lock in `write()` is meant to survive."""
+    config, path = cfg
+    lg = SessionLogger(config, config_path=path)
+    lg.start()
+    try:
+        assert lg._queue.empty()
+        real_put_nowait = lg._queue.put_nowait
+        calls = {"n": 0}
+
+        def _full_once(item):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise queue.Full
+            real_put_nowait(item)
+
+        monkeypatch.setattr(lg._queue, "put_nowait", _full_once)
+
+        lg.write({"type": "event", "event": "raced"})
+
+        assert lg.dropped_records == 0
+        assert lg._queue.qsize() == 1
+        assert lg._queue.get_nowait()["event"] == "raced"
+    finally:
+        lg.stop()

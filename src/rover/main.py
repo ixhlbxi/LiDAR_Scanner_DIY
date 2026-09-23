@@ -45,7 +45,7 @@ from rover.gnss import GnssFix, GnssReceiver
 from rover.imu import ImuDriver
 from rover.lidar import LidarScanner
 from rover.logger import SessionLogger
-from rover.ntrip import NtripClient, NtripStats
+from rover.ntrip import NtripClient
 from rover.stepper import StepperMotor
 from rover.telemetry import TelemetryRouter, status_from_config
 from rover.watchdog import Watchdog
@@ -71,6 +71,17 @@ SCAN_IDLE = 0
 SCAN_SCANNING = 1
 SCAN_PAUSED = 2
 SCAN_ERROR = 3
+
+# Loop pace when there is no stepper to settle behind (bench / telemetry-only).
+# Module-level so tests can shrink it.
+_IDLE_SETTLE_SEC = 1.0
+
+# Exceptions a sensor read is allowed to fail with without aborting the run.
+# OSError covers serial.SerialException (cable pull) and I2C errno 121
+# (device not present) — both are OSError subclasses, so a bare
+# RuntimeError/TimeoutError catch previously let them escape and crash the
+# process. Module-level so it documents itself next to _IDLE_SETTLE_SEC.
+_SENSOR_ERRORS = (RuntimeError, TimeoutError, OSError)
 
 
 # ---------------------------------------------------------------------------
@@ -217,13 +228,65 @@ def _stop_sensors(sensors: _Sensors) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _SensorGate:
+    """Counts consecutive read failures for one sensor and trips after *limit*.
+
+    A tripped gate makes the loop skip that sensor instead of re-raising or
+    re-logging every iteration (CLAUDE.md §5: degrade, never crash).
+    """
+
+    def __init__(self, name: str, limit: int = 5) -> None:
+        self.name = name
+        self.limit = limit
+        self.failures = 0
+        self.tripped = False
+
+    def record_failure(self, exc: BaseException) -> bool:
+        """Return True exactly once, on the failure that trips the gate."""
+        if self.tripped:
+            return False
+        self.failures += 1
+        logger.debug("%s read failed (%d/%d): %s", self.name, self.failures, self.limit, exc)
+        if self.failures >= self.limit:
+            self.tripped = True
+            logger.warning(
+                "%s: %d consecutive read failures — subsystem disabled for this session (last: %s)",
+                self.name,
+                self.failures,
+                exc,
+            )
+            return True
+        return False
+
+    def record_success(self) -> None:
+        self.failures = 0
+        self.tripped = False
+
+
+def _note_gate_trip(session_logger: SessionLogger, gate: _SensorGate, exc: BaseException) -> None:
+    """Write a `sensor_disabled` event the moment a gate trips.
+
+    Without this, a subsystem going dark mid-session is visible only as a
+    WARNING in the journal — scan.jsonl itself gives no indication that,
+    say, the LiDAR stopped contributing records partway through.
+    """
+    session_logger.write(
+        {
+            "type": "event",
+            "timestamp": time.time(),
+            "event": "sensor_disabled",
+            "details": {"sensor": gate.name, "error": str(exc)},
+        }
+    )
+
+
 def _scan_loop(
     config: RoverConfig,
     sensors: _Sensors,
     session_logger: SessionLogger,
     telemetry: TelemetryRouter,
     watchdog: Watchdog | None,
-    ntrip_stats_holder: dict,
+    ntrip_client: NtripClient | None,
     stop_event: threading.Event,
     duration_sec: float | None,
 ) -> None:
@@ -249,10 +312,13 @@ def _scan_loop(
         settle_sec = 1.0 / max(1, config.lidar.scan_rate_hz)
     else:
         steps_per_increment = 0
-        settle_sec = 1.0  # idle pace when nothing to step
+        settle_sec = _IDLE_SETTLE_SEC  # idle pace when nothing to step
 
     step_index = 0
     started_monotonic = time.monotonic()
+    lidar_gate = _SensorGate("lidar")
+    imu_gate = _SensorGate("imu")
+    camera_gate = _SensorGate("camera")
 
     while not stop_event.is_set():
         # Honor duration timeout for bench runs
@@ -275,36 +341,45 @@ def _scan_loop(
                 status.scan_state = SCAN_ERROR
                 stop_event.wait(0.5)
                 continue
-        time.sleep(settle_sec)
+        stop_event.wait(settle_sec)
 
         # --- LiDAR ---
         lidar_points: list = []
-        if sensors.lidar is not None and sensors.lidar.available:
+        if sensors.lidar is not None and sensors.lidar.available and not lidar_gate.tripped:
             try:
                 lidar_points = sensors.lidar.read_scan()
-            except (RuntimeError, TimeoutError) as e:
-                logger.debug("LiDAR read skipped: %s", e)
+                lidar_gate.record_success()
+            except _SENSOR_ERRORS as e:
+                if lidar_gate.record_failure(e):
+                    _note_gate_trip(session_logger, lidar_gate, e)
 
         # --- IMU ---
         imu_sample = None
-        if sensors.imu is not None and sensors.imu.available:
+        if sensors.imu is not None and sensors.imu.available and not imu_gate.tripped:
             try:
                 imu_sample = sensors.imu.read_sample()
-            except RuntimeError as e:
-                logger.debug("IMU read skipped: %s", e)
+                imu_gate.record_success()
+            except _SENSOR_ERRORS as e:
+                if imu_gate.record_failure(e):
+                    _note_gate_trip(session_logger, imu_gate, e)
 
         # --- Camera (cadence-gated) ---
         image_relpath: str | None = None
         if (
             sensors.camera is not None
+            and config.logging.save_images
             and sensors.camera.available
             and sensors.camera.should_capture(step_index)
             and session_logger.session_dir is not None
+            and not camera_gate.tripped
         ):
             try:
                 image_relpath = sensors.camera.capture(session_logger.session_dir, step_index)
-            except RuntimeError as e:
-                logger.debug("Camera capture skipped: %s", e)
+            except _SENSOR_ERRORS as e:
+                if camera_gate.record_failure(e):
+                    _note_gate_trip(session_logger, camera_gate, e)
+            else:
+                camera_gate.record_success()
 
         # --- Log records ---
         now = time.time()
@@ -376,8 +451,8 @@ def _scan_loop(
         now_monotonic = time.monotonic()
         if now_monotonic - last_publish >= publish_interval:
             status.timestamp_epoch = now
-            ntrip_stats = ntrip_stats_holder.get("stats")
-            if isinstance(ntrip_stats, NtripStats):
+            if ntrip_client is not None:
+                ntrip_stats = ntrip_client.stats
                 status.ntrip_connected = ntrip_stats.connected
                 status.ntrip_bytes_per_sec = ntrip_stats.bytes_received_this_sec
             telemetry.publish(status)
@@ -458,32 +533,30 @@ def run(
         }
     )
 
-    # --- Telemetry ---
-    telemetry = TelemetryRouter(config)
-    telemetry.start()
-
-    # --- NTRIP (Pi-mode only — ESP32 mode owns the path itself) ---
+    telemetry: TelemetryRouter | None = None
     ntrip_client: NtripClient | None = None
-    ntrip_stats_holder: dict = {"stats": None}
-
-    def _ntrip_stats_sink(stats: NtripStats) -> None:
-        ntrip_stats_holder["stats"] = stats
-
-    if config.ntrip.enabled and config.ntrip.client_location == "pi" and sensors.gnss is not None:
-        try:
-            ntrip_client = NtripClient(
-                config,
-                rtcm_sink=sensors.gnss.write_rtcm,
-                status_sink=_ntrip_stats_sink,
-            )
-            ntrip_client.start()
-        except Exception as e:
-            logger.warning("NtripClient start failed: %s — RTK degraded", e)
-            ntrip_client = None
-
-    # --- Watchdog ---
     watchdog: Watchdog | None = None
-    if config.watchdog.enabled:
+    exit_code = 0
+    try:
+        # --- Telemetry ---
+        telemetry = TelemetryRouter(config)
+        telemetry.start()
+
+        # --- NTRIP (Pi-mode only — ESP32 mode owns the path itself) ---
+        if (
+            config.ntrip.enabled
+            and config.ntrip.client_location == "pi"
+            and sensors.gnss is not None
+        ):
+            try:
+                ntrip_client = NtripClient(config, rtcm_sink=sensors.gnss.write_rtcm)
+                ntrip_client.start()
+            except Exception as e:
+                logger.warning("NtripClient start failed: %s — RTK degraded", e)
+                ntrip_client = None
+
+        # --- Watchdog (always constructed: start() sends READY=1; the monitor
+        # thread only runs when enabled; heartbeat() always pings systemd) ---
         try:
             watchdog = Watchdog(config.watchdog)
             watchdog.start()
@@ -491,21 +564,19 @@ def run(
             logger.warning("Watchdog start failed: %s — running without health monitor", e)
             watchdog = None
 
-    # --- Acquisition loop ---
-    exit_code = 0
-    try:
+        # --- Acquisition loop ---
         _scan_loop(
             config=config,
             sensors=sensors,
             session_logger=session_logger,
             telemetry=telemetry,
             watchdog=watchdog,
-            ntrip_stats_holder=ntrip_stats_holder,
+            ntrip_client=ntrip_client,
             stop_event=stop_event,
             duration_sec=duration_sec,
         )
     except Exception as e:
-        logger.exception("Acquisition loop crashed: %s", e)
+        logger.exception("Acquisition setup or loop crashed: %s", e)
         exit_code = 1
     finally:
         session_logger.write(
@@ -529,18 +600,17 @@ def run(
             except Exception as e:
                 logger.warning("NtripClient stop failed: %s", e)
 
-        try:
-            telemetry.stop()
-        except Exception as e:
-            logger.warning("TelemetryRouter stop failed: %s", e)
+        if telemetry is not None:
+            try:
+                telemetry.stop()
+            except Exception as e:
+                logger.warning("TelemetryRouter stop failed: %s", e)
 
         _stop_sensors(sensors)
 
-        # Metadata fields populated from runtime
         metadata: dict = {}
-        ntrip_stats = ntrip_stats_holder.get("stats")
-        if isinstance(ntrip_stats, NtripStats):
-            metadata["ntrip_stats"] = asdict(ntrip_stats)
+        if ntrip_client is not None:
+            metadata["ntrip_stats"] = asdict(ntrip_client.stats)
         metadata["lora_rtcm_used"] = config.lora.enabled and config.lora.role == "rtcm_rx+status_tx"
 
         try:

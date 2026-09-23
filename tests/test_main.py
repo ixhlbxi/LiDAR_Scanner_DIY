@@ -201,3 +201,271 @@ monitor_battery = false
 
     exit_code = main_to_patch.run(config_path=cfg, duration_sec=1.0)
     assert exit_code == 0
+
+
+def test_ready_notified_even_when_watchdog_disabled(tmp_path: Path, monkeypatch) -> None:
+    """Type=notify units need READY=1 regardless of [watchdog].enabled (T1-002)."""
+    from rover import watchdog as wd_mod
+
+    sent: list[str] = []
+    monkeypatch.setattr(wd_mod, "_sd_notify", sent.append)
+    config_path = _write_all_disabled_config(tmp_path)  # has [watchdog] enabled = false
+    assert main_mod.run(config_path=config_path, duration_sec=0.5) == 0
+    assert "READY=1\n" in sent
+    assert any(m == "WATCHDOG=1\n" for m in sent), "heartbeats must flow when disabled too"
+
+
+def _enabled_lidar_config(tmp_path: Path) -> Path:
+    cfg = tmp_path / "lidar_on.toml"
+    cfg.write_text(
+        f"""
+[lidar]
+enabled = true
+
+[stepper]
+enabled = false
+
+[imu]
+enabled = false
+
+[gnss]
+enabled = false
+
+[camera]
+enabled = false
+
+[ntrip]
+enabled = false
+
+[lora]
+enabled = false
+role = "disabled"
+
+[base_station_integration]
+enabled = false
+
+[telemetry]
+http_enabled = false
+
+[watchdog]
+enabled = false
+
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "gate"
+"""
+    )
+    return cfg
+
+
+class _FlakyLidar:
+    """Stands in for LidarScanner: available, but every read raises OSError."""
+
+    calls = 0
+
+    def __init__(self, *_a, **_kw) -> None:
+        pass
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def read_scan(self):
+        type(self).calls += 1
+        raise OSError(5, "simulated serial unplug")
+
+
+def test_scan_loop_disables_sensor_after_repeated_oserror(tmp_path: Path, monkeypatch) -> None:
+    """OSError from a read must not abort the run, and after 5 failures the
+    sensor is skipped rather than re-read every iteration (T1-003). The trip
+    itself must also be visible in scan.jsonl, not just the journal (Important 4)."""
+    import json
+
+    _FlakyLidar.calls = 0
+    monkeypatch.setattr(main_mod, "LidarScanner", _FlakyLidar)
+    # No stepper in this config, so the loop paces itself on the idle settle;
+    # shrink it so 1.5 s yields well over five iterations.
+    monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 0.05)
+    exit_code = main_mod.run(config_path=_enabled_lidar_config(tmp_path), duration_sec=1.5)
+    assert exit_code == 0
+    assert _FlakyLidar.calls == 5, (
+        f"expected exactly 5 attempts before the gate trips, got {_FlakyLidar.calls}"
+    )
+
+    session = next((tmp_path / "data").glob("gate_*"))
+    records = [
+        json.loads(line) for line in (session / "scan.jsonl").read_text().splitlines() if line
+    ]
+    disabled_events = [r for r in records if r.get("event") == "sensor_disabled"]
+    assert len(disabled_events) == 1, disabled_events
+    assert disabled_events[0]["details"]["sensor"] == "lidar"
+
+
+def test_sensor_gate_trips_once_and_resets_on_success() -> None:
+    gate = main_mod._SensorGate("lidar", limit=3)
+    assert gate.record_failure(OSError("x")) is False
+    assert gate.record_failure(OSError("x")) is False
+    assert gate.record_failure(OSError("x")) is True  # trips on the 3rd
+    assert gate.tripped
+    assert gate.record_failure(OSError("x")) is False  # already tripped: no re-warn
+    gate.record_success()
+    assert not gate.tripped
+
+
+def test_settle_uses_stop_event(tmp_path: Path, monkeypatch) -> None:
+    """The settle pause must be interruptible (T1-003): with the idle settle
+    forced to 5 s and stop set 0.2 s in, only a `stop_event.wait`-style
+    interruptible wait can return in under 2 s — a plain `time.sleep(5)`
+    settle would not."""
+    monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 5.0)
+    config_path = _write_all_disabled_config(tmp_path)
+    stop = threading.Event()
+    threading.Timer(0.2, stop.set).start()
+    start = time.monotonic()
+    assert main_mod.run(config_path=config_path, duration_sec=10.0, stop_event=stop) == 0
+    assert time.monotonic() - start < 2.0
+
+
+def test_telemetry_constructor_failure_still_tears_down(tmp_path: Path, monkeypatch) -> None:
+    """A failure after sensors + logger are up must still write scan_abort and
+    close the session (T1-029)."""
+    import json
+
+    class _BoomRouter:
+        def __init__(self, *_a, **_kw) -> None:
+            raise RuntimeError("simulated telemetry failure")
+
+    monkeypatch.setattr(main_mod, "TelemetryRouter", _BoomRouter)
+    config_path = _write_all_disabled_config(tmp_path)
+    exit_code = main_mod.run(config_path=config_path, duration_sec=0.5)
+    assert exit_code == 1
+
+    session = next((tmp_path / "data").glob("test_*"))
+    events = [
+        json.loads(line)["event"]
+        for line in (session / "scan.jsonl").read_text().splitlines()
+        if '"event"' in line
+    ]
+    assert events[-1] == "scan_abort", events
+    assert (session / "metadata.json").exists(), "logger.stop() must still run"
+
+
+class _CountingCamera:
+    captures = 0
+
+    def __init__(self, *_a, **_kw) -> None:
+        pass
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def should_capture(self, step_index: int) -> bool:
+        return True
+
+    def capture(self, output_dir, step_index) -> str:
+        type(self).captures += 1
+        return f"images/img_{step_index:06d}.jpg"
+
+
+def test_save_images_false_prevents_capture(tmp_path: Path, monkeypatch) -> None:
+    """[logging].save_images = false must stop captures, not just skip a mkdir (T1-031)."""
+    _CountingCamera.captures = 0
+    monkeypatch.setattr(main_mod, "Camera", _CountingCamera)
+    monkeypatch.setattr(main_mod, "_CAMERA_IMPORT_OK", True)
+    monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 0.05)  # many iterations in 1 s
+    cfg = tmp_path / "cam.toml"
+    cfg.write_text(
+        f"""
+[camera]
+enabled = true
+
+[lidar]
+enabled = false
+[stepper]
+enabled = false
+[imu]
+enabled = false
+[gnss]
+enabled = false
+[ntrip]
+enabled = false
+[lora]
+enabled = false
+role = "disabled"
+[base_station_integration]
+enabled = false
+[telemetry]
+http_enabled = false
+[watchdog]
+enabled = false
+
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "noimg"
+save_images = false
+"""
+    )
+    assert main_mod.run(config_path=cfg, duration_sec=1.0) == 0
+    assert _CountingCamera.captures == 0
+
+
+def test_save_images_true_captures_and_logs(tmp_path: Path, monkeypatch) -> None:
+    """The enabled-camera success path — capture, gate reset, and the
+    scan.jsonl camera record — must actually run (Finding 3 follow-up to T1-031)."""
+    import json
+
+    _CountingCamera.captures = 0
+    monkeypatch.setattr(main_mod, "Camera", _CountingCamera)
+    monkeypatch.setattr(main_mod, "_CAMERA_IMPORT_OK", True)
+    monkeypatch.setattr(main_mod, "_IDLE_SETTLE_SEC", 0.05)  # many iterations in 1 s
+    cfg = tmp_path / "cam.toml"
+    cfg.write_text(
+        f"""
+[camera]
+enabled = true
+
+[lidar]
+enabled = false
+[stepper]
+enabled = false
+[imu]
+enabled = false
+[gnss]
+enabled = false
+[ntrip]
+enabled = false
+[lora]
+enabled = false
+role = "disabled"
+[base_station_integration]
+enabled = false
+[telemetry]
+http_enabled = false
+[watchdog]
+enabled = false
+
+[logging]
+output_dir = "{(tmp_path / "data").as_posix()}"
+session_prefix = "withimg"
+save_images = true
+"""
+    )
+    assert main_mod.run(config_path=cfg, duration_sec=1.0) == 0
+    assert _CountingCamera.captures > 0
+
+    session = next((tmp_path / "data").glob("withimg_*"))
+    lines = (session / "scan.jsonl").read_text().splitlines()
+    camera_records = [json.loads(line) for line in lines if '"type":"camera"' in line]
+    assert camera_records, "expected at least one camera record in scan.jsonl"
+    assert any(r["filename"].startswith("images/") for r in camera_records)
