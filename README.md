@@ -68,7 +68,8 @@ complete. The rover is ready for bench/field validation — start with
 - [Engineering Decisions](docs/DECISIONS.md) — DEC-001 to DEC-035 (DEC-030–DEC-034
   cover the v0.10 Base-Station integration; DEC-035 covers the deep-alignment overhaul)
 - [Cross-Repo Backlog](docs/CROSS_REPO_BACKLOG.md) — sibling-side work this rover
-  is waiting on (Heltec LoRa-frame-v2 upgrade, base-side LoRa-RTCM transmitter)
+  is waiting on (Heltec LoRa-frame-v2 upgrade for STATUS telemetry; multi-client
+  NTRIP caster support, NC-1)
 - [Hardware](docs/HARDWARE.md) — bill of materials, GPIO/serial map, power
 - [Specifications](docs/SPECIFICATIONS.md) — sensors, accuracy targets, performance budgets
 - [Roadmap](docs/ROADMAP.md) — phased delivery plan

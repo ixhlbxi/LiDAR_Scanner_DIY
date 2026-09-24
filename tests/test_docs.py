@@ -113,7 +113,13 @@ REQUIRED["README.md"] = [
     (r"tests\.hardware\.test_ntrip", 1),
     (r"SMOKE_CHECKLIST", 1),
 ]
-FORBIDDEN_BY_FILE["README.md"] = [(r"README_ORIGINAL", "archived as docs/archive/README_v0.9.2.md")]
+FORBIDDEN_BY_FILE["README.md"] = [
+    (r"README_ORIGINAL", "archived as docs/archive/README_v0.9.2.md"),
+    (
+        r"(?i)LoRa-RTCM|RTCM over LoRa(?!.*retired)",
+        "RTCM over LoRa is retired (DEC-031 amended)",
+    ),
+]
 
 ENFORCED.add("docs/ATTRIBUTION.md")
 REQUIRED["docs/ATTRIBUTION.md"] = [
