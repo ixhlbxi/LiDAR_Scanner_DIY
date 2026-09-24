@@ -187,6 +187,24 @@ FORBIDDEN_BY_FILE["docs/SPECIFICATIONS.md"] = [
     ),
 ]
 
+# --- Task 7: BASE_STATION_INTEGRATION ---
+ENFORCED.add("docs/BASE_STATION_INTEGRATION.md")
+REQUIRED["docs/BASE_STATION_INTEGRATION.md"] = [
+    (r"\b6563\b", 1),
+    (r"\b6565\b", 1),
+    (r"(?i)one client at a time", 1),
+    (r"CR-004", 1),
+    (r"CR-005", 1),
+    (r"\"schema_version\": 2", 1),
+    (r"\bv10\b", 1),
+    (r"ICY 200 OK", 1),
+    (r"sensors_disabled", 1),
+]
+FORBIDDEN_BY_FILE["docs/BASE_STATION_INTEGRATION.md"] = [
+    (r"Appendix C", "CLAUDE.md has no appendices"),
+    (r"lora_rtcm_loss", "no such event"),
+]
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
@@ -267,3 +285,8 @@ def test_tables_only_name_live_docs() -> None:
     }
     stray = (ENFORCED | set(REQUIRED) | set(FORBIDDEN_BY_FILE) | set(EXEMPT)) - known
     assert not stray, stray
+
+
+def test_code_comments_do_not_cite_claude_appendix() -> None:
+    for rel in ("src/rover/gnss.py", "src/rover/lora_protocol.py"):
+        assert "Appendix C" not in _read(rel), rel

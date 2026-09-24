@@ -1,8 +1,8 @@
 """LoRa frame v2 — shared envelope with arm-drone-lidar-workflow.
 
-Implements the LoRa frame v2 spec described in docs/BASE_STATION_INTEGRATION.md §4
-and CLAUDE.md Appendix C. The same envelope is encoded/decoded on the Base-Station
-Heltec V3 (DISPLAY Tx) and the rover ESP32 (STATUS + LINK Tx) firmware.
+Implements the LoRa frame v2 spec described in docs/BASE_STATION_INTEGRATION.md §4.
+The same envelope is encoded/decoded on the Base-Station Heltec V3 (DISPLAY Tx) and
+the rover ESP32 (STATUS + LINK Tx) firmware.
 
 Frame layout (no Sync bytes — LoRa PHY preamble + sync_word handles synchronization):
 

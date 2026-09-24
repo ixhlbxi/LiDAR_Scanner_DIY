@@ -2,7 +2,7 @@
 
 **Document Status:** v0.10 — overhaul authoritative contract
 **Companion repo:** `ixhlbxi/arm-drone-lidar-workflow`
-**Last Updated:** 2026-05-23
+**Last Updated:** 2026-09-23
 
 This document is the single source of truth for how this rover interacts with the
 production Base-Station built in `ixhlbxi/arm-drone-lidar-workflow`. Both repos refer
@@ -18,7 +18,7 @@ how that integration is wired.
 
 | Profile | When to use | Major behaviors |
 |---|---|---|
-| `personal` (default) | DIY use, off-grid, no project conventions | WGS84 / local ENU output; NTRIP optional; LoRa STATUS/LINK on; HTTP `/status` typical observability |
+| `personal` (default) | DIY use, off-grid, no project conventions | WGS84 / local ENU output; NTRIP optional; LoRa STATUS on (LINK is defined but never sent); HTTP `/status` typical observability |
 | `arm_group` | Companion to ARM Group drone/LiDAR survey workflow | NTRIP required (default mountpoint `ARM_BASE`); project code + mission tag required; output in session-recorded CRS (e.g., NAD83(2011) / PA-N / ft-US); `status.json` published to a path the Base-Station's existing tooling can read |
 
 Selection is per session via `[session].profile` in the rover's TOML config.
@@ -28,9 +28,9 @@ See DEC-030 in `docs/DECISIONS.md`.
 
 ## 2. RTK Correction Paths
 
-Two transports, NTRIP primary, LoRa fallback. The rover never enables both at once
-for the same F9P input — that's the F9P's job to multiplex if both physical paths
-were wired, which we don't.
+NTRIP-over-IP is the rover's only RTK correction path (DEC-031 amended 2026-09-23).
+LoRa carries status-only telemetry (§3.3) and never RTCM — there is no fallback
+transport for corrections.
 
 ### 2.1 Primary — NTRIP over IP
 
@@ -74,21 +74,41 @@ reach to the Base-Station Pi. Any of these topologies works:
 
 ### 2.2 Fallback — LoRa-Relayed RTCM
 
-```
-┌──────────────────────────┐                     ┌──────────────────────────┐
-│  Base-Station Heltec V3  │   915 MHz LoRa      │  Rover ESP32             │
-│  (LoRa frame v2 type=    │ ──────────────────► │  (decodes RTCM_CHUNK,    │
-│  0x10 RTCM_CHUNK)        │   SF7/BW125/CR4/5   │  pipes to F9P UART2)     │
-└──────────────────────────┘                     └────────────┬─────────────┘
-                                                              │
-                                                              ▼
-                                                ┌─────────────────────────┐
-                                                │  Rover ZED-F9P UART2    │
-                                                └─────────────────────────┘
-```
+**Retired (DEC-031 amended 2026-09-23; `CR-002` not needed).** Earlier revisions of
+this doc described a LoRa-relayed-RTCM fallback — now-retired `RTCM_CHUNK` frames
+(base → rover, type `0x10`) — that was never built on the Base-Station side and is
+not coming. The sibling backlog item `CR-002` (base-side LoRa-RTCM transmitter) is
+closed not-needed.
+`[lora].role` is `status_tx_only` or `disabled`; there is no RTCM-receive role, and
+frame type `0x10` (described in §4) is retired and reserved so no future type reuses
+it. NTRIP-over-IP (§2.1) is the rover's only RTK transport.
 
-LoRa frame v2 is described in §4 below. The Base-Station-side LoRa-RTCM transmitter
-ships in `arm-drone-lidar-workflow`'s Phase D PR.
+### 2.3 Caster Sharing (fact 16)
+
+The Base-Station's NTRIP caster (`base-station/rtk_base_manager.py`) serves **one client at a time** —
+a newly authenticated client replaces (evicts) whichever client is currently
+connected, closing its socket. Filed sibling-side as backlog **NC-1** (§NTRIP
+Caster, 2026-09-23). The rover has no protocol-level way to detect or negotiate
+around this.
+
+**Interim rule (owner, 2026-09-23):** the drone and this rover never share a base
+session (`CR-005`) — confirm the caster is free before starting the rover's NTRIP
+client.
+
+Other caster behavior, measured 2026-09-23 in `arm-drone-lidar-workflow@e88c11b`
+(`base-station/rtk_base_manager.py` ~1028-1208, `ntrip_auth.py`,
+`config/base_config.yaml`, `rtk_io.py:155`):
+
+| Behavior | Detail |
+|---|---|
+| Protocol | NTRIP v1 — a successful connect gets `ICY 200 OK`, not chunked |
+| Auth | HTTP Basic, password only — no username check |
+| Unauthenticated `GET /` | Returns the sourcetable |
+| Wrong mountpoint | `404`, checked **before** auth |
+| Bad password | `401` |
+| GGA | Never read by the caster — sending it (§2.1) is a rover-side courtesy only |
+| RTCM message types served | `1005`, `1077`, `1087`, `1097`, `1127`, `1230` |
+| Availability | Only serves corrections while the Base-Station is in `main` mode, armed, and ready |
 
 ---
 
@@ -103,35 +123,41 @@ Default path: `/run/rover/status.json`. Atomic write via mkstemp + rename, mirro
 already knows how to read the Base-Station's `/run/rtk-base/status.json` can read the
 rover's too — same shape, separate schema version.
 
-**Rover-side schema v1:**
+**Rover-side schema v2:**
 
 ```json
 {
-  "schema_version": 1,
-  "timestamp_epoch": 1716480000.123,
+  "schema_version": 2,
+  "timestamp_epoch": 1758585600.123,
   "device": "rover-01",
   "profile": "arm_group",
   "mission": "WENTZ",
   "project_code": "2026-WENTZ-LIDR",
-  "scan_state": "SCANNING",
   "fix_type": 5,
   "sat_count": 18,
   "hdop": 0.85,
+  "pdop": 1.42,
   "lat": 40.7128,
   "lon": -74.0060,
   "alt_m": 10.5,
   "rtk_age_s": 1.2,
-  "battery_mv": 11800,
-  "lora_link_rssi": -78,
-  "lora_link_snr": 9,
+  "scan_state": 1,
   "ntrip_connected": true,
-  "ntrip_bytes_per_sec": 850
+  "ntrip_bytes_per_sec": 850,
+  "sensors_disabled": [],
+  "logger_degraded": false
 }
 ```
 
-`schema_version` is versioned independently from the Base-Station's
-`STATUS_SCHEMA_VERSION` (currently v7 in base, v1 in rover). Adding a field is a minor
-bump; removing or renaming is a major bump.
+`battery_mv`, `lora_link_rssi` and `lora_link_snr` are omitted above because they are
+unmeasured in this example: `RoverStatus` treats `None` as "unmeasured," and
+`build_payload()` (`src/rover/telemetry.py`) drops any field whose value is `None`
+rather than sending a placeholder. `sensors_disabled` and `logger_degraded` are always
+present, never omitted.
+
+`schema_version` is versioned independently from the Base-Station's own status.json:
+rover v2; the Base-Station's own status.json is v10 (a different schema). Adding a
+field to the rover schema is a minor bump; removing or renaming is a major bump.
 
 ### 3.2 Channel B — Local HTTP Endpoint
 
@@ -148,44 +174,53 @@ Base-Station's `8080` to avoid collision when both Pis share a host accidentally
 
 ### 3.3 Channel C — LoRa STATUS / LINK Packets
 
-LoRa frame v2 (§4) with `type = 0x01` (STATUS) or `0x02` (LINK). Same payload bodies
-as the original Appendix C in `CLAUDE.md`:
+LoRa frame v2 (§4) with `type = 0x01` (STATUS). The frame format also defines `0x02`
+(LINK), but the rover never sends it — LINK is a decode-only type today, kept for a
+future receiver. Payload bodies are laid out in §4's type table; the fields mirror
+the JSONL record shapes described in
+[`SPECIFICATIONS.md` §4.2](SPECIFICATIONS.md#42-jsonl-record-types):
 
 - STATUS (10 bytes): `fix_type, sat_count, hdop×100, battery_mv, scan_state, 3×reserved`
-- LINK (14 bytes): `rssi+128, snr+128, rx_count, tx_count, err_count, 2×reserved`
+- LINK (14 bytes, defined but never transmitted by the rover): `rssi+128, snr+128, rx_count, tx_count, err_count, 2×reserved`
 
-Cadence configurable via `[lora].telemetry_interval_sec` (default `1.0`).
+Cadence: `[lora].telemetry_interval_sec` (default `10.0`) — STATUS every 10 s.
 
-Survives the no-network case (Channels A and B require IP / filesystem). On-air bandwidth
-multiplexed with RTCM_CHUNK frames; STATUS/LINK packets are short (~30 B framed) and
-infrequent, so collision with RTCM is acceptable.
+Survives the no-network case (Channels A and B require IP / filesystem). LoRa never
+carries RTCM (§2.2, retired), so there is no on-air contention with a correction
+stream to manage.
 
 ---
 
 ## 4. LoRa Frame v2
 
-Shared envelope used by both repos. Strict superset of the original Appendix C and the
-Heltec v1 display frame — receivers that only understood v1 (display body) MUST reject
-v2 frames; v2-aware receivers handle both by dispatching on `type`.
+Shared envelope used by both repos, specified here in full. It is a strict superset
+of the Heltec v1 display frame — receivers that only understood v1 (display body)
+MUST reject v2 frames; v2-aware receivers handle both by dispatching on `type`.
 
-> ⚠️ **Reality check (as of 2026-05-30, Stage E of the deep-alignment overhaul):**
+> ⚠️ **Reality check (as of 2026-09-23):**
 > the sibling `arm-drone-lidar-workflow` Heltec firmware in
 > `base-station/heltec-display/src/main.cpp` still runs
-> `LORA_PROTO_VERSION = 1` (DISPLAY-only body, no envelope). The rover's
+> `LORA_PROTO_VERSION = 1` (DISPLAY-only body, no envelope), and the T-Deck
+> handheld drops any frame it doesn't recognize — so the rover's v2 STATUS
+> frames are unheard end-to-end until both land. This holds regardless of
+> firmware version: LoRa is status-only on the rover side by design (DEC-031
+> amended 2026-09-23), not merely because the sibling firmware hasn't caught
+> up. The rover's
 > [`src/rover/lora_protocol.py`](../src/rover/lora_protocol.py) and the
 > rover ESP32 firmware in [`firmware/esp32-rover/`](../firmware/esp32-rover/)
 > implement v2 fully and are forward-compatible, **but**:
 >
->   * No sibling-side receiver currently parses rover STATUS / LINK frames.
->   * No sibling-side transmitter currently emits `RTCM_CHUNK` frames, so the
->     LoRa-RTCM fallback path described in §2.2 is not end-to-end functional.
+>   * No sibling-side receiver currently parses rover STATUS frames.
+>   * LoRa carries no RTCM in either direction — the fallback path formerly
+>     described in §2.2 is retired.
 >
 > Sibling-side work is tracked in
-> [`docs/CROSS_REPO_BACKLOG.md`](CROSS_REPO_BACKLOG.md) as **CR-001** (Heltec
-> v2 envelope bump), **CR-002** (base-side LoRa-RTCM transmitter), and
-> **CR-003** (sibling handheld recognition of STATUS / LINK).
+> [`docs/CROSS_REPO_BACKLOG.md`](CROSS_REPO_BACKLOG.md): **CR-001** (Heltec
+> v2 envelope bump) and **CR-003** (sibling handheld recognition of rover
+> STATUS/LINK) are pending — CR-003 depends on CR-001. **CR-002** (base-side
+> LoRa-RTCM transmitter) is closed not-needed now that §2.2 is retired.
 >
-> Until those land, the rover's NTRIP-primary RTK path (§2.1) and the
+> Until CR-001/CR-003 land, the rover's NTRIP-primary RTK path (§2.1) and the
 > non-LoRa telemetry channels (status.json + HTTP, §3.1–§3.2) provide
 > full end-to-end function on their own. NTRIP-only field validation
 > can proceed independently — see
@@ -214,8 +249,8 @@ v2 frames; v2-aware receivers handle both by dispatching on `type`.
 | ID | Name | Direction | Payload |
 |---|---|---|---|
 | `0x01` | STATUS | rover → handhelds / base | Rover STATUS body (10 bytes, see §3.3) |
-| `0x02` | LINK | rover → handhelds / base | Rover LINK body (14 bytes, see §3.3) |
-| `0x10` | RTCM_CHUNK | base → rover | `[flags:1][rtcm:N]`; flags bit 0 = more fragments follow |
+| `0x02` | LINK | rover → handhelds / base | Rover LINK body (14 bytes, see §3.3) — defined, never sent by the rover |
+| `0x10` | (retired, reserved) | — | Formerly `RTCM_CHUNK` (base → rover, `[flags:1][rtcm:N]`). Retired 2026-09-23 (DEC-031 amended); never encoded or decoded. The value stays reserved so no future type reuses it |
 | `0x20` | DISPLAY | base → handhelds | Compact `/display` text body (the v1 payload kept verbatim) |
 | `0x7F` | DEBUG_TEXT | any → any | ASCII string, no null terminator |
 
@@ -224,14 +259,14 @@ v2 frames; v2-aware receivers handle both by dispatching on `type`.
 | Parameter | Value |
 |---|---|
 | Frequency | 915 MHz |
-| Spreading Factor | 7 (DISPLAY/STATUS/LINK) or 9 (RTCM_CHUNK if range > throughput) |
+| Spreading Factor | 7 (all frame types) |
 | Bandwidth | 125 kHz |
 | Coding Rate | 4/5 |
 | Sync Word | `0x12` (private, matches Heltec/T-Deck firmware) |
 
-The Heltec V3 firmware currently runs SF7 for DISPLAY. RTCM_CHUNK can run at SF7 too
-(throughput ~5 kbps is comfortable for the "robust" RTCM profile's ~800 B/s). Higher
-SF is reserved for the "marginal link" tuning later.
+The Heltec V3 firmware runs SF7 for every frame type
+(`firmware/esp32-rover/platformio.ini`). There is no higher-SF profile in use — SF9
+was reserved for `RTCM_CHUNK`'s longer-range case, and that type is now retired.
 
 ---
 
@@ -249,9 +284,19 @@ Common ARM Group EPSG codes:
 
 | Zone | EPSG (NAD83(2011) ft-US) |
 |---|---|
-| PA North | `6346` |
-| PA South | `6347` |
+| PA North | `6563` |
+| PA South | `6565` |
 | (other zones) | confirm at first session |
+
+**NAVD88 note:** the EPSG codes above are horizontal only. When NAVD88 output is
+also requested, `scripts/georef.py` converts height via the GEOID18 grid (source CRS
+NAD83(2011) geographic 3D `EPSG:6319`) into a compound CRS — the horizontal EPSG
+above plus `6360` for a ftUS export, or plus `5703` for a metric one — and writes it
+alongside the ellipsoidal file (`<prefix>_navd88.{ply,las}` next to
+`<prefix>_ellipsoidal.{ply,las}`; see
+[`SPECIFICATIONS.md` §4.4](SPECIFICATIONS.md#44-georeferenced-export-outputs)). A
+missing geoid grid, or a units/CRS mismatch, exits **3** — the ellipsoidal file is
+still written.
 
 Export command:
 
@@ -286,8 +331,11 @@ The rover's `[logging].output_dir` should be set to
 `/path/to/<ProjectCode>_Survey/01_Raw/LiDAR/Rover/` for ARM Group sessions. Personal
 sessions can use any path.
 
-This split is documented separately in `arm-drone-lidar-workflow/base-station/docs/
-lidar-rover-integration.md` (Phase D deliverable in that repo).
+This split is not yet documented in the sibling repo — `arm-drone-lidar-workflow`'s
+`base-station/docs/lidar-rover-integration.md` (or equivalent) does not exist at the
+sibling's tip (only an `_archive/` copy does). Filed sibling-side as
+[`CR-004`](CROSS_REPO_BACKLOG.md#cr-004--document-01_rawlidarrover-subfolder-split-in-sibling-docs),
+pending a sibling docs PR.
 
 ---
 
@@ -295,10 +343,12 @@ lidar-rover-integration.md` (Phase D deliverable in that repo).
 
 | Failure | Detection | Rover behavior |
 |---|---|---|
-| NTRIP caster unreachable | TCP connect timeout (5 s) | Log `event=ntrip_disconnect`; if LoRa configured, fall back automatically; else continue with degraded GNSS |
-| NTRIP auth rejected | 401 on connect | Refuse to start in `arm_group` profile (loud failure); warn-and-continue in `personal` |
-| LoRa link loss (fallback mode) | No RTCM_CHUNK frame for 10 s | Log `event=lora_rtcm_loss`; F9P degrades to FLOAT/3D; resume on next frame |
-| `status.json` write fails | OSError on rename | Log warning at 1/min cadence; other publishers unaffected |
+| NTRIP caster unreachable | TCP connect timeout (`_CONNECT_TIMEOUT_SEC`, 5 s) raises `OSError`/`TimeoutError` | Logged via Python logging (not a JSONL event); reconnect backoff doubles toward the 30 s cap; continues with degraded GNSS — there is no LoRa fallback (§2.2 retired) |
+| NTRIP auth/mountpoint rejection within the 3 s startup grace, `arm_group` profile | `401`/`404` before `_NTRIP_FATAL_GRACE_SEC` elapses | Refuses to start — process exits **4**; `personal` profile warns and continues instead |
+| Same rejection found mid-session, `arm_group` profile | Same latch, checked on every status publish | Logged once ("NTRIP fatal mid-session"); `scan_state = SCAN_ERROR` published continuously; session keeps logging without RTK — no exit |
+| Caster rejects the handshake (busy mountpoint, 503, or an early-closed handshake) | Non-fatal `NtripError` | Retries every 30 s flat — no backoff growth |
+| Caster evicts this client — another authenticates (§2.3) | Clean stream close, or a TCP reset (`OSError`) | Clean close resets reconnect backoff to 1 s; a reset doubles the current backoff toward the 30 s cap |
+| `status.json` write fails | `OSError` on rename | Log warning at 1/min cadence; other publishers unaffected |
 | Conflicting CRS at export | `metadata.json.session.target_crs_epsg = 0` in `arm_group` profile | `scripts/georef.py` exits non-zero and demands `--crs` |
 
 ---
@@ -309,6 +359,7 @@ lidar-rover-integration.md` (Phase D deliverable in that repo).
 |---|---|---|
 | Atomic JSON write | `src/rover/telemetry.py` (port of) | `base-station/rtk_io.py:atomic_write_json` |
 | Status schema | This doc §3.1 | `base-station/rtk_io.py:STATUS_SCHEMA_VERSION` |
-| LoRa frame envelope | This doc §4 | `base-station/heltec-display/src/main.cpp` (v1 today, v2 after Phase D) |
+| LoRa frame envelope | This doc §4 | `base-station/heltec-display/src/main.cpp` (v1 today; v2 pending `CR-001`) |
 | NTRIP caster | (consumer) | `base-station/rtk_base_manager.py` (caster lifecycle) |
-| Decision records | `docs/DECISIONS.md` DEC-030..DEC-034 | `docs/decisions/decision-log.md` |
+| Caster sharing rule | This doc §2.3 | `base-station/rtk_base_manager.py` (`NTRIPServer`, single-client, backlog `NC-1`) |
+| Decision records | `docs/DECISIONS.md` DEC-030..DEC-035 (DEC-031 amended 2026-09-23) | `docs/decisions/decision-log.md` |
