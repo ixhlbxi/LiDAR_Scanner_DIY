@@ -1,11 +1,19 @@
 # Hardware Inventory
 
-**Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
-**Last Updated:** 2026-05-30
+**Document Status:** v0.11 — reconciled with code (2026-09-23, stage 6 docs refresh)
+**Last Updated:** 2026-09-23
 
 > **Rover BOM is unchanged from v0.9.2** except: T-Deck moved out (now owned
-> by Base-Station, per DEC-033); ESP32 LoRa role expanded to dual-mode (LoRa
-> RTCM relay OR NTRIP-over-WiFi client, per DEC-032).
+> by Base-Station, per DEC-033); ESP32 LoRa role dual-mode (LoRa RTCM relay OR
+> NTRIP-over-WiFi client, per DEC-032) — see §7.1 for the `lora_rtcm_relay`
+> pending-removal note (backlog `S5-F1`).
+>
+> **Owner rulings applied here (2026-09-22 super-audit):**
+> - **D-005** — the rover needs **one** ZED-F9P and **one** antenna; the
+>   second F9P and antenna belong to the sibling Base-Station, not this repo
+>   (§1.1, §6.2, §6.3, §10).
+> - **D-017** — the LoRa/WiFi board target is the **Heltec WiFi LoRa 32 V3**;
+>   an on-shelf Muzi-branded V3 clone is a pin-compatible equivalent (§7.1).
 >
 > **Cross-references:**
 > - Rover-to-Base contract: [`BASE_STATION_INTEGRATION.md`](BASE_STATION_INTEGRATION.md)
@@ -28,9 +36,9 @@
 | Camera | ✅ | — | HQ Camera + fisheye ready |
 | IMU | ✅ | — | MPU-6050 and MPU-9250 available |
 | GNSS (interim) | ✅ | — | Beitian BK122 for testing |
-| GNSS (RTK) | — | 🔲 | ZED-F9P × 2 needed (one for the Base-Station Pi, one for this rover) |
-| Antennas | — | 🔲 | Dual-band L1/L2 × 2 needed |
-| LoRa + WiFi (rover) | ✅ | — | ESP32 LoRa V3 ready — dual-purpose (LoRa RTCM Rx OR NTRIP-over-WiFi client) |
+| GNSS (RTK) | — | 🔲 | ZED-F9P × 1 needed, rover-side only (D-005) — SparkFun GPS-RTK-SMA, same board as the Base-Station |
+| Antennas | — | 🔲 | u-blox ANN-MB-00 × 1 needed, rover-side only (D-005), same model as the Base-Station |
+| LoRa + WiFi (rover) | ✅ | — | Heltec WiFi LoRa 32 V3 ready (Muzi V3 clone equivalent, D-017) — `ntrip_client` kept (DEC-032); `lora_rtcm_relay` pending removal (S5-F1) |
 | Handheld monitor | — | — | Owned by Base-Station; **removed from rover BOM** (DEC-033) |
 | Power | — | 🔲 | Batteries + regulators needed |
 | Network | — | — | Rover Pi shares WiFi/cellular path with Base-Station Pi |
@@ -232,19 +240,19 @@
 
 | Attribute | Value |
 |-----------|-------|
-| **Role** | RTK GNSS receiver (Base and Rover) |
+| **Role** | RTK GNSS receiver, rover-side only — the Base-Station owns its own unit (D-005) |
 | **Type** | Dual-band (L1/L2) multi-constellation |
 | **Constellations** | GPS, GLONASS, Galileo, BeiDou |
 | **RTK Accuracy** | 1 cm + 1 ppm (horizontal) |
 | **Convergence** | <10 sec (typical with good corrections) |
 | **Interface** | USB, UART × 2 |
 | **Protocol** | UBX, NMEA, RTCM3 |
-| **Status** | 🔲 Planned (need 2 units) |
+| **Status** | 🔲 Planned (need 1 unit, rover-side — D-005) |
 
-**Vendor Options:**
-- SparkFun GPS-RTK2 Board
-- ArduSimple simpleRTK2B
-- Beitian BN-880Q (with F9P)
+**Decided (D-005):** SparkFun GPS-RTK-SMA (ZED-F9P breakout) — the same board
+the Base-Station uses, so spares and firmware notes are interchangeable.
+
+**Other vendor options considered:** ArduSimple simpleRTK2B; Beitian BN-880Q (with F9P).
 
 **Selection Rationale:**
 - De-facto standard for DIY RTK
@@ -252,61 +260,65 @@
 - Native RTCM3 input/output
 - Dual-band improves fix reliability and convergence
 
-**Quantity Required:** 2 (one base, one rover)
+**Quantity Required:** 1 (rover-side only; the Base-Station supplies its own — D-005)
 
-### 6.3 Dual-Band GNSS Antennas (Planned)
+### 6.3 GNSS Antenna — u-blox ANN-MB-00 (Decided, D-005)
 
 | Attribute | Value |
 |-----------|-------|
-| **Role** | GNSS signal reception |
-| **Type** | Active patch or helix, L1/L2 |
-| **Gain** | ≥3 dBi |
+| **Role** | GNSS signal reception, rover-side only — the Base-Station owns its own antenna (D-005) |
+| **Type** | u-blox ANN-MB-00 active multi-band patch antenna, same model as the Base-Station |
+| **Gain** | Per the ANN-MB-00 datasheet |
 | **Ground Plane** | Required (integrated or external) |
 | **Connector** | SMA typical |
-| **Status** | 🔲 Planned (need 2) |
+| **Status** | 🔲 Planned (need 1, rover-side — D-005) |
+
+**Antenna placement:** decided at purchase, not before. Preferred: mount on
+the rotation axis (mast centerline), giving a zero LiDAR-to-antenna lever
+arm. If the mechanical build puts the antenna off-axis instead, measure the
+offset and record it in `[calibration].antenna_offset_m` (§9.2; consumed by
+`scripts/georef.py`).
 
 **Selection Criteria:**
-- Dual-band (L1 + L2) mandatory for F9P performance
+- Multi-band mandatory for F9P performance
 - Survey-grade or near-survey quality
 - Weather resistant for field use
 - Ground plane for multipath rejection
 
-**Quantity Required:** 2 (one base, one rover)
+**Quantity Required:** 1 (rover-side only; the Base-Station supplies its own — D-005)
 
 ---
 
 ## 7. Communications Subsystem
 
-### 7.1 Muzi ESP32 LoRa V3 (SX1262) — Rover
+### 7.1 Heltec WiFi LoRa 32 V3 (SX1262) — Rover (D-017; Muzi V3 clone equivalent)
 
 | Attribute | Value |
 |-----------|-------|
-| **Role** | RTK fallback receiver + telemetry transmitter |
+| **Role** | Telemetry transmitter (STATUS only) + NTRIP-over-WiFi RTCM client (DEC-032). NTRIP is now the only RTK path (DEC-031 amended 2026-09-23) — the LoRa RTCM-receive mode below is dead code pending removal (S5-F1) |
 | **MCU** | ESP32-S3 (WiFi-capable — required for NTRIP-over-WiFi mode) |
 | **Radio** | Semtech SX1262 |
 | **Frequency** | 915 MHz (US ISM) |
 | **Power** | Up to +22 dBm |
-| **Interface** | USB (to Pi for telemetry frames), UART (to F9P UART2 for RTCM) |
-| **Status** | ✅ Owned |
+| **Interface** | USB (to Pi for telemetry frames), UART (to F9P UART2 for RTCM — both firmware modes write here) |
+| **Status** | ✅ Owned (Heltec WiFi LoRa 32 V3; a Muzi-branded V3 clone on the shelf is a pin-compatible equivalent, D-017) |
 
 **Firmware Scope (v0.10 overhaul, Phase C):**
 
-Two firmware modes selected via config (lives in `firmware/esp32-rover/`):
+Two firmware modes selected via `platformio.ini` env (lives in `firmware/esp32-rover/`):
 
-- **Mode A — `lora_rtcm_relay`** (default): Receives RTCM_CHUNK LoRa frame v2 packets
-  from the Base-Station Heltec, writes the RTCM3 payload to F9P UART2 (preserves
-  DEC-006-style "Pi out of correction path" robustness). Also transmits rover STATUS
-  (0x01) and LINK (0x02) frames to handhelds.
-- **Mode B — `ntrip_client`** (new): Connects to the Base-Station NTRIP caster
-  over WiFi, writes RTCM3 to F9P UART2 directly. Same status/link Tx as Mode A.
-  Wins when LoRa range is marginal but network is available, and the Pi-NTRIP
-  approach is too tightly coupled to the Pi being up.
+- **Mode A — `lora_rtcm_relay`** (pending removal, backlog `S5-F1`): historically received RTCM_CHUNK (LoRa frame v2 type `0x10`, now retired and reserved) from the Base-Station Heltec and wrote the payload to F9P UART2. That RTCM-receive path is dead now that NTRIP is the only RTK path (DEC-031 amended 2026-09-23); it awaits a PlatformIO build + flash to remove it. It still transmits rover STATUS (0x01) frames — it never sends LINK (0x02); that frame type is defined but never used.
+- **Mode B — `ntrip_client`** (kept, DEC-032): Connects to the Base-Station NTRIP caster
+  over WiFi, writes RTCM3 to F9P UART2 directly. Same STATUS-only Tx as Mode A.
+  This is the supported RTK path — it does not depend on LoRa range, and
+  keeps RTCM delivery off the Pi (preserves the DEC-006-style "Pi out of
+  correction path" robustness).
 
 WiFi credentials and NTRIP password live in a non-committed `include/config.h`
 (`include/config.h.example` is the template). No OTA updates in v1.0.
 
 > **Compatibility check:** confirm rover ESP32 model has both LoRa **and** WiFi
-> (the Muzi/Heltec V3 does — bare SX1262 breakouts do not). Mode B requires WiFi.
+> (the Heltec/Muzi V3 does — bare SX1262 breakouts do not). Mode B requires WiFi.
 
 ### 7.2 LILYGO T-Deck — **Removed from rover BOM (DEC-033)**
 
@@ -345,10 +357,12 @@ variable (default name `ROVER_NTRIP_PASSWORD`), set via systemd `EnvironmentFile
 or shell export. Mirrors the Base-Station's `RTK_NTRIP_PASSWORD` convention. Never
 committed to config files.
 
-**LoRa fallback range:** when no network topology is reachable, the LoRa-RTCM path
-(Phase D in the overhaul plan) carries corrections at SF7/BW125/CR4/5 — ~1–3 km LOS
-in practice. Outside that range and outside network reach, the rover degrades to
-non-RTK 3D fix (~2–3 m accuracy).
+**LoRa range:** LoRa is status-only (STATUS every 10 s, SF7/BW125/CR4/5, ~1–3 km
+LOS in practice) — it no longer carries corrections. NTRIP is the only RTK path
+(DEC-031 amended 2026-09-23); the historical LoRa-RTCM relay (`lora_rtcm_relay`,
+§7.1) is dead code pending removal (S5-F1). Outside NTRIP network reach (WiFi or
+cellular to the Base-Station), the rover degrades to non-RTK 3D fix (~2–3 m
+accuracy).
 
 ### 7.4 CircuitMess Chatter (Optional)
 
@@ -445,12 +459,21 @@ non-RTK 3D fix (~2–3 m accuracy).
 
 ### 9.2 Mounting
 
+Everything except the Pi/electronics base rotates with the stepper through
+the sweep; the base itself does not.
+
 | Component | Mount Type | Status |
 |-----------|------------|--------|
-| LiDAR + Camera | Rotating platform on stepper shaft | 🔲 TBD |
-| IMU | Fixed to rotating platform | 🔲 TBD |
-| GNSS Antenna | Mast mount (clear sky view) | 🔲 TBD |
-| Pi + Electronics | Base enclosure | 🔲 TBD |
+| LiDAR + Camera | Rotating platform on stepper shaft | Rotates with the stepper |
+| IMU | `[imu].mount` config key: `base` (default, fixed to the base) or `platform` (rotates with the stepper) | Bench decision (S3-R3); physical mount 🔲 TBD |
+| GNSS Antenna | On the rotation axis (mast centerline) preferred — zero lever arm; otherwise off-axis with `[calibration].antenna_offset_m` measured (§6.3) | Decided at purchase |
+| Pi + Electronics | Base enclosure (does not rotate) | 🔲 TBD |
+
+**Rotation:** the mast sweeps 360° forward, then rewinds at `rewind_rpm` in
+≤45° chunks (DEC-015 amended 2026-09-23); no lidar/IMU records are logged
+during the rewind. Cabling to the rotating components uses a flexible cable
+loop, not a slip ring — the rewind exists precisely because there is no slip
+ring to allow continuous rotation.
 
 ### 9.3 Weight Budget
 
@@ -465,8 +488,8 @@ non-RTK 3D fix (~2–3 m accuracy).
 
 | Item | Qty | Est. Cost | Priority |
 |------|-----|-----------|----------|
-| ZED-F9P board (SparkFun/ArduSimple) | 2 | $200-250 ea | **Critical** |
-| Dual-band GNSS antenna (L1/L2) | 2 | $50-100 ea | **Critical** |
+| ZED-F9P board (SparkFun GPS-RTK-SMA) | 1 | $200-250 | **Critical** |
+| u-blox ANN-MB-00 GNSS antenna | 1 | $50-100 | **Critical** |
 | 3.3V switching regulator (1A+) | 1-2 | $5-15 | High |
 | USB-C PD power bank (20+ Ah) | 1 | $40-80 | High |
 | 12V battery pack (3S LiPo or equiv) | 1 | $30-50 | High |
@@ -474,7 +497,10 @@ non-RTK 3D fix (~2–3 m accuracy).
 | Connectors, cables, mounting hardware | — | $30-50 | Medium |
 | 3D printed enclosure/mounts | — | $20-50 | Low |
 
-**Estimated Total:** $600-900 for remaining components
+**Estimated Total:** $385-640 for remaining components (D-005 halves the F9P
+and antenna lines from the v0.9.2 two-unit BOM to one each). Arithmetic —
+low end: 200 + 50 + 5 + 40 + 30 + 10 + 30 + 20 = **385**; high end:
+250 + 100 + 30 + 80 + 50 + 30 + 50 + 50 = **640**.
 
 ---
 

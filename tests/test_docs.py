@@ -205,6 +205,17 @@ FORBIDDEN_BY_FILE["docs/BASE_STATION_INTEGRATION.md"] = [
     (r"lora_rtcm_loss", "no such event"),
 ]
 
+# --- Task 8: HARDWARE, SMOKE_CHECKLIST ---
+ENFORCED.add("docs/HARDWARE.md")
+REQUIRED["docs/HARDWARE.md"] = [
+    (r"Heltec WiFi LoRa 32 V3", 2),
+    (r"GPS-RTK-SMA", 1),
+    (r"ANN-MB-00", 1),
+    (r"\[imu\]\.mount", 1),
+    (r"S5-F1", 1),
+    (r"antenna_offset_m", 1),
+]
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
