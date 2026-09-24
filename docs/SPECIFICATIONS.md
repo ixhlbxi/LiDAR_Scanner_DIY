@@ -79,7 +79,24 @@ the real defaults and inline comments.
 | `[watchdog]` | Heartbeat/timeout for the systemd watchdog integration. |
 | `[calibration]` | Optional extrinsic calibration — lidar/IMU/GNSS lever arms, hard-iron mag offset, antenna offset (§5.4). |
 
-**Upgrade note:** a config.toml written for the pre-v0.11 schema may still carry keys the code no longer reads or accepts: `[power]` (no battery/ADC monitoring exists in this codebase), `[gnss].rtcm_profile` and `[gnss].survey_in_duration_sec`/`survey_in_accuracy_m` (RTCM-profile selection and base survey-in do not apply to an NTRIP client — DEC-031 makes the rover a client, never a base), `[imu].fusion_output_hz` (Madgwick now runs at the IMU's own `sample_rate_hz`; there is no separate output-rate knob), and `[logging].format` (JSONL is unconditionally the only format `SessionLogger` writes — there is no CSV path). Loading a config that still has any of these fails outright: `config.py`'s unknown-key check rejects them rather than silently ignoring them.
+**Upgrade note:** this applies to BOTH `/etc/rover/config.toml` and
+`/etc/rover/telemetry-only.toml` — `deploy/install.sh` keeps an existing copy
+of either file untouched on every re-run, so a pre-v0.11 `telemetry-only.toml`
+is just as exposed as `config.toml`. A config written for the pre-v0.11 schema
+may still carry keys the code no longer reads or accepts: `[power]` (no
+battery/ADC monitoring exists in this codebase — an old `telemetry-only.toml`'s
+`[power] monitor_battery = false` is the common case, since that file used to
+ship with the section), `[gnss].rtcm_profile` and
+`[gnss].survey_in_duration_sec`/`survey_in_accuracy_m` (RTCM-profile selection
+and base survey-in do not apply to an NTRIP client — DEC-031 makes the rover a
+client, never a base), `[imu].fusion_output_hz` (Madgwick now runs at the
+IMU's own `sample_rate_hz`; there is no separate output-rate knob), and
+`[logging].format` (JSONL is unconditionally the only format `SessionLogger`
+writes — there is no CSV path). Loading a config that still has any of these
+fails outright: `config.py`'s unknown-key check rejects them rather than
+silently ignoring them. Fix: diff both `/etc/rover/*.toml` files against their
+`config/` counterparts, remove the retired keys/sections, then restart both
+`rover` and `rover-telemetry`.
 
 ---
 
@@ -321,7 +338,7 @@ python -m rover.main --config /tmp/rover_all_disabled.toml --duration-sec 2
 produced, run 2026-09-24):
 
 ```json
-{"session_id": "test_20260924_013735", "start_time": "2026-09-24T01:37:35.982337+00:00", "end_time": "2026-09-24T01:37:38.020656+00:00", "device_name": "test-rover", "firmware_version": "0.10.0", "config_hash": "6ca5896d434bae0d800da86d52a29054a5973f467ec16b88c9546342733c59f5", "logger_degraded": false, "dropped_records": 0, "lost_records": 0, "session": {"profile": "personal", "project_code": "", "mission_tag": "", "target_crs_epsg": 0, "units": "m"}, "geometry": {"imu_mount": "base", "antenna_offset_m": null, "sweep_deg": 360.0, "rewind_rpm": 10.0, "rest_before_sweep_sec": 2.0}}
+{"session_id": "test_20260924_035623", "start_time": "2026-09-24T03:56:23.277288+00:00", "end_time": "2026-09-24T03:56:25.305943+00:00", "device_name": "test-rover", "firmware_version": "0.11.0", "config_hash": "9a86cb805f5b50f44508aa9dd858b55ac1a9784aa3e49fed7d00afbb1982451b", "logger_degraded": false, "dropped_records": 0, "lost_records": 0, "session": {"profile": "personal", "project_code": "", "mission_tag": "", "target_crs_epsg": 0, "units": "m"}, "geometry": {"imu_mount": "base", "antenna_offset_m": null, "sweep_deg": 360.0, "rewind_rpm": 10.0, "rest_before_sweep_sec": 2.0}}
 ```
 
 | Field | Type | Description |
