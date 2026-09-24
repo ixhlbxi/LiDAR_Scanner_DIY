@@ -69,6 +69,11 @@ price point that justifies the ecosystem trade-off, MID-360S is the path.
 | Hesai XT16 | ~$1,200 | Solid mid-range, strong ROS support |
 | Ouster OS0-32 | ~$3,500 | Professional tier; familiar from RESEPI payload |
 
+The Unitree L2 (not listed above) is a higher-cost alternative to the L1; adopting
+it would retire DEC-015 through DEC-017 (the stepper mast) entirely, rather than
+just the V1 rotation assembly. Not planned work — see
+[ATTRIBUTION.md](ATTRIBUTION.md) for the licensing implication if it ever is.
+
 **Impact on existing hardware:** NEMA17 stepper + A4988 driver become vestigial once a
 multi-beam LiDAR is fitted. The mechanical frame is retained as a mount but the rotation
 assembly is removed.
@@ -428,8 +433,8 @@ most field conditions. Full IP65 enclosure is a V2.2 consideration.
 | Misc (power, cables, mount hardware) | | ~$100 |
 | **Total new hardware** | | **~$1,470 – $1,640** |
 
-V1 components retained: ZED-F9P ×2, antennas, HQ Camera, ESP32 LoRa, T-Deck, power
-hardware (may upsize 5V bank for Jetson draw).
+V1 components retained: one ZED-F9P, one antenna (D-005), HQ Camera, ESP32 LoRa,
+T-Deck, power hardware (may upsize 5V bank for Jetson draw).
 
 ---
 

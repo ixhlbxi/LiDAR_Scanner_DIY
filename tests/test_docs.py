@@ -124,6 +124,9 @@ REQUIRED["docs/ATTRIBUTION.md"] = [
 ]
 FORBIDDEN_BY_FILE["docs/ATTRIBUTION.md"] = [(r"Open3D", "not a dependency")]
 
+ENFORCED.add("docs/V2_SLAM_CONCEPT.md")
+REQUIRED["docs/V2_SLAM_CONCEPT.md"] = [(r"Unitree L2", 1)]
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
