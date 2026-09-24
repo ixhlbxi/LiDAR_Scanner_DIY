@@ -47,15 +47,18 @@ python -m tests.hardware.test_lidar
 python -m tests.hardware.test_imu
 python -m tests.hardware.test_stepper
 python -m tests.hardware.test_camera
+python -m tests.hardware.test_ntrip
 ```
 
 ## Project Status
 
-**v0.10 — Base-Station integration overhaul.**
-The v0.9.2 self-contained architecture has been lifted; the rover is being reframed
-around the production Base-Station built in `arm-drone-lidar-workflow`. Implementation
-proceeds in phases — see the approved plan and current state at
-[docs/ROADMAP.md](docs/ROADMAP.md).
+**Audit-remediation campaign (v0.11) complete.**
+The v0.10 Base-Station integration overhaul completed 2026-05-30. Five further
+remediation stages closed the 2026-09-22 super-audit's findings; the campaign is
+complete. The rover is ready for bench/field validation — start with
+[deploy/SMOKE_CHECKLIST.md](deploy/SMOKE_CHECKLIST.md). See
+[docs/ROADMAP.md](docs/ROADMAP.md) for the phased history and
+[docs/DECISIONS.md](docs/DECISIONS.md) for the full decision record.
 
 ## Documentation
 
@@ -69,6 +72,7 @@ proceeds in phases — see the approved plan and current state at
 - [Hardware](docs/HARDWARE.md) — bill of materials, GPIO/serial map, power
 - [Specifications](docs/SPECIFICATIONS.md) — sensors, accuracy targets, performance budgets
 - [Roadmap](docs/ROADMAP.md) — phased delivery plan
+- [V2 SLAM Concept](docs/V2_SLAM_CONCEPT.md) — v2 concept, not planned work
 
 ## Acknowledgements
 

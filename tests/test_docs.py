@@ -107,6 +107,16 @@ FORBIDDEN_BY_FILE["CLAUDE.md"] = [
 # line-ending checks the same way docs/CROSS_REPO_BACKLOG.md is (history/tracking file).
 LINKED_DOCS.append("docs/archive/README_v0.9.2.md")
 
+ENFORCED.add("README.md")
+REQUIRED["README.md"] = [
+    (r"V2_SLAM_CONCEPT\.md", 1),
+    (r"tests\.hardware\.test_ntrip", 1),
+    (r"SMOKE_CHECKLIST", 1),
+]
+FORBIDDEN_BY_FILE["README.md"] = [
+    (r"README_ORIGINAL", "archived as docs/archive/README_v0.9.2.md")
+]
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
