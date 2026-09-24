@@ -459,15 +459,17 @@ accuracy).
 
 ### 9.2 Mounting
 
-Everything except the Pi/electronics base rotates with the stepper through
-the sweep; the base itself does not.
+Everything rotates with the case through the sweep **except the base** —
+the stepper body and the tripod mount, which stay fixed (2026-09-23 design
+session, spec §6a). That "everything" includes the Pi, the ESP32, and the
+battery, not just the LiDAR and camera.
 
 | Component | Mount Type | Status |
 |-----------|------------|--------|
-| LiDAR + Camera | Rotating platform on stepper shaft | Rotates with the stepper |
-| IMU | `[imu].mount` config key: `base` (default, fixed to the base) or `platform` (rotates with the stepper) | Bench decision (S3-R3); physical mount 🔲 TBD |
-| GNSS Antenna | On the rotation axis (mast centerline) preferred — zero lever arm; otherwise off-axis with `[calibration].antenna_offset_m` measured (§6.3) | Decided at purchase |
-| Pi + Electronics | Base enclosure (does not rotate) | 🔲 TBD |
+| LiDAR + Camera | Rotating case on stepper shaft | Rotates with the stepper |
+| Pi + Electronics (compute, ESP32, battery) | Rotating case on stepper shaft | Rotates with the stepper; 🔲 TBD (mechanical enclosure) |
+| IMU | `[imu].mount`: `base` (default — fixed to the stepper body/tripod mount; its cable crosses the rotating joint) or `platform` (on the rotating case) | Bench decision (S3-R3); physical mount 🔲 TBD |
+| GNSS Antenna | Case-mounted on the rotation axis (mast centerline), preferred — zero lever arm and rotates with the case; otherwise fixed off-axis on the stepper body/tripod, with `[calibration].antenna_offset_m` measured (§6.3) | Decided at purchase |
 
 **Rotation:** the mast sweeps 360° forward, then rewinds at `rewind_rpm` in
 ≤45° chunks (DEC-015 amended 2026-09-23); no lidar/IMU records are logged
