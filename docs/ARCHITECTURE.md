@@ -403,8 +403,10 @@ Due to IMU orientation drift (gyro bias, magnetometer disabled near motor), indo
 | LoRa link loss | Serial write failure in `LoRaPublisher` (channel C) | Telemetry-only — channels A/B keep publishing and the scan itself is unaffected | Auto-resume once the ESP32 link comes back |
 | GNSS loss | Fix status = NONE | Switch to IMU-only orientation | Re-acquire when sky visible |
 | RTK degradation | Visible as `fix_type` / `rtk_age_s` in status — no separate degraded-accuracy flag exists | Logging continues at reduced accuracy | Wait for FIX; `rtk_age_s` shows how stale the last correction is |
-| NTRIP 401/404 rejection, `arm_group` profile | `NtripClient.fatal_error` latches on `NtripFatalError` (bad credentials or an unknown mountpoint) | Acquisition aborts; if it happens after startup, `scan_state = SCAN_ERROR` is published until the process exits | The process exits with exit code 4; `RestartPreventExitStatus=2 4` in `deploy/systemd/rover.service` stops systemd restarting into the same rejection |
-| Caster busy — evicted or rejected by another client | Non-fatal `NtripError` (e.g. the caster is already serving someone else) | `NtripClient` retries with exponential backoff, capped at 30 s | Never share a base session with the drone (§2.3, fact 16) — confirm the caster is free, one client at a time, before connecting |
+| NTRIP 401/404 rejection within the 3 s startup grace, `arm_group` profile | `NtripClient.fatal_error` latches on `NtripFatalError` (bad credentials or an unknown mountpoint) before `_NTRIP_FATAL_GRACE_SEC` elapses, right after `ntrip_client.start()` | `_FatalStartupError` is raised — acquisition aborts before any scan data is written | Process exits with exit code 4; `RestartPreventExitStatus=2 4` in `deploy/systemd/rover.service` stops systemd restarting into the same rejection |
+| NTRIP 401/404 rejection discovered mid-session (after the startup grace), `arm_group` profile | Same latch, checked on every status publish | Logged once ("NTRIP fatal mid-session"); `scan_state = SCAN_ERROR` published continuously | Session keeps logging without RTK corrections — no exit, no restart; fix credentials or the mountpoint before the next session |
+| Caster rejects the handshake (e.g. a non-200 status — busy mountpoint, 503) | Non-fatal `NtripError` raised while connecting | `NtripClient` retries every 30 s (`_BACKOFF_MAX_SEC`, applied directly — no doubling) | Never share a base session with the drone (§2.3, fact 16) — confirm the caster is free, one client at a time, before connecting |
+| Caster drops an already-connected stream (e.g. this client is evicted when another authenticates) | The socket read returns no data; no exception is raised | Treated as a normal disconnect — the retry loop's backoff resets to 1 s (`_BACKOFF_INITIAL_SEC`) on every such cycle, so each eviction reconnects after 1 s | Same as above; only a raw TCP failure (refused or timed-out connect), not a repeated eviction, grows the delay toward the 30 s cap |
 | Pi crash | Watchdog timeout | — | Auto-restart, resume from last timestamp |
 
 ### 9.2 Data Integrity
@@ -458,9 +460,9 @@ Tilt-only orientation (roll/pitch, no yaw)
     ▼
 World-oriented per-scan points (local ENU, session-relative)
     │
+    │ + this scan's GNSS ENU offset from the session origin
     │ minus the antenna lever arm (`[calibration].antenna_offset_m`, rotated
     │ with the mast and the world orientation) when configured
-    │ + this scan's GNSS ENU offset from the session origin
     ▼
 Local ENU (metres, origin = first valid GNSS fix)
     │
