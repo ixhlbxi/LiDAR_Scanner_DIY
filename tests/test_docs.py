@@ -242,6 +242,7 @@ FORBIDDEN_BY_FILE["docs/ROADMAP.md"] = [
     (r"(?i)set up git repository|start config\.py module", "2026-03 startup tasks"),
     (r"(?i)lora bandwidth insufficient for rtcm", "RTCM never travels over LoRa"),
 ]
+REQUIRED["CLAUDE.md"].append((r"v0\.11\.0", 1))
 
 
 def test_every_live_doc_is_enforced() -> None:

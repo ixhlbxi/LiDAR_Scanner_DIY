@@ -6,7 +6,7 @@
 > campaign that closed them (design: `docs/superpowers/specs/2026-09-22-audit-remediation-design.md`)
 > is v0.11. Current phase: **v1.0 field validation** — see §2. **Version:** the sole
 > source is `src/rover/__init__.py` (`pyproject.toml` reads it via `dynamic=["version"]`);
-> this doc's v0.11 label tracks the campaign, not the code's semver. Authoritative docs:
+> this doc's v0.11 label now matches the code's semver, `v0.11.0`. Authoritative docs:
 > `docs/BASE_STATION_INTEGRATION.md` (integration contract), `docs/DECISIONS.md`
 > (DEC-030–DEC-035 supersede DEC-005/DEC-006/DEC-010; DEC-015 and DEC-031 amended
 > 2026-09-23). Flag conflicts rather than papering over them.
