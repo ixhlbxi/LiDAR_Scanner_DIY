@@ -18,7 +18,7 @@ This file is the operational core. Everything else lives in `docs/`:
 | Topic | File |
 |---|---|
 | Full TOML config schema, JSONL records, metadata.json | `docs/SPECIFICATIONS.md` |
-| LoRa frame v2 (STATUS/LINK; RTCM_CHUNK retired/reserved), wire formats | `docs/BASE_STATION_INTEGRATION.md` §4 |
+| LoRa frame v2 (rover emits STATUS only; LINK defined, never sent; RTCM_CHUNK retired/reserved), wire formats | `docs/BASE_STATION_INTEGRATION.md` §4 |
 | All decisions DEC-001–DEC-035 with rationale + alternatives | `docs/DECISIONS.md` |
 | System architecture, data/telemetry flow diagrams | `docs/ARCHITECTURE.md` |
 | Wiring, power, BOM, GPIO pinout details | `docs/HARDWARE.md` |
@@ -63,7 +63,7 @@ Both rovers can run at the same site against the same `ARM_BASE` caster.
 | Planning | ✅ 35 decisions (DEC-001–DEC-035); DEC-015 and DEC-031 amended 2026-09-23 |
 | Hardware in hand | LD19, MPU-9250, A4988+NEMA17, Pi HQ Cam, Pi 4B, ESP32 LoRa |
 | Hardware NOT in hand | one ZED-F9P, one antenna (SparkFun GPS-RTK-SMA + u-blox ANN-MB-00, D-005), 3.3V regulator, batteries |
-| Codebase | ✅ every module implemented (`main`, `config`, `gnss`, `ntrip`, `telemetry`, `watchdog`, `sweep`, `lora_protocol`, `logger`, `_io`) — see `python -m pytest -q` for the current suite count |
+| Codebase | ✅ every module in `src/rover/` implemented — see `python -m pytest -q` for the current suite count |
 | Current phase | **v1.0 field validation**, gated on `deploy/SMOKE_CHECKLIST.md` and the pre-field blockers `S3-R2` (LD19 angle direction) and `S5-R2` (rest-heading noise) |
 
 ## 3. Target Platform
@@ -97,7 +97,7 @@ LiDAR_Scanner_DIY/
 │   ├── sweep.py                 # 360° forward sweep + fast-rewind planner (DEC-015 amended)
 │   ├── gnss.py                  # ZED-F9P NAV-PVT/GGA fusion driver
 │   ├── ntrip.py                 # Pi-side NTRIP client (fatal-error handling, GGA upload)
-│   ├── lora_protocol.py         # LoRa frame v2: STATUS/LINK; RTCM_CHUNK (0x10) retired/reserved
+│   ├── lora_protocol.py         # LoRa frame v2: defines STATUS/LINK; RTCM_CHUNK (0x10) retired/reserved
 │   ├── telemetry.py             # TelemetryRouter — status.json + loopback HTTP + LoRa STATUS
 │   └── watchdog.py              # sd_notify + heartbeat-timeout
 ├── firmware/esp32-rover/        # PlatformIO; modes: ntrip_client, lora_rtcm_relay (pending removal, S5-F1)
@@ -159,7 +159,7 @@ LiDAR_Scanner_DIY/
 | DEC-030 | Dual-mode profile (`personal` / `arm_group`) |
 | DEC-031 | NTRIP-primary RTK; amended 2026-09-23 — LoRa fallback retired, NTRIP is the sole RTK path (Base-Station `ARM_BASE` on `:2101`) |
 | DEC-032 | NTRIP client location: Pi or ESP32 per `[ntrip].client_location` |
-| DEC-033 | Triple-channel telemetry: `status.json` + loopback HTTP + LoRa STATUS/LINK |
+| DEC-033 | Triple-channel telemetry: `status.json` + loopback HTTP + LoRa STATUS/LINK (rover emits STATUS only) |
 | DEC-034 | Log SI/WGS84, convert CRS at export via `scripts/georef.py` |
 | DEC-035 | Deep alignment with `arm-drone-lidar-workflow` — sibling conventions, `deploy/` kit, DEC-NNN decision-log format |
 
@@ -215,8 +215,9 @@ calibration procedure is v1.1.
 
 ## 9. Out of Scope for v1.0
 
-- RTCM over LoRa (retired, DEC-031 amended) — LoRa carries STATUS/LINK telemetry only;
-  NTRIP is the sole RTK path. Firmware's `lora_rtcm_relay` mode pending removal (`S5-F1`).
+- RTCM over LoRa (retired, DEC-031 amended) — LoRa carries STATUS telemetry only; the
+  protocol still defines a LINK frame type but the rover never emits it. NTRIP is the
+  sole RTK path. Firmware's `lora_rtcm_relay` mode pending removal (`S5-F1`).
 - T-Deck firmware (Base-Station owns it)
 - Point cloud processing / 3D reconstruction (Phase 5: `scripts/georef.py`)
 - Real-time SLAM / georef (DEC-022, DEC-023)

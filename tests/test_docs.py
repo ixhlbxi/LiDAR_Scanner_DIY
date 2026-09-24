@@ -96,6 +96,10 @@ REQUIRED["CLAUDE.md"] = [
 FORBIDDEN_BY_FILE["CLAUDE.md"] = [
     (r"Phase C", "stale phase label"),
     (r"(?i)overhaul in progress", "stale"),
+    (
+        r"(?i)carries STATUS/LINK|STATUS/LINK telemetry",
+        "the rover emits STATUS only; LINK is defined but never sent",
+    ),
 ]
 
 
