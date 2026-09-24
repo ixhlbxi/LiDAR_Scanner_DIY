@@ -228,6 +228,25 @@ REQUIRED["deploy/SMOKE_CHECKLIST.md"] = [
     (r"S4-R1", 1),
 ]
 
+# --- Task 9: ROADMAP + coverage ---
+ENFORCED.add("docs/ROADMAP.md")
+REQUIRED["docs/ROADMAP.md"] = [
+    (r"v0\.11", 2),
+    (r"SMOKE_CHECKLIST", 1),
+    (r"dae5776", 1),
+    (r"167f4a2", 1),
+    (r"S5-R3", 1),
+    (r"NC-1", 1),
+]
+FORBIDDEN_BY_FILE["docs/ROADMAP.md"] = [
+    (r"(?i)set up git repository|start config\.py module", "2026-03 startup tasks"),
+    (r"(?i)lora bandwidth insufficient for rtcm", "RTCM never travels over LoRa"),
+]
+
+
+def test_every_live_doc_is_enforced() -> None:
+    assert set(LIVE_DOCS) == ENFORCED, set(LIVE_DOCS) ^ ENFORCED
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")

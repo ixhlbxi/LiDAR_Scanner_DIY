@@ -1,7 +1,7 @@
 # Roadmap & Next Steps
 
-**Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
-**Last Updated:** 2026-05-30
+**Document Status:** v0.11 — audit remediation complete (2026-09-23)
+**Last Updated:** 2026-09-23
 
 ---
 
@@ -16,9 +16,9 @@ v1.0 is complete when the following capabilities are demonstrated:
 | **RTK-tagged LiDAR scans** | Point cloud with cm-level GNSS position per scan |
 | **Local data logging** | JSONL files with all sensor data + images |
 | **IMU orientation** | Madgwick fusion providing stable orientation |
-| **NTRIP RTCM delivery (DEC-031)** | Corrections flowing from arm-drone-lidar-workflow Base-Station's `ARM_BASE` caster to rover F9P |
-| **LoRa RTCM fallback (DEC-031)** | Off-network operation supported via Base-Station Heltec → rover ESP32 → F9P UART2 |
-| **Triple-channel telemetry (DEC-033)** | Status visible via `status.json` (Base-Station-compatible), HTTP, and LoRa STATUS/LINK |
+| **NTRIP RTCM delivery (DEC-031)** | Corrections flowing from arm-drone-lidar-workflow Base-Station's `ARM_BASE` caster to rover F9P — the sole RTK path (DEC-031 amended 2026-09-23) |
+| **LoRa status telemetry (DEC-031 amended)** | STATUS frames only, every 10 s; RTCM never travels over LoRa |
+| **Triple-channel telemetry (DEC-033)** | Status visible via `status.json` (Base-Station-compatible), HTTP, and LoRa STATUS (LINK is defined but never sent) |
 | **Post-processed point cloud** | PLY output (always) + LAS in session CRS for ARM Group profile (DEC-034) |
 | **ARM Group profile output** | LAS in NAD83(2011) State Plane / US Survey Foot, drops into project `01_Raw/LiDAR/Rover/` |
 | **4-hour runtime** | Full scan session without battery swap |
@@ -59,7 +59,7 @@ has been replaced. The Base-Station now exists as a separate, production-grade
 project (`arm-drone-lidar-workflow`); this rover plugs into it. Current phases
 reflect that integration model.
 
-### v0.10 Deep-Alignment Overhaul (in progress, 2026-05-30)
+### v0.10 Deep-Alignment Overhaul (complete, 2026-05-30)
 
 Single coordinated pass to make this rover feel like a sibling of
 `arm-drone-lidar-workflow` rather than a tangential project, and to finish the
@@ -71,11 +71,28 @@ unimplemented orchestrator + watchdog that were stubs after the original
 | **A** | Operational completion — `main.py` orchestrator + `watchdog.py` heartbeat, with `tests/test_main.py` and `tests/test_watchdog.py` | ✅ shipped (`8bede00`) |
 | **B** | Convention mirroring — `STATUS_SCHEMA_VERSION` constant, `ZONE_EPSG` dict, GGA cross-ref, `_io.atomic_write_json` extraction | ✅ shipped (`5a575f4`) |
 | **C** | Deployment infrastructure — `deploy/systemd/`, `deploy/udev/`, `deploy/install.sh`, sd_notify, `/etc/rover/secret` convention | ✅ shipped (`f2792da`) |
-| **D** | Doc refresh — DECISIONS.md rename + restructure, README/CLAUDE.md positioning, stale-doc cleanup, CROSS_REPO_BACKLOG.md | 🔄 in flight |
-| **E** | LoRa frame v2 callout in BASE_STATION_INTEGRATION.md flagging the sibling Heltec firmware is still v1 | ⏳ pending |
+| **D** | Doc refresh — DECISIONS.md rename + restructure, README/CLAUDE.md positioning, stale-doc cleanup, CROSS_REPO_BACKLOG.md | ✅ shipped (`2c133ca`) |
+| **E** | LoRa frame v2 callout in BASE_STATION_INTEGRATION.md flagging the sibling Heltec firmware is still v1 | ✅ shipped (`6ab5a2a`) |
 
 See [DEC-035](DECISIONS.md#dec-035-deep-alignment-with-arm-drone-lidar-workflow-v010-overhaul)
 for the decision record.
+
+### v0.11 — Audit Remediation (2026-09-22/23)
+
+A 2026-09-22 super-audit (`docs/AUDIT_super_20260922_1810.md`) found 86
+findings across code and docs. Six stages closed them, each merged `--no-ff`:
+
+| Stage | Scope | Merge |
+|---|---|---|
+| **1** | Hygiene and identity (T1-036, T1-054, T1-055, T1-056, T3-003, D-008) | `d0cf54b` |
+| **2** | First-boot blockers (T1-001..003, T1-005, T1-006, T1-011, T1-027, T1-029, T1-031, T1-032, T2-001..004, D-016) | `aac5b84` |
+| **3** | Data pipeline (T1-007..010, T1-012..017, T1-039, T1-043, T1-044, T1-050, T1-052; mag_offset half of T1-041) | `7ef5b1e` |
+| **4** | Comms and config | `167f4a2` |
+| **5** | Scan geometry and field readiness | `dae5776` |
+| **6** | Docs refresh — this document, CLAUDE.md, DECISIONS.md, ARCHITECTURE.md, SPECIFICATIONS.md, BASE_STATION_INTEGRATION.md, HARDWARE.md, SMOKE_CHECKLIST.md, and the `tests/test_docs.py` guard | stage 6 merge |
+
+DEC-015 and DEC-031 carry the amendments this campaign closed. `src/rover/__init__.py`
+moves to `0.11.0` at the stage 6 merge.
 
 ### v1.0 Field Validation (next)
 
@@ -84,17 +101,19 @@ scan session, against the live Base-Station `ARM_BASE` caster.
 
 | Block | Tasks |
 |---|---|
-| Hardware acquisition | Order 2× ZED-F9P + antennas + 3.3V regulator + batteries (see [HARDWARE.md §1.1](HARDWARE.md#11-acquisition-status)) |
+| Hardware acquisition | Order 1× ZED-F9P + ANN-MB-00 antenna + 3.3V regulator + batteries (see [HARDWARE.md §1.1](HARDWARE.md#11-acquisition-status)) |
 | Wiring + bench rig | Assemble per HARDWARE.md pinout; verify each sensor with `tests/hardware/test_*` diagnostic scripts |
 | Integrated bench scan | `python -m rover.main` end-to-end with all sensors + NTRIP + Base-Station status.json reachable |
-| Field shakedown | Outdoor RTK FIX achieved within ~60 s; runtime ≥4 h; LoRa fallback verified |
+| Field shakedown | Outdoor RTK FIX achieved within ~60 s; runtime ≥4 h; NTRIP connectivity to `ARM_BASE` verified in the field |
 | Accuracy validation | Repeatability (<5 cm) and control-point comparison if accessible |
 | Release | Tag `v1.0`; close out v1.1 backlog |
 
-Cross-repo dependency: full LoRa-fallback validation needs sibling-side Heltec
-v2 firmware + base LoRa-RTCM transmitter (tracked in
-[CROSS_REPO_BACKLOG.md](CROSS_REPO_BACKLOG.md)). Until that lands, NTRIP-only
-field validation proceeds independently.
+Cross-repo dependency: full triple-channel telemetry validation needs
+sibling-side Heltec v2 firmware to recognize the rover's STATUS frames
+(tracked in [CROSS_REPO_BACKLOG.md](CROSS_REPO_BACKLOG.md), CR-001/CR-003).
+RTCM never travels over LoRa (DEC-031 amended 2026-09-23) — NTRIP against the
+live `ARM_BASE` caster is the sole RTK path, and field validation proceeds on
+it independently of that sibling work.
 
 ### v1.1 Calibration (after v1.0)
 
@@ -127,12 +146,14 @@ These items require decisions during implementation:
 
 ### 3.2 Software TBDs
 
+Two items formerly listed here are decided and closed: the step interval is
+`1.575°` (`config/default.toml`), and log rotation is size-based
+(`rotate_size_mb`, `src/rover/config.py`).
+
 | Item | Options | Decision Point |
 |------|---------|----------------|
-| Exact step interval | 1° vs 1.5° vs 2° | After scan density evaluation |
 | IMU sample rate | 200 Hz vs 400 Hz | After fusion performance testing |
 | Camera capture cadence | Every step vs every 2nd step | After storage evaluation |
-| Log rotation strategy | Size-based vs time-based | During logging implementation |
 
 ### 3.3 Mechanical TBDs
 
@@ -150,12 +171,15 @@ These items require decisions during implementation:
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| LoRa bandwidth insufficient for RTCM | Medium | High | Test early; use low-BW profile |
 | IMU drift exceeds tolerance | Medium | Medium | Limit indoor scan duration |
 | Stepper vibration affects IMU | Medium | Medium | Damping mounts; disable mag during rotation |
 | F9P convergence slow | Low | Medium | Ensure good antenna placement; patience |
 | Pi thermal throttling | Low | Medium | Ensure ventilation; monitor temps |
 | SD card corruption | Low | High | Use quality card; frequent flush; USB SSD option |
+
+*(The RTCM-over-a-radio-link bandwidth risk that used to sit here is removed:
+DEC-031 was amended 2026-09-23 to retire that path outright, so there is no
+longer a bandwidth budget to test — NTRIP is the only RTK path.)*
 
 ### 4.2 Schedule Risks
 
@@ -184,7 +208,9 @@ These items require decisions during implementation:
 **Features:**
 - Extrinsic calibration procedure → ±2-3 cm accuracy
 - Closed-loop motor control (encoder or limit switch)
-- Remote command/control via T-Deck
+- Remote monitoring via the Base-Station's T-Deck (owned by the sibling
+  `arm-drone-lidar-workflow` repo, DEC-033) — this repo carries no T-Deck
+  firmware of its own
 - OTA firmware updates for ESP32
 - ICP scan registration in post-processing
 - Configuration validation and error reporting
@@ -213,18 +239,30 @@ These items require decisions during implementation:
 
 ---
 
-## 6. Documentation Backlog
+## 6. Remaining Work by Version
 
-Documents to create during implementation:
+The Phase 1–7 documentation backlog this section used to carry belonged to
+the waterfall plan §2 already says was replaced. Remaining work now maps to
+the two horizons ahead of it:
 
-| Document | Phase | Priority |
-|----------|-------|----------|
-| `WIRING_AND_PINS.md` | Phase 1 | High |
-| `SETUP_GUIDE.md` | Phase 3 | High |
-| `OPERATION_MANUAL.md` | Phase 6 | High |
-| `TROUBLESHOOTING.md` | Phase 6 | Medium |
-| `CALIBRATION.md` | v1.1 | Medium |
-| `API_REFERENCE.md` | v1.1 | Low |
+**v1.0 — Field Validation**
+- Run `deploy/SMOKE_CHECKLIST.md` on the Pi before every session.
+- S3-R2: bench-check the LD19 mount orientation against LDRobot's angle
+  convention before trusting the side-mount scan geometry.
+- S5-R2: bench-measure rest-heading yaw noise; flag or downgrade capped
+  `heading_settled` sweeps in `export.json` if noise exceeds tolerance.
+- First field session against the live Base-Station `ARM_BASE` caster.
+
+**v1.1 — Refinement**
+- Extrinsic calibration procedure (`T_lidar_imu`, `T_body_gnss`).
+- S5-R3: add a home switch or index mark — today a crash or power loss
+  leaves the mast out of position and needs hand-homing before the next
+  session.
+- S5-F1: retire the ESP32-rover's `lora_rtcm_relay` firmware env and the
+  retired RTCM_CHUNK (0x10) receive handler.
+- NC-1: sibling Base-Station multi-client NTRIP caster, so the drone and
+  this rover could one day share a base session (today: never at the same
+  time, CR-005).
 
 ---
 
@@ -234,44 +272,42 @@ Documents to create during implementation:
 
 | Item | Est. Cost | Priority |
 |------|-----------|----------|
-| ZED-F9P × 2 | $400-500 | Critical |
-| Dual-band antennas × 2 | $100-200 | Critical |
+| ZED-F9P × 1 (SparkFun GPS-RTK-SMA) | $200-250 | Critical |
+| ANN-MB-00 antenna × 1 | $50-100 | Critical |
 | 3.3V regulator | $10-20 | High |
 | USB-C PD power bank | $50-80 | High |
 | 12V battery + charger | $50-80 | High |
 | Cables, connectors, misc | $50-100 | High |
 | Enclosure materials | $30-50 | Medium |
-| **Total** | **$700-1000** | |
+| **Total** | **$440-680** | |
 
-### 7.2 Time Estimate
+### 7.2 Remaining Effort
 
-| Phase | Duration | Cumulative |
-|-------|----------|------------|
-| Phase 1: Hardware Integration | 2-4 weeks | 2-4 weeks |
-| Phase 2: Base Station | 2-4 weeks | 4-8 weeks |
-| Phase 3: Rover Software | 4-6 weeks | 8-14 weeks |
-| Phase 4: Monitoring Console | 1-2 weeks | 9-16 weeks |
-| Phase 5: Post-Processing | 2-3 weeks | 11-19 weeks |
-| Phase 6: Field Testing | 2-4 weeks | 13-23 weeks |
-| Phase 7: Release | 1 week | 14-24 weeks |
+The Phase 1–7 waterfall estimate this section used to carry predates the
+Base-Station integration model in §2 and no longer describes real scope.
+Remaining effort maps to the same two horizons as §6:
 
-**Estimated v1.0 completion:** 3-6 months (depending on pace and issues)
+| Horizon | Remaining Work | Backlog / Doc |
+|---|---|---|
+| v1.0 — Field Validation | Run `deploy/SMOKE_CHECKLIST.md` on the Pi | — |
+| v1.0 | Bench-check LD19 mount orientation | S3-R2 |
+| v1.0 | Bench-measure rest-heading yaw noise | S5-R2 |
+| v1.0 | First field session against the live `ARM_BASE` caster | — |
+| v1.1 — Refinement | Extrinsic calibration procedure | — |
+| v1.1 | Home switch / index mark for the mast | S5-R3 |
+| v1.1 | Retire `lora_rtcm_relay` firmware mode | S5-F1 |
+| v1.1 | Sibling multi-client NTRIP caster | NC-1 |
+
+**Estimated v1.0 completion:** gated on the smoke checklist and one field
+session, not a fixed duration.
 
 ---
 
 ## 8. Immediate Next Actions
 
-**This Week:**
-1. [ ] Order ZED-F9P modules and antennas
-2. [ ] Order 3.3V regulator and power components
-3. [ ] Create initial wiring diagram draft
-4. [ ] Set up Git repository for code
-
-**Next Week:**
-1. [ ] Begin hardware integration (LD19 first)
-2. [ ] Test IMU I2C communication
-3. [ ] Verify stepper motor operation
-4. [ ] Start `config.py` module
+1. [ ] Run `deploy/SMOKE_CHECKLIST.md` on the Pi.
+2. [ ] Run the first field session against the live Base-Station `ARM_BASE`
+   caster.
 
 ---
 
@@ -279,6 +315,8 @@ Documents to create during implementation:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| v0.11 | 2026-09-23 | Post-audit remediation campaign (6 stages) closes 86 super-audit findings; DEC-015 and DEC-031 amended; `src/rover/__init__.py` bumped to 0.11.0 |
+| v0.10 | 2026-05-30 | Deep-alignment overhaul with the `arm-drone-lidar-workflow` Base-Station (DEC-035); stages A–E |
 | v0.9.2 | 2026-02-22 | Audit update: fix upstream repo URL, add DEC-029 (GPIO library), note upstream changes |
 | v0.9.1 | 2025-12-26 | Architecture freeze; complete gap analysis |
 | v0.9.0 | 2025-12-26 | Initial project documentation |
