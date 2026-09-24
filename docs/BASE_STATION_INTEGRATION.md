@@ -346,7 +346,7 @@ pending a sibling docs PR.
 | NTRIP caster unreachable | TCP connect timeout (`_CONNECT_TIMEOUT_SEC`, 5 s) raises `OSError`/`TimeoutError` | Logged via Python logging (not a JSONL event); reconnect backoff doubles toward the 30 s cap; continues with degraded GNSS — there is no LoRa fallback (§2.2 retired) |
 | NTRIP auth/mountpoint rejection within the 3 s startup grace, `arm_group` profile | `401`/`404` before `_NTRIP_FATAL_GRACE_SEC` elapses | Refuses to start — process exits **4**; `personal` profile warns and continues instead |
 | Same rejection found mid-session, `arm_group` profile | Same latch, checked on every status publish | Logged once ("NTRIP fatal mid-session"); `scan_state = SCAN_ERROR` published continuously; session keeps logging without RTK — no exit |
-| Caster rejects the handshake (busy mountpoint, 503, or an early-closed handshake) | Non-fatal `NtripError` | Retries every 30 s flat — no backoff growth |
+| A third-party caster's non-200 response (e.g. 503) or an early-closed handshake before authentication completes | Non-fatal `NtripError` | Retries every 30 s flat — no backoff growth. The ARM caster never rejects a second client this way — it evicts the existing one instead (row below); this row applies only to a third-party caster |
 | Caster evicts this client — another authenticates (§2.3) | Clean stream close, or a TCP reset (`OSError`) | Clean close resets reconnect backoff to 1 s; a reset doubles the current backoff toward the 30 s cap |
 | `status.json` write fails | `OSError` on rename | Log warning at 1/min cadence; other publishers unaffected |
 | Conflicting CRS at export | `metadata.json.session.target_crs_epsg = 0` in `arm_group` profile | `scripts/georef.py` exits non-zero and demands `--crs` |
