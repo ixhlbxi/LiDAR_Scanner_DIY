@@ -177,7 +177,7 @@ These need the owner and a bench target before any session is georeferenced; non
 
 | ID | Where | What | Decision needed |
 |---|---|---|---|
-| S4-R1 | `deploy/install.sh`, `src/rover/config.py` | `install.sh` keeps an existing `/etc/rover/config.toml`. One installed from pre-stage-4 defaults still has `[power]`, `imu.fusion_output_hz`, `survey_in_*`, `rtcm_profile`, `logging.format` (now rejected, exit 2, and with RestartPreventExitStatus the unit stays down) and `status_schema_version = 1` (labels v2 payloads as v1). No rover is deployed yet, so nothing is affected today | Have `install.sh` flag retired keys, or have `load_config` warn instead of raise for this set; stage 5 docs carry the upgrade note either way Stage 5 adds one more: `[lora] role = "rtcm_rx+status_tx"` is now rejected (exit 2). |
+| S4-R1 | `deploy/install.sh`, `src/rover/config.py` | [CLOSED 2026-09-24 2310f41] Upgrade note for both /etc/rover/*.toml in deploy/SMOKE_CHECKLIST.md and docs/SPECIFICATIONS.md; one gap remains as S6-R2. `install.sh` keeps an existing `/etc/rover/config.toml`. One installed from pre-stage-4 defaults still has `[power]`, `imu.fusion_output_hz`, `survey_in_*`, `rtcm_profile`, `logging.format` (now rejected, exit 2, and with RestartPreventExitStatus the unit stays down) and `status_schema_version = 1` (labels v2 payloads as v1). No rover is deployed yet, so nothing is affected today | Have `install.sh` flag retired keys, or have `load_config` warn instead of raise for this set; stage 5 docs carry the upgrade note either way Stage 5 adds one more: `[lora] role = "rtcm_rx+status_tx"` is now rejected (exit 2). |
 
 ### Stage 5 residuals (from the stage 5 whole-branch review, merged dae5776)
 
@@ -185,7 +185,14 @@ These need the owner and a bench target before any session is georeferenced; non
 |---|---|---|---|
 | S5-R1 | `src/rover/main.py` `_wait_for_heading_settle` | No test pins the ±180° yaw wrap (code verified correct); the first-rest settle can overrun `--duration-sec` by up to 60 s on bench runs | One wrap test; optionally bound the settle by the remaining duration |
 | S5-R2 | `scripts/georef.py`, rover first rest | georef ignores `sweep_start` `heading_settled`, so a sweep 0 whose settle hit the 60 s cap is still labelled "true"; real magnetometer noise may exceed the 0.5°/1 s tolerance and make every session pay the cap | Bench-measure yaw noise at rest; then downgrade capped sweeps or list them in export.json |
-| S5-R3 | mast mechanics (DEC-015) | No home switch: a crash or power loss mid-sweep leaves the mast out of position, and the next session calls it step 0 | Home by hand before each session (stage 6: `deploy/SMOKE_CHECKLIST.md`); a limit switch or index mark is the v1.1 fix |
+| S5-R3 | mast mechanics (DEC-015) | Homing step in deploy/SMOKE_CHECKLIST.md (2310f41); home switch remains v1.1. No home switch: a crash or power loss mid-sweep leaves the mast out of position, and the next session calls it step 0 | Home by hand before each session (stage 6: `deploy/SMOKE_CHECKLIST.md`); a limit switch or index mark is the v1.1 fix |
+
+### Stage 6 residuals (from the stage 6 whole-branch review, merged 2310f41)
+
+| ID | Where | What | Decision needed |
+|---|---|---|---|
+| S6-R1 | `src/rover/watchdog.py:117`, `deploy/systemd/rover.service:39` | A heartbeat timeout calls `os._exit(2)`, but stage 4 added exit 2 (config error) to `RestartPreventExitStatus=2 4`, so a hung rover is **not** restarted; `watchdog.py` docstrings and `config/default.toml:105` still say it restarts. `rover-telemetry.service` has no such line and does restart. | Give the watchdog its own exit code (not 2 or 4) and a test pinning it against the unit file; fix the stale comments |
+| S6-R2 | `deploy/SMOKE_CHECKLIST.md` upgrade item, `docs/SPECIFICATIONS.md` upgrade note, `tests/test_docs.py` | A Pi installed from `aa30447`/`e323f84` (2026-09-22) has `[stepper].step_interval_deg = 1.5`, now rejected (must be a multiple of 0.1125°; default 1.575) — the upgrade notes omit it. Guard looseness: paraphrases like "STATUS and LINK frames" escape; "never" is an allow-word; BASE_STATION_INTEGRATION is exempt from the RTCM-over-LoRa rule (anchor-locked heading). | Add the one clause to both notes; tighten the guard when next touched |
 
 ## How to use this file
 
