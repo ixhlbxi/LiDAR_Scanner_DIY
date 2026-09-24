@@ -30,3 +30,7 @@ def test_ntrip_user_agent_carries_package_version() -> None:
 def test_logger_has_no_hardcoded_version_literal() -> None:
     src = (REPO / "src" / "rover" / "logger.py").read_text(encoding="utf-8")
     assert '"firmware_version": "' not in src, "logger.py must import __version__"
+
+
+def test_version_is_0_11_0() -> None:
+    assert rover.__version__ == "0.11.0"

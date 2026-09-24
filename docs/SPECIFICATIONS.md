@@ -1,7 +1,7 @@
 # Technical Specifications
 
-**Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
-**Last Updated:** 2026-05-30
+**Document Status:** v0.11 — reconciled with code (2026-09-23, stage 6 docs refresh)
+**Last Updated:** 2026-09-23
 
 Rover-internal specifications. Cross-repo / on-wire contracts live in
 [BASE_STATION_INTEGRATION.md](BASE_STATION_INTEGRATION.md); this file is
@@ -17,12 +17,18 @@ is **retired**. The current LoRa frame v2 envelope — shared with the
 `arm-drone-lidar-workflow` Heltec/T-Deck firmware — lives in:
 
   * [BASE_STATION_INTEGRATION.md §4](BASE_STATION_INTEGRATION.md#4-lora-frame-v2)
-    — authoritative wire format, packet types (`STATUS`, `LINK`, `RTCM_CHUNK`,
-    `DISPLAY`, `DEBUG_TEXT`), CRC16-CCITT spec, radio parameters.
+    — authoritative wire format, packet types, CRC16-CCITT spec, radio parameters.
+
+The v2 envelope defines five packet types (`STATUS`, `LINK`, `RTCM_CHUNK` — retired and reserved, see below —, `DISPLAY`, `DEBUG_TEXT`), but this rover only ever transmits `STATUS` (`0x01`):
+`LINK` (`0x02`) is fully implemented in the shared codec, but the Pi-side
+publisher that would send it (`LoRaPublisher.publish_link()`) was removed in
+telemetry schema v2 (S2-R2), and `RTCM_CHUNK` (`0x10`) is retired and reserved
+— no RTCM travels over LoRa (DEC-031 amended 2026-09-23; §7.3 below has the
+STATUS-only airtime budget).
 
 See also [`src/rover/lora_protocol.py`](../src/rover/lora_protocol.py) for the
 codec implementation and [`docs/CROSS_REPO_BACKLOG.md`](CROSS_REPO_BACKLOG.md)
-for the sibling-side Heltec-v2 firmware work that's still pending.
+for the sibling-side firmware work still pending (CR-001, CR-003).
 
 ---
 
@@ -31,196 +37,148 @@ for the sibling-side Heltec-v2 firmware work that's still pending.
 ### 2.1 File Location
 
 ```
-/home/pi/rover/config.toml
+/etc/rover/config.toml
 ```
 
-### 2.2 Complete Configuration Schema
+Installed by `sudo deploy/install.sh` from `config/default.toml` — the first
+run only; an existing file is never overwritten — and referenced directly by
+`deploy/systemd/rover.service`'s `ExecStart=`. A second config, with
+stepper/lidar/camera/imu all disabled, ships for bench tests:
 
-```toml
-# RTK LiDAR Rover Configuration
-# Version: 1.0
-
-[general]
-device_name = "rover-01"          # Device identifier
-log_level = "INFO"                # DEBUG, INFO, WARNING, ERROR
-
-[lidar]
-enabled = true
-port = "/dev/ttyUSB0"             # Serial port (USB-serial adapter)
-baud = 230400                     # LD19 default baud rate
-scan_rate_hz = 10                 # Target scan rate (5-10)
-
-[stepper]
-enabled = true
-steps_per_rev = 3200              # With 1/16 microstepping
-rpm = 1.0                         # Rotation speed
-step_interval_deg = 1.5           # Degrees per step
-direction_pin = 17                # BCM GPIO
-step_pin = 27                     # BCM GPIO
-enable_pin = 22                   # BCM GPIO (active low)
-
-[imu]
-enabled = true
-bus = 1                           # I2C bus number
-address = 0x68                    # MPU-9250 address (or 0x69)
-sample_rate_hz = 200              # IMU polling rate
-fusion_output_hz = 100            # Madgwick output rate
-use_magnetometer = true           # Enable mag (disable during motor)
-fusion_beta = 0.1                 # Madgwick filter gain
-
-[gnss]
-enabled = true
-port = "/dev/ttyACM0"             # ZED-F9P USB port
-baud = 115200                     # Default F9P baud
-rtcm_profile = "robust"           # "robust" or "low_bandwidth"
-survey_in_duration_sec = 300      # Base station survey-in time
-survey_in_accuracy_m = 0.02       # Target accuracy (2 cm)
-
-[lora]
-enabled = true
-port = "/dev/ttyUSB1"             # ESP32 serial port
-baud = 115200
-spreading_factor = 9              # 7-12
-bandwidth_khz = 125               # 125, 250, or 500
-coding_rate = "4/5"               # "4/5", "4/6", "4/7", "4/8"
-telemetry_interval_sec = 1.0      # Status packet rate
-
-[camera]
-enabled = true
-resolution = [1920, 1080]         # Width × Height
-capture_cadence = 1               # Capture every N steps (1 = every step)
-jpeg_quality = 85                 # JPEG compression (1-100)
-output_folder = "images"          # Relative to session folder
-
-[logging]
-output_dir = "/home/pi/rover/data"
-session_prefix = "scan"           # Session folder prefix
-format = "jsonl"                  # "jsonl" or "csv"
-flush_interval_sec = 5.0          # Force flush interval
-rotate_size_mb = 100              # Rotate log at this size (0 = no rotate)
-save_images = true                # Save camera images
-
-[watchdog]
-enabled = true
-timeout_sec = 30                  # Restart if no heartbeat
-heartbeat_interval_sec = 5        # Internal heartbeat rate
-
-[power]
-monitor_battery = true
-battery_adc_channel = 0           # ADC channel for voltage divider
-low_battery_mv = 10500            # Warning threshold
-critical_battery_mv = 10000       # Shutdown threshold
+```
+/etc/rover/telemetry-only.toml
 ```
 
-### 2.3 RTCM Profiles
+used by `rover-telemetry.service` (`Conflicts=rover.service` — the two units
+never run together; both own `RuntimeDirectory=rover` and the same F9P serial
+port).
 
-**Profile: "robust"**
-- Messages: 1005, 1077, 1087, 1097, 1127, 1230
-- Constellations: GPS, GLONASS, Galileo, BeiDou
-- Bandwidth: ~800-1000 bytes/sec
+### 2.2 Configuration Schema
 
-**Profile: "low_bandwidth"**
-- Messages: 1005, 1077, 1087, 1230
-- Constellations: GPS, GLONASS
-- Bandwidth: ~500-600 bytes/sec
+`config/default.toml` is the authoritative, commented schema — every key, its
+default, and its valid range live there, validated by `src/rover/config.py`'s
+`_validate()`. Loading a TOML file with an unknown section or key is a
+load-time `ValueError` (with a "did you mean ...?" suggestion when one is
+close). The table below is a map, not a copy — read `config/default.toml` for
+the real defaults and inline comments.
+
+| Section | Purpose |
+|---|---|
+| `[general]` | Device name and log verbosity. |
+| `[session]` | Per-session mode (`personal`\|`arm_group`), project/mission tags, target CRS and output units (DEC-030). |
+| `[lidar]` | LD19 serial port, baud, scan rate. |
+| `[stepper]` | NEMA17/A4988 pins, microstepping, and sweep geometry — `sweep_deg`/`rewind_rpm`/`rest_before_sweep_sec` (DEC-015 amended 2026-09-23). |
+| `[imu]` | MPU-9250 bus/address/sample rate, magnetometer enable, Madgwick `fusion_beta`, and IMU `mount` location (S3-R3). |
+| `[gnss]` | ZED-F9P serial port and baud. |
+| `[ntrip]` | NTRIP-over-IP RTK client — caster host/port/mountpoint/credentials, `client_location` (`pi`\|`esp32`) (DEC-031, DEC-032). |
+| `[lora]` | ESP32 LoRa serial port; radio parameters are documentation-only and must match `firmware/esp32-rover/platformio.ini`'s build flags; `telemetry_interval_sec` and `role` (`status_tx_only`\|`disabled`) govern the Pi-side STATUS cadence (DEC-031 amended 2026-09-23). |
+| `[base_station_integration]` | Channel A — `status.json` path, schema-version override, publish interval (DEC-033). |
+| `[telemetry]` | Channel B — loopback HTTP status endpoint bind/port (DEC-033). |
+| `[camera]` | HQ Camera resolution, capture cadence, JPEG quality, output subfolder. |
+| `[logging]` | Session output directory, filename prefix, flush interval, rotation size, image saving. |
+| `[watchdog]` | Heartbeat/timeout for the systemd watchdog integration. |
+| `[calibration]` | Optional extrinsic calibration — lidar/IMU/GNSS lever arms, hard-iron mag offset, antenna offset (§5.4). |
+
+**Upgrade note:** this applies to BOTH `/etc/rover/config.toml` and
+`/etc/rover/telemetry-only.toml` — `deploy/install.sh` keeps an existing copy
+of either file untouched on every re-run, so a pre-v0.11 `telemetry-only.toml`
+is just as exposed as `config.toml`. A config written for the pre-v0.11 schema
+may still carry keys the code no longer reads or accepts: `[power]` (no
+battery/ADC monitoring exists in this codebase — an old `telemetry-only.toml`'s
+`[power] monitor_battery = false` is the common case, since that file used to
+ship with the section), `[gnss].rtcm_profile` and
+`[gnss].survey_in_duration_sec`/`survey_in_accuracy_m` (RTCM-profile selection
+and base survey-in do not apply to an NTRIP client — DEC-031 makes the rover a
+client, never a base), `[imu].fusion_output_hz` (Madgwick now runs at the
+IMU's own `sample_rate_hz`; there is no separate output-rate knob), and
+`[logging].format` (JSONL is unconditionally the only format `SessionLogger`
+writes — there is no CSV path). Loading a config that still has any of these
+fails outright: `config.py`'s unknown-key check rejects them rather than
+silently ignoring them. Fix: diff both `/etc/rover/*.toml` files against their
+`config/` counterparts, remove the retired keys/sections, then restart both
+`rover` and `rover-telemetry`.
 
 ---
 
 ## 3. Firmware Boundaries
 
-### 3.1 ESP32 LoRa (Rover) — RTCM Receiver
+### 3.1 ESP32 LoRa (Rover) — STATUS-only modem, optional NTRIP client
 
-**Responsibilities:**
-- Receive LoRa packets from base station
-- Validate packet framing (sync bytes, CRC)
-- Forward RTCM data directly to ZED-F9P via UART
-- Generate LINK telemetry packets (RSSI, SNR, counters)
-- Indicate status via LEDs
+From the Pi's side, the rover ESP32's LoRa job is narrow: relay whatever
+`rover.telemetry.LoRaPublisher` pushes over USB onto LoRa. Since telemetry
+schema v2 removed `publish_link()` (S2-R2), that traffic is a single STATUS
+(`0x01`) frame every `[lora].telemetry_interval_sec` (default 10 s) — never
+RTCM, never LINK (§7.3 has the airtime budget).
 
-**Does NOT do:**
-- Parse RTCM message content
-- Filter or rate-limit RTCM by type
-- Store-and-forward or retry
-- OTA updates (v1.0)
+`firmware/esp32-rover/` (`platformio.ini`, `README.md`) ships two PlatformIO
+environments, one of which documents a design the Pi side has already retired:
 
-**Interfaces:**
-| Interface | Connection | Data |
-|-----------|------------|------|
-| LoRa | SX1262 radio | Rx: RTCM packets |
-| UART1 | ZED-F9P | Tx: Raw RTCM bytes |
-| USB/UART0 | Raspberry Pi | Tx: LINK packets; Rx: Commands (future) |
-| GPIO | LEDs | Status indication |
+| Env | Role today |
+|---|---|
+| `ntrip_client` | Joins WiFi, pulls RTCM from the NTRIP caster itself, and writes it to the F9P's UART2 directly — used when `[ntrip].client_location = "esp32"` (DEC-032). Also relays the Pi's STATUS frames onto LoRa. |
+| `lora_rtcm_relay` (`default_envs` in `platformio.ini`) | Still receives `RTCM_CHUNK` (`0x10`) over LoRa and forwards it to the F9P — a path the Pi side has already retired: `[lora].role` has offered no RTCM-receive value since stage 5, and `RTCM_CHUNK` is retired and reserved in `rover.lora_protocol`. Retiring this env and its `0x10` handler is tracked as backlog **S5-F1**; until that firmware change ships, treat this env as legacy and flash `ntrip_client` instead whenever ESP32-side NTRIP is wanted. |
 
-**LED Indicators:**
-| LED | Behavior |
-|-----|----------|
-| Power | Solid on when powered |
-| LoRa RX | Blink on packet receive |
-| RTCM Active | Solid when forwarding RTCM |
-| Error | Blink on CRC error |
-
-### 3.2 ESP32 LoRa (Base Station) — RTCM Transmitter
-
-**Responsibilities:**
-- Receive RTCM from ZED-F9P via UART
-- Frame RTCM into LoRa packets (RTCM_CHUNK)
-- Transmit over LoRa
-- Indicate status via LEDs
-
-**Does NOT do:**
-- Parse RTCM message content
-- Generate RTCM (that's F9P's job)
-- Complex scheduling
+Both envs relay STATUS (`0x01`) and LINK (`0x02`) frames the Pi pushes over
+USB "as-is," per the firmware's own README — in practice the Pi-side
+`LoRaPublisher` only ever sends STATUS, so the LINK-relay code path never
+fires from this rover's current telemetry.
 
 **Interfaces:**
+
 | Interface | Connection | Data |
-|-----------|------------|------|
-| UART1 | ZED-F9P | Rx: RTCM bytes |
-| LoRa | SX1262 radio | Tx: RTCM packets |
-| GPIO | LEDs | Status indication |
+|---|---|---|
+| LoRa | SX1262 radio (Heltec WiFi LoRa 32 V3) | Tx: STATUS frames, SF7/125 kHz/CR4-5 (§7.3) |
+| UART2 | ZED-F9P | Tx: RTCM3 bytes — both firmware envs write here; source differs (below) |
+| USB/UART0 | Raspberry Pi | Rx: STATUS frames from `rover.telemetry.LoRaPublisher` |
 
-### 3.3 T-Deck Monitoring Console
+Both firmware envs wire UART2 to the F9P and forward RTCM there —
+`F9PSerial.begin(...)` (`firmware/esp32-rover/src/main.cpp`) runs
+unconditionally at boot regardless of which env was flashed. They differ
+only in where the RTCM comes from: `lora_rtcm_relay`'s `0x10` (`RTCM_CHUNK` — retired and reserved, DEC-031 amended 2026-09-23) handler (`main.cpp:156`)
+sources it from LoRa, but no Base-Station firmware sends that type any more
+(CR-002 closed) — this path is legacy, pending removal under
+**S5-F1**. `ntrip_client`'s
+`ntrip_pump()` (`main.cpp:269`) sources it from the NTRIP caster over WiFi
+(DEC-032). **When the Pi itself runs the NTRIP client**
+(`[ntrip].client_location = "pi"`, the default), RTCM instead reaches the
+F9P over its **USB** port directly from the Pi (`GnssReceiver.write_rtcm()`,
+`src/rover/gnss.py`) — the ESP32 and its UART2 wiring carry no RTCM at all
+in that mode.
 
-**Responsibilities:**
-- Receive LoRa telemetry packets (STATUS, LINK)
-- Parse and display on screen
-- Show: Fix type, sat count, HDOP, battery, RSSI/SNR, scan state
+### 3.2 Base-Station Firmware — out of scope
 
-**Does NOT do:**
-- Transmit commands (v1.0)
-- Store logs locally
-- Display raw RTCM
+The Base-Station's own ESP32 (Heltec V3, `DISPLAY` Tx today) belongs to
+`ixhlbxi/arm-drone-lidar-workflow`, not this repo. See
+[`docs/CROSS_REPO_BACKLOG.md`](CROSS_REPO_BACKLOG.md) CR-001 (sibling
+firmware is still on LoRa frame v1 and cannot yet parse this rover's v2
+STATUS frames) and CR-002 (closed — no base-side LoRa-RTCM transmitter is
+needed, DEC-031 amended 2026-09-23).
 
-**Display Layout (Conceptual):**
-```
-┌────────────────────────────────┐
-│  RTK LiDAR Rover Monitor       │
-├────────────────────────────────┤
-│  RTK:  [FIX]     Sats: 18     │
-│  HDOP: 0.85      Batt: 11.8V  │
-├────────────────────────────────┤
-│  RSSI: -62 dBm   SNR: 9.5 dB  │
-│  Rx: 1234        Err: 2       │
-├────────────────────────────────┤
-│  Scan: ACTIVE    Step: 47/180 │
-│  Runtime: 00:12:34            │
-└────────────────────────────────┘
-```
+### 3.3 T-Deck Monitoring Console — out of scope
+
+The T-Deck handheld also belongs to `arm-drone-lidar-workflow`; this rover
+only produces the STATUS frames it would display. See
+[`docs/CROSS_REPO_BACKLOG.md`](CROSS_REPO_BACKLOG.md) CR-003 (sibling
+handheld firmware to recognize this rover's frames, pending on CR-001).
 
 ### 3.4 Raspberry Pi Software Modules
 
 | Module | Responsibility | Interface |
 |--------|----------------|-----------|
-| `main.py` | Orchestration, state machine | All modules |
-| `lidar.py` | LD19 acquisition, parsing | USB-serial |
-| `imu.py` | MPU-9250 polling, Madgwick fusion | I2C |
-| `gnss.py` | ZED-F9P parsing (NMEA/UBX) | USB |
-| `stepper.py` | Motor control, step timing | GPIO |
-| `camera.py` | HQ Camera capture | picamera2 |
-| `telemetry.py` | Status packet generation | Serial to ESP32 |
-| `logger.py` | JSONL file writing | Filesystem |
-| `config.py` | TOML parsing | Filesystem |
-| `watchdog.py` | Health monitoring, restart | System |
+| `main.py` | Orchestration, acquisition state machine, sensor init/gating, teardown | All modules |
+| `config.py` | TOML load, defaults merge, validation → frozen `RoverConfig` | Filesystem |
+| `lidar.py` | LD19 acquisition, packet parsing, columnar scan assembly | USB-serial |
+| `imu.py` | MPU-9250 polling, Madgwick fusion, magnetometer gating | I2C |
+| `gnss.py` | ZED-F9P NMEA/UBX parsing, RTCM3 injection into the F9P | USB-serial |
+| `ntrip.py` | Pi-side NTRIP client — caster connect, RTCM read, GGA upload (DEC-031, DEC-032) | TCP (NTRIP over HTTP); calls `gnss.write_rtcm` |
+| `stepper.py` | NEMA17/A4988 motor control, step timing | GPIO (`rpi-lgpio`) |
+| `sweep.py` | Sweep planner — rest/scan/rewind decision logic (DEC-015 amended) | Pure logic, no I/O |
+| `camera.py` | HQ Camera capture, cadence gating | `picamera2` |
+| `telemetry.py` | Triple-channel status routing — status.json / loopback HTTP / LoRa STATUS (DEC-033) | Filesystem, loopback HTTP, serial to ESP32 |
+| `lora_protocol.py` | LoRa frame v2 codec — encode/decode, CRC16-CCITT | Pure logic, no I/O |
+| `logger.py` | JSONL session logging, rotation, metadata.json | Filesystem |
+| `watchdog.py` | Heartbeat monitor, systemd `sd_notify` integration | systemd (`NOTIFY_SOCKET`) |
+| `_io.py` | Atomic JSON write helper shared by `logger.py` and `telemetry.py` | Filesystem |
 
 **GPIO Library Note (DEC-029):** Use `rpi-lgpio` (drop-in replacement for `RPi.GPIO`) or `gpiozero` for all GPIO operations. The legacy `RPi.GPIO` is broken on Raspberry Pi OS Bookworm 64-bit. Install via `pip install rpi-lgpio` or `sudo apt install python3-rpi-lgpio`. Set environment variable `LG_WD=/tmp` to manage lgpio temp files.
 
@@ -231,165 +189,232 @@ critical_battery_mv = 10000       # Shutdown threshold
 ### 4.1 Session Directory Structure
 
 ```
-/home/pi/rover/data/
-└── scan_20251226_143052/          # Session folder (prefix_YYYYMMDD_HHMMSS)
-    ├── config.toml                 # Copy of config at session start
-    ├── scan.jsonl                  # Main sensor log
-    ├── gnss.jsonl                  # GNSS-only log (optional)
-    ├── images/                     # Camera images
-    │   ├── img_000001.jpg
-    │   ├── img_000002.jpg
+/var/lib/rover/data/                 # [logging].output_dir default (systemd StateDirectory)
+└── scan_20260924_013735/            # <session_prefix>_YYYYMMDD_HHMMSS (UTC)
+    ├── config.toml                  # copy of the TOML file run() was given, OR
+    ├── effective_config.json        # ...a JSON dump of the effective config when run()
+    │                                 #    got no --config path (only one of these exists)
+    ├── scan.jsonl                   # lidar / imu / camera / event records
+    ├── scan_001.jsonl               # rotated segment(s) once rotate_size_mb is exceeded
+    ├── gnss.jsonl                   # gnss records ONLY (T1-053) — never in scan*.jsonl
+    ├── gnss_001.jsonl               # gnss rotates independently of scan
+    ├── images/                      # camera captures — only when [camera].enabled AND
+    │   ├── img_000000.jpg           # [logging].save_images = true
     │   └── ...
-    └── metadata.json               # Session metadata
+    ├── export/                      # written by scripts/georef.py, NOT by the rover
+    │   ├── ..._ellipsoidal.ply/.las # §4.4
+    │   ├── ..._navd88.ply/.las      # §4.4
+    │   └── export.json              # §4.4
+    └── metadata.json                # written by SessionLogger.stop(); §4.3
 ```
+
+`scripts/georef.py` reads every `scan*.jsonl` / `gnss*.jsonl` segment in
+numeric order (rotation-aware).
 
 ### 4.2 JSONL Record Types
 
-Each line in `scan.jsonl` is a JSON object with a `type` field indicating record type.
+Each line in `scan.jsonl` (or a rotated `scan_NNN.jsonl` segment) is one
+compact JSON object (`json.dumps(record, separators=(",", ":"))`) with a
+`type` field. `gnss` records are the one exception — they are written ONLY to
+`gnss.jsonl` / `gnss_NNN.jsonl`, never to `scan*.jsonl` (T1-053).
 
-#### 4.2.1 LiDAR Scan Record
+#### 4.2.1 LiDAR Scan Record (columnar)
 
 ```json
-{
-  "type": "lidar",
-  "timestamp": 1735226852.123456,
-  "step_index": 47,
-  "points": [
-    {"angle": 0.0, "distance": 3.452, "intensity": 128},
-    {"angle": 0.5, "distance": 3.461, "intensity": 131},
-    ...
-  ]
-}
+{"type":"lidar","timestamp":1735226852.123456,"step_index":47,"sweep":0,"mast_angle_deg":74.25,"lidar_ms_start":12345,"lidar_ms_end":12445,"angle":[0.0,0.801,1.602,...],"distance":[3.452,3.461,3.470,...],"intensity":[128,131,129,...]}
 ```
 
 | Field | Type | Description |
-|-------|------|-------------|
-| type | string | Record type: "lidar" |
-| timestamp | float | Unix timestamp (seconds, microsecond precision) |
-| step_index | int | Rotation step index (0 to N-1) |
-| points | array | Array of scan points |
-| points[].angle | float | Angle in degrees (0-360) |
-| points[].distance | float | Distance in meters |
-| points[].intensity | int | Return intensity (0-255) |
+|-------|------|--------------|
+| type | string | `"lidar"` |
+| timestamp | float | Unix time, captured immediately after `LidarScanner.read_scan()` returns |
+| step_index | int | Rotation-step counter; increments once per completed scan step (rest/rewind iterations do not increment it) |
+| sweep | int | `SweepPlanner.sweep_index` — which 360° sweep (0-based) this record belongs to |
+| mast_angle_deg | float | Commanded mast angle at capture time; `0.0` when there is no available stepper |
+| lidar_ms_start / lidar_ms_end | int | LD19's own onboard packet timestamp (ms) for the first/last point of this revolution; wraps at 30000 |
+| angle | float[] | Per-point angle, degrees, `[0, 360)` |
+| distance | float[] | Per-point distance, meters |
+| intensity | int[] | Per-point return intensity, `0-255` |
 
-#### 4.2.2 IMU Record
+There is no `points` list of per-point dicts — `angle`/`distance`/`intensity`
+are parallel arrays, one element per returned point.
+
+#### 4.2.2 IMU Record (batched)
 
 ```json
-{
-  "type": "imu",
-  "timestamp": 1735226852.125000,
-  "accel": [0.012, -0.008, 9.81],
-  "gyro": [0.001, -0.002, 0.0005],
-  "mag": [25.3, -12.1, 42.8],
-  "orientation": [0.707, 0.0, 0.0, 0.707]
-}
+{"type":"imu","timestamp":1735226852.125000,"t":[1735226852.100,1735226852.105],"accel":[[0.012,-0.008,9.81],[0.011,-0.009,9.80]],"gyro":[[0.001,-0.002,0.0005],[0.001,-0.002,0.0006]],"mag":[null,[25.3,-12.1,42.8]],"orientation":[[0.707,0.0,0.0,0.707],[0.706,0.0,0.0,0.708]]}
 ```
 
 | Field | Type | Description |
-|-------|------|-------------|
-| type | string | Record type: "imu" |
-| timestamp | float | Unix timestamp |
-| accel | [float, float, float] | Accelerometer [x, y, z] in m/s² |
-| gyro | [float, float, float] | Gyroscope [x, y, z] in rad/s |
-| mag | [float, float, float] | Magnetometer [x, y, z] in µT (null if disabled) |
-| orientation | [float, float, float, float] | Quaternion [w, x, y, z] from fusion |
+|-------|------|--------------|
+| type | string | `"imu"` |
+| timestamp | float | Unix time of the LAST sample in this batch |
+| t | float[] | Per-sample Unix timestamps, one `ImuDriver.drain()` call |
+| accel | [float,float,float][] | Per-sample accelerometer, m/s² |
+| gyro | [float,float,float][] | Per-sample gyroscope, rad/s |
+| mag | ([float,float,float]\|null)[] | Per-sample magnetometer, µT; `null` for a sample taken while the magnetometer was off (DEC-013: disabled during stepper motion / EMI) |
+| orientation | [float,float,float,float][] | Per-sample Madgwick quaternion, scalar-first `[w, x, y, z]` |
+
+`t`/`accel`/`gyro`/`mag`/`orientation` are parallel arrays of equal length —
+one entry per sample `drain()` returned that call; the batch size is whatever
+accumulated since the previous drain, not a fixed count (§7.1 assumes ~20
+samples/batch at the default rates).
 
 #### 4.2.3 GNSS Record
 
 ```json
-{
-  "type": "gnss",
-  "timestamp": 1735226852.000000,
-  "fix_type": 5,
-  "lat": 40.7128,
-  "lon": -74.0060,
-  "alt": 10.5,
-  "hdop": 0.85,
-  "vdop": 1.2,
-  "sat_count": 18,
-  "rtk_age": 1.2
-}
+{"type":"gnss","timestamp":1735226852.0,"fix_type":5,"lat":40.712776,"lon":-74.005974,"alt":12.345,"hdop":0.85,"vdop":1.2,"pdop":1.45,"sat_count":18,"rtk_age":1.2}
 ```
 
 | Field | Type | Description |
-|-------|------|-------------|
-| type | string | Record type: "gnss" |
-| timestamp | float | Unix timestamp (GNSS time if available) |
-| fix_type | int | 0=NONE, 1=2D, 2=3D, 3=DGPS, 4=FLOAT, 5=FIX |
-| lat | float | Latitude in decimal degrees (WGS84) |
-| lon | float | Longitude in decimal degrees (WGS84) |
-| alt | float | Altitude in meters (ellipsoidal) |
-| hdop | float | Horizontal dilution of precision |
-| vdop | float | Vertical dilution of precision |
-| sat_count | int | Number of satellites used |
-| rtk_age | float | Age of RTK corrections in seconds |
+|-------|------|--------------|
+| type | string | `"gnss"` |
+| timestamp | float | Unix timestamp at fix (GGA has no date, so this is receive-time, not GNSS time) |
+| fix_type | int | `0`=NONE `1`=2D `2`=3D `3`=DGPS `4`=RTK_FLOAT `5`=RTK_FIX (rover's own monotonic enum — the wire NMEA/NAV-PVT quality codes are remapped; see `src/rover/gnss.py`) |
+| lat / lon | float | WGS84 decimal degrees |
+| alt | float | Ellipsoidal (WGS84) meters — both the GGA path (MSL + geoid separation) and the NAV-PVT path (`height`) are normalized to this before reaching `GnssFix` |
+| hdop | float | Horizontal dilution of precision; `99.9` placeholder when unknown |
+| vdop | float | Always `99.9` — neither GGA nor NAV-PVT breaks out a vertical DOP figure |
+| pdop | float | NAV-PVT's position DOP; `99.9` when the fix source is GGA only (no NAV-PVT ever parsed) |
+| sat_count | int | Satellites used |
+| rtk_age | float | Seconds since the last applied RTCM correction; `-1` = unknown |
+
+This record type is written ONLY to `gnss.jsonl` (T1-053) — it never appears
+in `scan.jsonl`.
 
 #### 4.2.4 Camera Record
 
 ```json
-{
-  "type": "camera",
-  "timestamp": 1735226852.130000,
-  "step_index": 47,
-  "filename": "images/img_000047.jpg"
-}
+{"type":"camera","timestamp":1735226852.130000,"step_index":47,"filename":"images/img_000047.jpg"}
 ```
 
 | Field | Type | Description |
-|-------|------|-------------|
-| type | string | Record type: "camera" |
-| timestamp | float | Unix timestamp at capture |
+|-------|------|--------------|
+| type | string | `"camera"` |
+| timestamp | float | Unix time at capture |
 | step_index | int | Associated rotation step |
-| filename | string | Relative path to image file |
+| filename | string | Path to the image, relative to the session directory |
 
 #### 4.2.5 Event Record
 
 ```json
+{"type":"event","timestamp":1735226850.0,"event":"sweep_start","details":{"sweep":0,"rest_sec":2.31,"heading_settled":true}}
+```
+
+| Field | Type | Description |
+|-------|------|--------------|
+| type | string | `"event"` |
+| timestamp | float | Unix timestamp |
+| event | string | Event name — see the table below |
+| details | object | Present for five of the seven event types below; `scan_complete`/`scan_abort` are written with no `details` key at all |
+
+**Event Types** (exactly seven; `src/rover/main.py` is the sole emitter):
+
+| event | when | details |
+|---|---|---|
+| `scan_start` | once, right after `SessionLogger.start()` | `{"profile": <session.profile>}` |
+| `sweep_start` | once per sweep, right after that sweep's pre-scan rest ends | `{"sweep": int, "rest_sec": float, "heading_settled": bool\|null}` — `rest_sec` is the actual seconds rested, including sweep 0's extra heading-settle wait; `heading_settled` is `null` for every sweep except the first, and is also `null` on sweep 0 itself unless `[imu].use_magnetometer = true` AND the IMU is present and available (`sensors.imu is not None and sensors.imu.available`) — the settle wait (`_wait_for_heading_settle`) only ever runs when `planner.sweep_index == 0` and all three of those hold |
+| `sensor_disabled` | the instant a sensor's failure gate trips (5 consecutive read failures) | `{"sensor": <name>, "error": <str>}` |
+| `returned_home` | teardown, after the mast successfully rewinds to step 0 | `{"steps": int}` |
+| `return_home_failed` | teardown, if that rewind itself raises | `{"steps_from_home": int, "error": <str>}` — there is no home switch (S5-R3); home the mast by hand before the next session |
+| `scan_complete` | teardown, `run()` exit code `0` | *(no `details` key)* |
+| `scan_abort` | teardown, `run()` exit code non-zero | *(no `details` key)* |
+
+### 4.3 Session Metadata
+
+`metadata.json` is written by `SessionLogger._write_metadata()` on `stop()`.
+It is **generated from the running code**, not hand-authored — the example
+below is the literal output of an actual run, not an illustration.
+
+**Command** (all sensors and telemetry channels disabled, 2-second bench run
+— template: `tests/test_main.py::_write_all_disabled_config`, with
+`[logging].output_dir` pointed at a temp directory):
+
+```
+python -m rover.main --config /tmp/rover_all_disabled.toml --duration-sec 2
+```
+
+**Resulting `metadata.json`** (session id and timestamps kept exactly as
+produced, run 2026-09-24):
+
+```json
+{"session_id": "test_20260924_035623", "start_time": "2026-09-24T03:56:23.277288+00:00", "end_time": "2026-09-24T03:56:25.305943+00:00", "device_name": "test-rover", "firmware_version": "0.11.0", "config_hash": "9a86cb805f5b50f44508aa9dd858b55ac1a9784aa3e49fed7d00afbb1982451b", "logger_degraded": false, "dropped_records": 0, "lost_records": 0, "session": {"profile": "personal", "project_code": "", "mission_tag": "", "target_crs_epsg": 0, "units": "m"}, "geometry": {"imu_mount": "base", "antenna_offset_m": null, "sweep_deg": 360.0, "rewind_rpm": 10.0, "rest_before_sweep_sec": 2.0}}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| session_id | string | Session directory name |
+| start_time / end_time | string\|null | ISO-8601 UTC; `start_time` is `null` only if `stop()` is somehow called before `start()` recorded a start time |
+| device_name | string | `[general].device_name` |
+| firmware_version | string | `rover.__version__` — read from the running code, never hand-copied |
+| config_hash | string\|null | SHA-256 of the copied `config.toml` (or `effective_config.json` when no `--config` was given); `null` if neither file exists |
+| logger_degraded | bool | `true` once any flush has failed during the session |
+| dropped_records | int | Records discarded because the write queue was full |
+| lost_records | int | Records drained from the queue but never written, due to a failed flush |
+| session | object | `profile` / `project_code` / `mission_tag` / `target_crs_epsg` / `units`, copied from `[session]` (DEC-030, DEC-034) — `scripts/georef.py` reads this to re-export without parsing `config.toml` |
+| geometry | object | `imu_mount`, `antenna_offset_m`, `sweep_deg`, `rewind_rpm`, `rest_before_sweep_sec` — always present, sourced from `[imu]`/`[calibration]`/`[stepper]` regardless of whether the stepper subsystem itself is enabled that session |
+| ntrip_stats | object, optional | Present only when `run()`'s local `ntrip_client` variable is not `None` at teardown — i.e. `[ntrip].enabled = true` AND `[ntrip].client_location == "pi"` AND `sensors.gnss is not None` (GNSS enabled and its `GnssReceiver` constructed successfully) AND `NtripClient(...)`/`.start()` did not raise. A raise there is caught, logged, and leaves `ntrip_client = None` — the field is silently absent, not present-but-empty, in that case. Value is `asdict(NtripClient.stats)`: `connected`, `bytes_received_total`, `bytes_received_this_sec`, `last_connect_attempt_epoch`, `last_byte_epoch`, `connect_count`, `error_count`, `last_error` |
+
+### 4.4 Georeferenced Export Outputs
+
+Written by `scripts/georef.py` as a **separate, offline post-processing
+step** (DEC-022, DEC-034) — the rover process itself never writes to
+`export/`. Invocation: `python -m scripts.georef <session_dir> [--crs EPSG]
+[--units ft|m] [--out-prefix PREFIX] [--no-las]`.
+
+For a projected `target_crs_epsg` (and no `--units`/CRS mismatch), two
+point-cloud pairs are written into `<session_dir>/export/`:
+
+* `<prefix>_ellipsoidal.ply` (+ `.las` unless `--no-las` or `laspy` is
+  missing) — the raw ellipsoidal (NAD83(2011)) heights this pipeline has
+  always produced.
+* `<prefix>_navd88.ply` (+ `.las`) — those heights converted to NAVD88 via
+  the GEOID18 grid (source CRS NAD83(2011) geographic 3D `EPSG:6319` →
+  compound `EPSG:<horizontal>+6360` for a ftUS CRS, `+5703` for a metric
+  one).
+
+For local-ENU / LiDAR-relative output (`target_crs_epsg == 0`, or no GNSS fix
+to project from) or a `--units`/CRS mismatch, only a single `<prefix>.ply`
+(+ `.las`) pair is written — there is no embedded CRS to split an
+ellipsoidal/NAVD88 pair on.
+
+Every export also writes `export/export.json`:
+
+```json
 {
-  "type": "event",
-  "timestamp": 1735226850.000000,
-  "event": "scan_start",
-  "details": {"total_steps": 180}
+  "files": [{"path": "<prefix>_ellipsoidal.ply", "horizontal": "EPSG:6563", "vertical": "ellipsoidal NAD83(2011)"}],
+  "navd88_error": null,
+  "heading_reference": "true",
+  "declination_deg": -9.9,
+  "imu_mount": "base",
+  "antenna_offset_m": null
 }
 ```
 
 | Field | Type | Description |
-|-------|------|-------------|
-| type | string | Record type: "event" |
-| timestamp | float | Unix timestamp |
-| event | string | Event name |
-| details | object | Event-specific data |
+|---|---|---|
+| files | array | One entry per `.ply` written (not `.las`): `path`, `horizontal` (an `EPSG:<n>` string or `"none"`), `vertical` (a datum label) |
+| navd88_error | string\|null | Why NAVD88 was skipped (geoid grid unavailable, or a units/CRS mismatch dropped the CRS label); `null` when NAVD88 was produced or never applicable |
+| heading_reference | string | `"true"` (declination applied), `"magnetic"` (no declination available), or `"relative"` (no rest magnetometer data at all — yaw comes from the commanded mast angle) |
+| declination_deg | float\|null | WMM 2025 declination at the GNSS origin; `null` when not computed |
+| imu_mount | string | `"base"` or `"platform"`, from `metadata.json`'s `geometry` block |
+| antenna_offset_m | [float,float,float]\|null | From `metadata.json`'s `geometry` block |
 
-**Event Types:**
-- `scan_start` — Scan begun
-- `scan_complete` — Scan finished
-- `scan_pause` — Scan paused
-- `scan_resume` — Scan resumed
-- `scan_abort` — Scan aborted
-- `gnss_fix_acquired` — RTK fix achieved
-- `gnss_fix_lost` — Fix degraded
-- `low_battery` — Battery warning
-- `error` — Error condition
+**Exit codes:**
 
-### 4.3 Session Metadata
+* **exit 0** — success (with or without a NAVD88 pair).
+* **exit 1** — no points assembled (empty session — nothing to export).
+* **exit code 3** — NAVD88 unavailable (the GEOID18 grid is missing and the
+  network fetch was refused or failed), or a `--units`/CRS mismatch dropped
+  the CRS label. In both cases the ellipsoidal file(s) are still written.
 
-`metadata.json` contains session-level information:
+A missing geoid grid is installed with:
 
-```json
-{
-  "session_id": "scan_20251226_143052",
-  "start_time": "2025-12-26T14:30:52Z",
-  "end_time": "2025-12-26T14:45:30Z",
-  "device_name": "rover-01",
-  "firmware_version": "0.9.1",
-  "config_hash": "a1b2c3d4...",
-  "total_steps": 180,
-  "total_scans": 180,
-  "total_images": 180,
-  "gnss_fix_type_max": 5,
-  "notes": ""
-}
 ```
+python -m pyproj sync --file us_noaa_g2018u0.tif
+```
+
+or PROJ's own `projsync --file us_noaa_g2018u0.tif`.
 
 ---
 
@@ -418,18 +443,23 @@ Each line in `scan.jsonl` is a JSON object with a `type` field indicating record
 
 Example: `T_body_lidar` transforms points from LiDAR frame to Body frame.
 
-### 5.4 Extrinsic Calibration Parameters (TBD)
+### 5.4 Extrinsic Calibration Parameters
 
 ```toml
-# Example calibration section (to be measured)
+# Extrinsic calibration — TBD, measured during the v1.1 calibration procedure (S3-R3)
 [calibration]
-# LiDAR to IMU transform
-lidar_to_imu_translation = [0.0, 0.0, 0.05]    # [x, y, z] meters
-lidar_to_imu_rotation = [1.0, 0.0, 0.0, 0.0]   # [w, x, y, z] quaternion
-
-# IMU to GNSS antenna offset
-imu_to_gnss_translation = [0.0, 0.0, 0.30]     # [x, y, z] meters
+# lidar_to_imu_translation = [0.0, 0.0, 0.05]    # [x, y, z] meters
+# lidar_to_imu_rotation = [1.0, 0.0, 0.0, 0.0]   # [w, x, y, z] quaternion
+# imu_to_gnss_translation = [0.0, 0.0, 0.30]     # [x, y, z] meters
+mag_offset = [0.0, 0.0, 0.0]                      # hard-iron offset (x, y, z), µT, body frame —
+                                                   # required before [imu].use_magnetometer = true (DEC-013)
+antenna_offset_m = [0.0, 0.0, 0.35]               # LiDAR centre -> antenna phase centre, metres,
+                                                   # platform frame at mast 0 (S3-R3)
 ```
+
+All five keys are optional (`None` = uncalibrated); `config.py` validates
+each as `[x, y, z]` (or `[w, x, y, z]` for the rotation), rejects a stray
+`true`/`false` element, and rejects a non-finite `mag_offset` value.
 
 ---
 
@@ -447,17 +477,22 @@ imu_to_gnss_translation = [0.0, 0.0, 0.30]     # [x, y, z] meters
 
 ### 6.2 Serial Port Allocation
 
-| Port | Device | Baud | Purpose |
-|------|--------|------|---------|
-| /dev/ttyACM0 | ZED-F9P | 115200 | GNSS data (NMEA/UBX) |
-| /dev/ttyUSB0 | LD19 LiDAR | 230400 | Scan data |
-| /dev/ttyUSB1 | ESP32 LoRa | 115200 | Telemetry |
+The udev symlinks are the primary, stable ports — installed by
+`deploy/install.sh` from `deploy/udev/99-rover-*.rules`:
+
+| Symlink | Device | Baud | udev rule |
+|---|---|---|---|
+| `/dev/rover-lidar` | LD19 LiDAR | 230400 | `99-rover-lidar.rules` |
+| `/dev/rover-f9p` | ZED-F9P | 115200 | `99-rover-f9p.rules` |
+| `/dev/rover-esp32` | ESP32 LoRa | 115200 | `99-rover-esp32.rules` |
+
+Pre-install fallback (before the udev rules are applied, or if a rule's `*_SERIAL_PLACEHOLDER` was never filled in): `/dev/ttyUSB0` (LiDAR), `/dev/ttyACM0` (F9P), `/dev/ttyUSB1` (ESP32) — whichever device happens to enumerate there first; `deploy/install.sh` refuses to install a rule that still contains a placeholder serial.
 
 ### 6.3 ESP32 LoRa Connections (Rover)
 
 | ESP32 Pin | Connection | Notes |
 |-----------|------------|-------|
-| TX2 | ZED-F9P UART2 RX | RTCM forwarding |
+| TX2 | ZED-F9P UART2 RX | RTCM forwarding — both firmware envs write here (source differs, §3.1); carries nothing when the Pi itself runs the NTRIP client (`client_location = "pi"`) |
 | RX2 | (Not connected) | F9P doesn't send to ESP32 |
 | TX0/USB | Pi USB | Telemetry to Pi |
 | RX0/USB | Pi USB | Commands from Pi (future) |
@@ -478,38 +513,101 @@ imu_to_gnss_translation = [0.0, 0.0, 0.30]     # [x, y, z] meters
 
 ### 7.1 Data Rates
 
+Recomputed for the columnar record formats (§4.2), using
+`json.dumps(record, separators=(",", ":"))` — the exact call
+`SessionLogger._write_record()` makes — on representative records.
+
+**LiDAR:** the LD19 outputs roughly 450 points per revolution at the default
+`scan_rate_hz = 10` (`POINTS_PER_PACKET = 12` per `src/rover/lidar.py`, at
+its native packet rate). A synthetic 450-point record serializes to 8,367
+bytes: the `angle`/`distance`/`intensity` arrays alone are 8,229 bytes
+(~18.3 bytes/point), plus ~138 bytes of fixed per-record fields
+(`timestamp`/`step_index`/`sweep`/`mast_angle_deg`/`lidar_ms_start`/
+`lidar_ms_end`). One record per revolution: 8,367 B × 10/s ≈ **82 KB/s**.
+
+**IMU:** at the default `[imu].sample_rate_hz = 200` and the main loop's
+steady-state pace of `settle_sec = 1 / scan_rate_hz = 0.1 s` (10 Hz default),
+`ImuDriver.drain()` returns roughly 20 samples per call. A 20-sample batch
+(`t` + `accel`/`gyro`/`mag`/`orientation` parallel arrays) serializes to
+2,893 bytes (~145 bytes/sample). At ~10 batches/s: 2,893 B × 10/s ≈
+**28 KB/s**.
+
+**GNSS:** one `gnss` record (with `pdop`) is 163 bytes (measured the same
+way); the F9P reports at up to 1 Hz: 163 B × 1/s ≈ **0.16 KB/s**. Written to
+`gnss.jsonl` only.
+
+**Camera:** unchanged record shape (§4.2.4). `[camera].capture_cadence`
+gates how often `capture()` fires relative to scan steps — the default is
+`1` (every scan step), so at `scan_rate_hz = 10` a capture can fire up to
+10 times/second, not at a fixed rate. Image size is scene-dependent; budget
+roughly 300–600 KB/JPEG at the default 1920×1080, quality 85.
+
 | Source | Rate | Size | Bandwidth |
 |--------|------|------|-----------|
-| LiDAR | 10 Hz | ~2 KB/scan | ~20 KB/s |
-| IMU | 200 Hz | ~100 B/sample | ~20 KB/s |
-| GNSS | 1 Hz | ~200 B/fix | ~0.2 KB/s |
-| Camera | 0.5 Hz | ~500 KB/image | ~250 KB/s (burst) |
+| LiDAR | 10 Hz (`scan_rate_hz`) | ~8.2 KB/record (450 pts × ~18.3 B/pt + ~138 B envelope) | ~82 KB/s |
+| IMU | 200 Hz sampled, ~10 batches/s | ~2.9 KB/batch (~20 samples × ~145 B) | ~28 KB/s |
+| GNSS | up to 1 Hz | 163 B/record | ~0.16 KB/s |
+| Camera | up to `scan_rate_hz` (`capture_cadence = 1`) | ~300–600 KB/JPEG (scene-dependent) | bursty, not counted below |
 
-**Total sustained write:** ~40-50 KB/s (excluding images)
+**Total sustained write (scan.jsonl + gnss.jsonl, excluding images):**
+82 + 28 + 0.16 ≈ **110 KB/s** at the default 10 Hz / 200 Hz / 1 Hz rates.
 
 ### 7.2 Storage Estimates
 
-| Duration | Scan Data | Images | Total |
-|----------|-----------|--------|-------|
-| 1 hour | ~150 MB | ~1 GB | ~1.2 GB |
-| 4 hours | ~600 MB | ~4 GB | ~4.6 GB |
+At ~110 KB/s sustained JSONL (§7.1):
 
-**Recommended storage:** 32 GB minimum, 64 GB+ preferred
+| Duration | scan.jsonl + gnss.jsonl |
+|----------|-------------------------|
+| 1 hour | 110 KB/s × 3,600 s ≈ **387 MB** |
+| 4 hours | ≈ **1.51 GB** |
+
+Images are additive and, at the default `capture_cadence = 1`, scale with
+the scan rate rather than a fixed cadence: 10 Hz × 3,600 s = 36,000 captures
+in an hour, which at ~450 KB/JPEG is about **15 GB per hour**
+(36,000 × 450 KB) — raise `[camera].capture_cadence` for any session longer
+than a few minutes, or set
+`[logging].save_images = false` to skip image writes entirely regardless of
+cadence (`capture()` is then never called).
+
+**Recommended storage:** 32 GB minimum, 64 GB+ preferred for JSONL-only
+sessions; size for images separately based on the chosen `capture_cadence`.
 
 ### 7.3 LoRa Bandwidth Budget
 
-| Traffic | Rate | Size | Bandwidth |
-|---------|------|------|-----------|
-| RTCM (robust) | Continuous | — | ~800 B/s |
-| STATUS | 1 Hz | 20 B | ~20 B/s |
-| LINK | 0.2 Hz | 24 B | ~5 B/s |
+One STATUS frame — 18 bytes total (8-byte envelope + 10-byte payload,
+`src/rover/lora_protocol.py`) — every `[lora].telemetry_interval_sec`
+(default 10 s), at SF7/125 kHz/CR4-5 (`firmware/esp32-rover/platformio.ini`).
+No LINK, no RTCM traffic exists on this link (§1, §3.1).
 
-**Total:** ~850 B/s (within LoRa SF9/125kHz capacity of ~1500 B/s)
+Time-on-air, Semtech AN1200.13's LoRa airtime formula, assuming RadioLib's
+defaults (8-symbol preamble, explicit header, CRC on, no low-data-rate
+optimization at SF7):
+
+```
+T_symbol      = 2^SF / BW = 2^7 / 125000 = 1.024 ms
+T_preamble    = (n_preamble + 4.25) * T_symbol = (8 + 4.25) * 1.024 ms = 12.544 ms
+
+payloadSymbNb = 8 + max(ceil[(8*PL - 4*SF + 28 + 16*CRC - 20*IH) / (4*(SF - 2*DE))] * (CR + 4), 0)
+              = 8 + max(ceil[(8*18 - 4*7 + 28 + 16*1 - 0) / (4*7)] * (1 + 4), 0)
+              = 8 + max(ceil[160 / 28] * 5, 0) = 8 + (6 * 5) = 38 symbols
+
+T_payload     = 38 * 1.024 ms = 38.912 ms
+T_packet      = T_preamble + T_payload = 12.544 + 38.912 = 51.456 ms  (time-on-air)
+
+duty cycle    = T_packet / 10 s = 51.456 ms / 10,000 ms ≈ 0.515%
+```
+
+| Frame | Cadence | Size | Time-on-air | Duty cycle |
+|-------|---------|------|-------------|------------|
+| STATUS (`0x01`) | every 10 s | 18 B (8 envelope + 10 payload) | ≈51.5 ms | ≈0.515% |
+
+**Total:** ≈0.515% duty cycle — one STATUS frame every 10 s is the entire
+load this rover puts on the radio link.
 
 ### 7.4 Latency Budgets
 
 | Path | Target | Notes |
 |------|--------|-------|
-| RTCM base→rover | <2 sec | LoRa + framing |
-| Sensor→log | <100 ms | Local processing |
-| Telemetry→monitor | <3 sec | LoRa + display update |
+| RTCM caster → rover | <2 sec | NTRIP over IP (DEC-031); no LoRa RTCM path exists |
+| Sensor → log | <100 ms | Local processing |
+| Telemetry → monitor | <3 sec | LoRa STATUS every 10 s + display update (once a sibling handheld understands v2 frames — CR-001, CR-003) |

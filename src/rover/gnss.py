@@ -93,7 +93,7 @@ logger = logging.getLogger(__name__)
 class GnssFix:
     """Single GNSS position fix.
 
-    Fields mirror the JSONL `gnss` record schema (Appendix B in CLAUDE.md) so
+    Fields mirror the JSONL `gnss` record schema (`docs/SPECIFICATIONS.md` §4.2.3) so
     serialization is straightforward.
     """
 
