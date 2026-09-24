@@ -201,8 +201,10 @@
 
 **Magnetometer Constraints:**
 - Disable during motor operation (EMI interference)
-- Use GNSS-derived heading outdoors when available
-- Requires hard/soft iron calibration
+- Heading comes from a per-sweep rest magnetometer reading with WMM declination —
+  never from GNSS or from gyro integration during a sweep (DEC-013 amendment)
+- Requires hard/soft iron calibration; `use_magnetometer` stays `false` (heading
+  labelled "relative") until `[calibration].mag_offset` is measured
 
 ### 5.2 MPU-6050 (Backup/Testing)
 
@@ -214,8 +216,9 @@
 | **Status** | ✅ Owned |
 
 **Limitations:**
-- No magnetometer → heading drift without GNSS
-- Acceptable only for GNSS-aided outdoor operation
+- No magnetometer → no rest-heading source, so exported heading is always
+  labelled "relative" (same label used when the 9-DOF IMU's magnetometer is
+  off by default)
 
 ---
 
@@ -331,8 +334,9 @@ Base-Station T-Deck can surface rover STATUS via either:
 
 - **Channel A** — the `/run/rover/status.json` file (if the rover and Base-Station Pis
   share a filesystem mount or replicate it), or
-- **Channel C** — receiving LoRa STATUS/LINK (LoRa frame v2 types `0x01`/`0x02`) directly.
-  Requires a one-time T-Deck firmware extension to recognize rover frame types alongside
+- **Channel C** — receiving LoRa STATUS (LoRa frame v2 type `0x01`) directly. LINK
+  (`0x02`) is defined in the protocol but the rover never sends it. Requires a
+  one-time T-Deck firmware extension to recognize rover frame types alongside
   the existing DISPLAY (`0x20`) handling.
 
 The second-T-Deck-dedicated-to-rover idea from v0.9 is deferred. The rover's own HTTP
