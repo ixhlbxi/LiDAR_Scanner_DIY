@@ -160,6 +160,33 @@ FORBIDDEN_BY_FILE["docs/ARCHITECTURE.md"] = [
     (r"(?i)disk space monitor", "no disk monitor exists"),
 ]
 
+# --- Task 6: SPECIFICATIONS ---
+ENFORCED.add("docs/SPECIFICATIONS.md")
+REQUIRED["docs/SPECIFICATIONS.md"] = [
+    (r"/etc/rover/config\.toml", 1),
+    (r"config/default\.toml", 2),
+    (r"sweep_start", 1),
+    (r"returned_home", 1),
+    (r"return_home_failed", 1),
+    (r"export\.json", 2),
+    (r"_navd88", 1),
+    (r"\"geometry\"", 1),
+    (r"mast_angle_deg", 1),
+    (r"\"pdop\"", 1),
+    (r"antenna_offset_m", 1),
+    (r"(?i)exit (code )?3", 1),
+    (r"pyproj sync --file us_noaa_g2018u0\.tif", 1),
+    (r"sweep\.py", 1),
+]
+FORBIDDEN_BY_FILE["docs/SPECIFICATIONS.md"] = [
+    (r"/home/pi/rover", "config and data live under /etc/rover and /var/lib/rover"),
+    (r"\"firmware_version\": \"0\.9", "metadata is generated from the running code"),
+    (
+        r"(?i)^\s*fusion_output_hz|^\s*rtcm_profile|^\s*survey_in_|^\s*\[power\]",
+        "removed key shown as live",
+    ),
+]
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
