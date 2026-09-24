@@ -117,6 +117,13 @@ FORBIDDEN_BY_FILE["README.md"] = [
     (r"README_ORIGINAL", "archived as docs/archive/README_v0.9.2.md")
 ]
 
+ENFORCED.add("docs/ATTRIBUTION.md")
+REQUIRED["docs/ATTRIBUTION.md"] = [
+    (r"^## Project Lineage", 1),
+    (r"archive/README_v0\.9\.2\.md", 1),
+]
+FORBIDDEN_BY_FILE["docs/ATTRIBUTION.md"] = [(r"Open3D", "not a dependency")]
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")

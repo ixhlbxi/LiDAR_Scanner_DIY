@@ -18,7 +18,38 @@ Created September 14, 2026. This file exists because the rover is derived from s
 
 PiLiDAR is the codebase foundation for this rover (see DEC-002 in docs/DECISIONS.md). The LD19 + stepper mast scanning concept, the GPIO interrupt approach to scan-angle capture, and the general structure of the capture pipeline come from PiLiDAR. Even where code has been rewritten, the design is derived.
 
-If the Unitree L2 path is adopted (retiring DEC-015 through DEC-017 and the PiLiDAR foundation), re-evaluate this file. A clean-room rewrite around a different sensor and SDK may no longer be a derivative work, but that is a judgement call to make deliberately, not by default. Document the reasoning in DECISIONS.md when it happens.
+If the Unitree L2 path noted in [V2_SLAM_CONCEPT.md](V2_SLAM_CONCEPT.md) §2.1 is ever adopted (retiring DEC-015 through DEC-017 and the PiLiDAR foundation) — not planned work — re-evaluate this file. A clean-room rewrite around a different sensor and SDK may no longer be a derivative work, but that is a judgement call to make deliberately, not by default. Document the reasoning in DECISIONS.md when it happens.
+
+---
+
+## Project Lineage
+
+This project **extends** the [PiLiDAR project](https://github.com/PiLiDAR/PiLiDAR)
+(Raspberry Pi + LD19 LiDAR for low-cost 3D scanning).
+
+> **Note:** The PiLiDAR repo moved from `Finin-Quincey/PiLiDAR` to the `PiLiDAR`
+> organization in 2025. Last upstream commit: April 24, 2025 (34 total commits,
+> 1.8k stars). The project is lightly maintained with 4 open issues and 4 open PRs.
+
+| Capability | PiLiDAR | This Project |
+|------------|---------|--------------|
+| Positioning | None / basic | RTK GNSS (cm-level) |
+| Orientation | Basic | IMU + sensor fusion |
+| Communications | Wired | LoRa telemetry |
+| Monitoring | Local only | Handheld LoRa console |
+| Use case | Static scans | Mobile rover + field ops |
+
+### Version History
+
+| Version | Date | Description |
+|---------|------|-------------|
+| v0.9.2 | 2026-02-22 | Audit update; fix upstream repo URL, add GPIO library decision (DEC-029), note upstream STL27L support |
+| v0.9.1 | 2025-12-26 | Architecture freeze; all major decisions documented |
+| v0.9.0 | 2025-12-26 | Initial dev guide created |
+
+Both tables above describe the project through v0.9.2, migrated unchanged from the
+frozen [docs/archive/README_v0.9.2.md](archive/README_v0.9.2.md). For v0.10 onward,
+see [ROADMAP.md](ROADMAP.md) and [DECISIONS.md](DECISIONS.md).
 
 ---
 
@@ -83,4 +114,4 @@ Record dates and outcomes here as items above are closed.
 
 ## Other dependencies
 
-Standard permissive or copyleft-compatible libraries used by this project (Open3D, numpy, pyserial, rpi-lgpio, and whatever else lands in pyproject.toml) carry their own licenses and should be listed in a THIRD_PARTY_LICENSES.md once the dependency set stabilizes. None of them is expected to conflict with CC BY-NC-SA. PiLiDAR is the only upstream that shapes the license of this repo as a whole.
+Standard permissive or copyleft-compatible libraries used by this project (numpy, pyserial, rpi-lgpio, and whatever else lands in pyproject.toml) carry their own licenses and should be listed in a THIRD_PARTY_LICENSES.md once the dependency set stabilizes. None of them is expected to conflict with CC BY-NC-SA. PiLiDAR is the only upstream that shapes the license of this repo as a whole.
