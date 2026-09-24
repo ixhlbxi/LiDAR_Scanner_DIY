@@ -143,6 +143,23 @@ REQUIRED["docs/DECISIONS.md"] = [
     (r"S5-R3", 1),
 ]
 
+# --- Task 5: ARCHITECTURE ---
+ENFORCED.add("docs/ARCHITECTURE.md")
+REQUIRED["docs/ARCHITECTURE.md"] = [
+    (r"\b6563\b", 1),
+    (r"(?i)status-only", 1),
+    (r"(?i)one client at a time", 1),
+    (r"(?i)rest heading", 1),
+    (r"antenna_offset_m", 1),
+    (r"\[imu\]\.mount", 1),
+    (r"logger_degraded", 1),
+    (r"(?i)exit (code )?4", 1),
+]
+FORBIDDEN_BY_FILE["docs/ARCHITECTURE.md"] = [
+    (r"(?i)current sense", "no current sensing exists"),
+    (r"(?i)disk space monitor", "no disk monitor exists"),
+]
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
