@@ -44,10 +44,15 @@ Each line is pass/fail. Record the outcome and date in the audit report row name
     `scan*.jsonl` shows the first `sweep_start` event with `"heading_settled":
     true` within 60 s. Record the yaw noise measured at rest — it feeds S5-R2.
 15. **Upgrading an existing Pi:** `sudo deploy/install.sh` a second time keeps
-    `/etc/rover/config.toml` (item 11) — it does not remove anything from it.
-    Before restarting the service, edit that file by hand: remove any
-    `[power]` section and the `gnss.rtcm_profile`, `gnss.survey_in_*`,
-    `imu.fusion_output_hz` and `logging.format` keys (all removed; `load_config`
-    now rejects any unknown key, exit code 2), and change
-    `[lora] role = "rtcm_rx+status_tx"` (retired; now rejected with exit 2)
-    to `"status_tx_only"` or `"disabled"`. Closes S4-R1.
+    BOTH `/etc/rover/config.toml` (item 11) AND `/etc/rover/telemetry-only.toml`
+    — it does not remove anything from either. An old `telemetry-only.toml`
+    carrying `[power] monitor_battery = false` (section removed from the repo
+    copy) makes `rover-telemetry` fail at startup with `ValueError: Unknown
+    config section '[power]'`. Before restarting EITHER service, diff both
+    `/etc/rover/*.toml` files against the repo's `config/default.toml` and
+    `config/telemetry-only.toml`, and by hand: remove any `[power]` section and
+    the `gnss.rtcm_profile`, `gnss.survey_in_*`, `imu.fusion_output_hz` and
+    `logging.format` keys (all removed; `load_config` now rejects any unknown
+    key, exit code 2), and change `[lora] role = "rtcm_rx+status_tx"` (retired;
+    now rejected with exit 2) to `"status_tx_only"` or `"disabled"`. Then
+    restart both `rover` and `rover-telemetry`. Closes S4-R1.
