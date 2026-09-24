@@ -31,3 +31,23 @@ Each line is pass/fail. Record the outcome and date in the audit report row name
     python3-rpi-lgpio`. The installer now warns if the legacy backend is detected;
     the driver will refuse to start on it (T1-033).
 11. `sudo deploy/install.sh` a second time → prints `kept /etc/rover/config.toml`.
+12. **Home the mast by hand** before each session — there is no home switch
+    (S5-R3). After a clean stop, `journalctl -u rover` shows `mast returned
+    home`. If it instead shows `mast NOT home ... — home it by hand before
+    the next session` (a `return_home_failed` event recorded in the
+    session's `scan*.jsonl`), home it by hand before the next start.
+13. **Sweep:** with the stepper connected, the mast turns through `sweep_deg`
+    (360° by default) then rewinds at `rewind_rpm`. `cat /run/rover/status.json`
+    shows `scan_state` 4 while rewinding. No lidar records are logged between
+    a sweep's last record and the next `sweep_start` event.
+14. **Heading settle:** with `[imu].use_magnetometer = true`, the session's
+    `scan*.jsonl` shows the first `sweep_start` event with `"heading_settled":
+    true` within 60 s. Record the yaw noise measured at rest — it feeds S5-R2.
+15. **Upgrading an existing Pi:** `sudo deploy/install.sh` a second time keeps
+    `/etc/rover/config.toml` (item 11) — it does not remove anything from it.
+    Before restarting the service, edit that file by hand: remove any
+    `[power]` section and the `gnss.rtcm_profile`, `gnss.survey_in_*`,
+    `imu.fusion_output_hz` and `logging.format` keys (all removed; `load_config`
+    now rejects any unknown key, exit code 2), and change
+    `[lora] role = "rtcm_rx+status_tx"` (retired; now rejected with exit 2)
+    to `"status_tx_only"` or `"disabled"`. Closes S4-R1.

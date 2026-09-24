@@ -216,6 +216,18 @@ REQUIRED["docs/HARDWARE.md"] = [
     (r"antenna_offset_m", 1),
 ]
 
+ENFORCED.add("deploy/SMOKE_CHECKLIST.md")
+REQUIRED["deploy/SMOKE_CHECKLIST.md"] = [
+    (r"(?i)home the mast", 1),
+    (r"return_home_failed", 1),
+    (r"(?i)rewind", 1),
+    (r"heading_settled", 1),
+    (r"(?i)upgrading an existing pi", 1),
+    (r"fusion_output_hz", 1),
+    (r"S5-R3", 1),
+    (r"S4-R1", 1),
+]
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
