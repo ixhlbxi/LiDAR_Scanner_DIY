@@ -131,6 +131,18 @@ FORBIDDEN_BY_FILE["docs/ATTRIBUTION.md"] = [(r"Open3D", "not a dependency")]
 ENFORCED.add("docs/V2_SLAM_CONCEPT.md")
 REQUIRED["docs/V2_SLAM_CONCEPT.md"] = [(r"Unitree L2", 1)]
 
+# --- Task 4: DECISIONS ---
+ENFORCED.add("docs/DECISIONS.md")
+# DEC-015's original text keeps its "±180°" lines; the amendment block supersedes them.
+EXEMPT["docs/DECISIONS.md"] = {r"±\s*180"}
+REQUIRED["docs/DECISIONS.md"] = [
+    (r"\*\*Amendment \(2026-09-23\):\*\*", 3),
+    (r"\b6563\b", 1),
+    (r"(?i)amended 2026-09-23", 2),
+    (r"S5-F1", 1),
+    (r"S5-R3", 1),
+]
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")

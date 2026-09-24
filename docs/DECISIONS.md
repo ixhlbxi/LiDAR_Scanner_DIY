@@ -439,6 +439,14 @@ and unreliable; gyro integration carries short-term heading instead.
 - Indoor scans rely on gyro (drift over time)
 - Outdoor scans use GNSS-derived heading
 
+**Amendment (2026-09-23):**
+- Yaw is never taken from GNSS (GNSS gives position only, no heading) and never from
+  gyro integration during a sweep.
+- Yaw comes from a per-sweep rest magnetometer heading, converted to true north via
+  WMM 2025 declination (cross-doc fact 14; `scripts/georef.py`).
+- Indoor and outdoor sweeps use the same heading path — there is no separate
+  GNSS-derived outdoor case.
+
 ---
 
 ### DEC-014: IMU-LiDAR Timestamp Correlation via Slerp
@@ -498,6 +506,18 @@ flexible cable loop is sufficient for v1.0 use cases.
 - Rotation limited to ±180° or full rotation with reset pause
 - Cable fatigue is potential long-term issue
 - Slip ring is v1.1+ upgrade path
+
+**Amendment (2026-09-23):** Supersedes the ±180°/single-direction rotation described
+above.
+- Production behavior is a full 360° forward sweep, then a fast rewind in ≤45° chunks;
+  nothing is logged while rewinding (`SCAN_REWINDING`).
+- A clean shutdown returns the mast to its home position. There is no home switch, so a
+  crash or power loss leaves the mast un-homed and needs manual homing before the next
+  session (backlog `S5-R3`).
+- The owner chose a full 360° sweep over a ±180° oscillation to capture complete
+  coverage in one direction rather than doubling back mid-sweep, accepting the added
+  rewind time as the cost.
+- Landed in the stage 5 merge (`dae5776`).
 
 ---
 
@@ -1025,6 +1045,18 @@ Base-Station path.
 - Operator switches between paths via config; runtime hot-switching is v1.1+.
 - Rover ESP32 firmware grows two modes (LoRa-RTCM-relay, NTRIP-over-WiFi-client) — see DEC-032.
 
+**Amendment (2026-09-23):** Supersedes the LoRa-relayed-RTCM fallback described above.
+- LoRa carries status-only telemetry; NTRIP-over-IP is the only RTK transport — there is
+  no LoRa RTK path.
+- `[lora].role` is `status_tx_only` or `disabled`; no RTCM-Rx role exists.
+- LoRa frame type `0x10` (`RTCM_CHUNK`) is retired and reserved — never encoded or
+  decoded.
+- The firmware's `lora_rtcm_relay` env is pending removal (backlog `S5-F1`).
+- Why: the sibling concept doc estimates a single RTCM stream saturates a 125 kHz / SF7
+  LoRa channel, and no base-side LoRa-RTCM transmitter was ever built, so the fallback
+  was never achievable — backlog `CR-002` closed not-needed.
+- Landed in commit `13f6805`.
+
 ---
 
 ### DEC-032: NTRIP Client Location — Pi or ESP32, Per-Session (supersedes DEC-006's blanket rule)
@@ -1111,7 +1143,7 @@ paths.
   (`StatusJsonPublisher`, `LocalHttpPublisher`, `LoRaPublisher`).
 - Each publisher start/stop is independent; failures in one don't take down the others.
 - Status schema is rover-side (versioned independently from the Base-Station's; sibling
-  is at v9, rover at v1 — both grow additively).
+  is at v10, rover at v2 — both grow additively).
 - Atomic-write pattern is borrowed byte-for-byte from
   `arm-drone-lidar-workflow/base-station/rtk_io.py:atomic_write_json` for compatibility
   (extracted to `src/rover/_io.py` in Stage B of the deep-alignment overhaul).
@@ -1156,8 +1188,9 @@ target CRS.
 - `scripts/georef.py` becomes the canonical CRS-conversion boundary (Phase E).
 - Adds `pyproj` as an optional dependency (`[project.optional-dependencies].post`).
 - `scripts/georef.py:ZONE_EPSG` mirrors the sibling repo's `configure_base.py:ZONE_EPSG`
-  *naming* but uses NAD83(2011) ft-US codes (6346 etc.) where sibling uses
-  NAD83(HARN) codes (2271 etc.) — divergence noted in code.
+  *naming* but uses NAD83(2011) ft-US codes (PA North 6563, PA South 6565; NAVD88
+  height 6360 ftUS) where sibling uses NAD83(HARN) codes (2271 etc.) — divergence
+  noted in code.
 
 ---
 
@@ -1210,7 +1243,7 @@ redeploy.sh) and the gap between repos was widening every week.
 
 **Implications:**
 - `src/rover/_io.py` carries the atomic-write helper (Stage B).
-- `src/rover/telemetry.py:STATUS_SCHEMA_VERSION = 1` exists as the canonical
+- `src/rover/telemetry.py:STATUS_SCHEMA_VERSION = 2` exists as the canonical
   rover-side schema version (Stage B).
 - `scripts/georef.py:ZONE_EPSG` mirrors sibling's zone-name vocabulary (Stage B).
 - `src/rover/watchdog.py` sends `READY=1` / `WATCHDOG=1` to systemd via
@@ -1245,7 +1278,7 @@ redeploy.sh) and the gap between repos was widening every week.
 | DEC-012 | Madgwick Filter | Sensor |
 | DEC-013 | Mag Disabled w/ Motor | Sensor |
 | DEC-014 | Timestamp Slerp | Sensor |
-| DEC-015 | Direct Drive | Mechanical |
+| DEC-015 | Direct Drive | Mechanical — **amended 2026-09-23** |
 | DEC-016 | Open-Loop Indexing | Mechanical |
 | DEC-017 | 1/16 Microstepping | Mechanical |
 | DEC-018 | Split Power Domains | Power |
@@ -1261,7 +1294,7 @@ redeploy.sh) and the gap between repos was widening every week.
 | DEC-028 | TOML Config | Config |
 | DEC-029 | GPIO Library (rpi-lgpio) | Upstream Compat |
 | DEC-030 | Dual-Mode (personal / arm_group) | Base-Station Integration |
-| DEC-031 | NTRIP-Primary + LoRa Fallback | Base-Station Integration |
+| DEC-031 | NTRIP-Primary + LoRa Fallback | Base-Station Integration — **amended 2026-09-23** |
 | DEC-032 | NTRIP Client Location (Pi or ESP32) | Base-Station Integration |
 | DEC-033 | Triple-Channel Telemetry | Base-Station Integration |
 | DEC-034 | Coords: log SI/WGS84, convert at export | Base-Station Integration |
