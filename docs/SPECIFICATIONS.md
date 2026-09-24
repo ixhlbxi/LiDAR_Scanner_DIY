@@ -111,8 +111,22 @@ fires from this rover's current telemetry.
 | Interface | Connection | Data |
 |---|---|---|
 | LoRa | SX1262 radio (Heltec WiFi LoRa 32 V3) | Tx: STATUS frames, SF7/125 kHz/CR4-5 (§7.3) |
-| UART2 | ZED-F9P | Tx: RTCM3 bytes — `ntrip_client` env only |
+| UART2 | ZED-F9P | Tx: RTCM3 bytes — both firmware envs write here; source differs (below) |
 | USB/UART0 | Raspberry Pi | Rx: STATUS frames from `rover.telemetry.LoRaPublisher` |
+
+Both firmware envs wire UART2 to the F9P and forward RTCM there —
+`F9PSerial.begin(...)` (`firmware/esp32-rover/src/main.cpp`) runs
+unconditionally at boot regardless of which env was flashed. They differ
+only in where the RTCM comes from: `lora_rtcm_relay`'s `0x10` (`RTCM_CHUNK` — retired and reserved, DEC-031 amended 2026-09-23) handler (`main.cpp:156`)
+sources it from LoRa, but no Base-Station firmware sends that type any more
+(CR-002 closed) — this path is legacy, pending removal under
+**S5-F1**. `ntrip_client`'s
+`ntrip_pump()` (`main.cpp:269`) sources it from the NTRIP caster over WiFi
+(DEC-032). **When the Pi itself runs the NTRIP client**
+(`[ntrip].client_location = "pi"`, the default), RTCM instead reaches the
+F9P over its **USB** port directly from the Pi (`GnssReceiver.write_rtcm()`,
+`src/rover/gnss.py`) — the ESP32 and its UART2 wiring carry no RTCM at all
+in that mode.
 
 ### 3.2 Base-Station Firmware — out of scope
 
@@ -282,7 +296,7 @@ in `scan.jsonl`.
 | event | when | details |
 |---|---|---|
 | `scan_start` | once, right after `SessionLogger.start()` | `{"profile": <session.profile>}` |
-| `sweep_start` | once per sweep, right after that sweep's pre-scan rest ends | `{"sweep": int, "rest_sec": float, "heading_settled": bool\|null}` — `rest_sec` is the actual seconds rested, including sweep 0's extra heading-settle wait; `heading_settled` is `null` when the settle wait does not apply (no magnetometer + rest samples to settle) |
+| `sweep_start` | once per sweep, right after that sweep's pre-scan rest ends | `{"sweep": int, "rest_sec": float, "heading_settled": bool\|null}` — `rest_sec` is the actual seconds rested, including sweep 0's extra heading-settle wait; `heading_settled` is `null` for every sweep except the first, and is also `null` on sweep 0 itself unless `[imu].use_magnetometer = true` AND the IMU is present and available (`sensors.imu is not None and sensors.imu.available`) — the settle wait (`_wait_for_heading_settle`) only ever runs when `planner.sweep_index == 0` and all three of those hold |
 | `sensor_disabled` | the instant a sensor's failure gate trips (5 consecutive read failures) | `{"sensor": <name>, "error": <str>}` |
 | `returned_home` | teardown, after the mast successfully rewinds to step 0 | `{"steps": int}` |
 | `return_home_failed` | teardown, if that rewind itself raises | `{"steps_from_home": int, "error": <str>}` — there is no home switch (S5-R3); home the mast by hand before the next session |
@@ -322,7 +336,7 @@ produced, run 2026-09-24):
 | lost_records | int | Records drained from the queue but never written, due to a failed flush |
 | session | object | `profile` / `project_code` / `mission_tag` / `target_crs_epsg` / `units`, copied from `[session]` (DEC-030, DEC-034) — `scripts/georef.py` reads this to re-export without parsing `config.toml` |
 | geometry | object | `imu_mount`, `antenna_offset_m`, `sweep_deg`, `rewind_rpm`, `rest_before_sweep_sec` — always present, sourced from `[imu]`/`[calibration]`/`[stepper]` regardless of whether the stepper subsystem itself is enabled that session |
-| ntrip_stats | object, optional | Present only when an `NtripClient` was actually constructed (`[ntrip].enabled = true`, `client_location = "pi"`, `[gnss].enabled = true`) — `asdict(NtripClient.stats)`: `connected`, `bytes_received_total`, `bytes_received_this_sec`, `last_connect_attempt_epoch`, `last_byte_epoch`, `connect_count`, `error_count`, `last_error` |
+| ntrip_stats | object, optional | Present only when `run()`'s local `ntrip_client` variable is not `None` at teardown — i.e. `[ntrip].enabled = true` AND `[ntrip].client_location == "pi"` AND `sensors.gnss is not None` (GNSS enabled and its `GnssReceiver` constructed successfully) AND `NtripClient(...)`/`.start()` did not raise. A raise there is caught, logged, and leaves `ntrip_client = None` — the field is silently absent, not present-but-empty, in that case. Value is `asdict(NtripClient.stats)`: `connected`, `bytes_received_total`, `bytes_received_this_sec`, `last_connect_attempt_epoch`, `last_byte_epoch`, `connect_count`, `error_count`, `last_error` |
 
 ### 4.4 Georeferenced Export Outputs
 
@@ -461,7 +475,7 @@ Pre-install fallback (before the udev rules are applied, or if a rule's `*_SERIA
 
 | ESP32 Pin | Connection | Notes |
 |-----------|------------|-------|
-| TX2 | ZED-F9P UART2 RX | RTCM forwarding — `ntrip_client` firmware env only (§3.1) |
+| TX2 | ZED-F9P UART2 RX | RTCM forwarding — both firmware envs write here (source differs, §3.1); carries nothing when the Pi itself runs the NTRIP client (`client_location = "pi"`) |
 | RX2 | (Not connected) | F9P doesn't send to ESP32 |
 | TX0/USB | Pi USB | Telemetry to Pi |
 | RX0/USB | Pi USB | Commands from Pi (future) |
@@ -501,8 +515,9 @@ steady-state pace of `settle_sec = 1 / scan_rate_hz = 0.1 s` (10 Hz default),
 2,893 bytes (~145 bytes/sample). At ~10 batches/s: 2,893 B × 10/s ≈
 **28 KB/s**.
 
-**GNSS:** one `gnss` record (with `pdop`) is 164 bytes; the F9P reports at up
-to 1 Hz: 164 B × 1/s ≈ **0.16 KB/s**. Written to `gnss.jsonl` only.
+**GNSS:** one `gnss` record (with `pdop`) is 163 bytes (measured the same
+way); the F9P reports at up to 1 Hz: 163 B × 1/s ≈ **0.16 KB/s**. Written to
+`gnss.jsonl` only.
 
 **Camera:** unchanged record shape (§4.2.4). `[camera].capture_cadence`
 gates how often `capture()` fires relative to scan steps — the default is
@@ -514,7 +529,7 @@ roughly 300–600 KB/JPEG at the default 1920×1080, quality 85.
 |--------|------|------|-----------|
 | LiDAR | 10 Hz (`scan_rate_hz`) | ~8.2 KB/record (450 pts × ~18.3 B/pt + ~138 B envelope) | ~82 KB/s |
 | IMU | 200 Hz sampled, ~10 batches/s | ~2.9 KB/batch (~20 samples × ~145 B) | ~28 KB/s |
-| GNSS | up to 1 Hz | 164 B/record | ~0.16 KB/s |
+| GNSS | up to 1 Hz | 163 B/record | ~0.16 KB/s |
 | Camera | up to `scan_rate_hz` (`capture_cadence = 1`) | ~300–600 KB/JPEG (scene-dependent) | bursty, not counted below |
 
 **Total sustained write (scan.jsonl + gnss.jsonl, excluding images):**
@@ -531,8 +546,9 @@ At ~110 KB/s sustained JSONL (§7.1):
 
 Images are additive and, at the default `capture_cadence = 1`, scale with
 the scan rate rather than a fixed cadence: 10 Hz × 3,600 s = 36,000 captures
-in an hour, which at ~450 KB/JPEG is on the order of tens of GB — raise
-`[camera].capture_cadence` for any session longer than a few minutes, or set
+in an hour, which at ~450 KB/JPEG is about **15 GB per hour**
+(36,000 × 450 KB) — raise `[camera].capture_cadence` for any session longer
+than a few minutes, or set
 `[logging].save_images = false` to skip image writes entirely regardless of
 cadence (`capture()` is then never called).
 
