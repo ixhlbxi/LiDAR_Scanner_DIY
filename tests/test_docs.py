@@ -102,6 +102,11 @@ FORBIDDEN_BY_FILE["CLAUDE.md"] = [
     ),
 ]
 
+# --- Task 3: README, ATTRIBUTION, V2_SLAM_CONCEPT, archive ---
+# docs/README_ORIGINAL.md -> docs/archive/README_v0.9.2.md: cover it for link +
+# line-ending checks the same way docs/CROSS_REPO_BACKLOG.md is (history/tracking file).
+LINKED_DOCS.append("docs/archive/README_v0.9.2.md")
+
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")

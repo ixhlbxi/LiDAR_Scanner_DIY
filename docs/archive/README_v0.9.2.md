@@ -1,3 +1,5 @@
+> **Superseded (archived 2026-09-23).** This is the v0.9.2 README as frozen on 2026-02-22. The current project description is [../../README.md](../../README.md); lineage and version history moved to [../ATTRIBUTION.md](../ATTRIBUTION.md). Nothing below is current.
+
 # RTK-Enabled LiDAR Scanner / Camera Rover
 
 **Project Codename:** PiLiDAR-RTK Rover  
@@ -84,11 +86,11 @@ A **portable, field-deployable 3D scanning platform** combining:
 
 | Document | Contents |
 |----------|----------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture, subsystems, data flows, comms topology |
-| [HARDWARE.md](HARDWARE.md) | Inventory (owned + planned), specs, part selection rationale |
-| [DECISIONS.md](DECISIONS.md) | All architectural/engineering decisions with rationale |
-| [SPECIFICATIONS.md](SPECIFICATIONS.md) | Packet formats, config schema, firmware boundaries, data schema |
-| [ROADMAP.md](ROADMAP.md) | v1.0 scope, milestones, TBDs, future versions |
+| [ARCHITECTURE.md](../ARCHITECTURE.md) | System architecture, subsystems, data flows, comms topology |
+| [HARDWARE.md](../HARDWARE.md) | Inventory (owned + planned), specs, part selection rationale |
+| [DECISIONS.md](../DECISIONS.md) | All architectural/engineering decisions with rationale |
+| [SPECIFICATIONS.md](../SPECIFICATIONS.md) | Packet formats, config schema, firmware boundaries, data schema |
+| [ROADMAP.md](../ROADMAP.md) | v1.0 scope, milestones, TBDs, future versions |
 
 ---
 
