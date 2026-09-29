@@ -177,12 +177,11 @@
 | **Interface** | USB 2.0, UVC (no vendor driver; V4L2 on Linux) |
 | **Formats** | MJPEG 4656×3496 @ 10 fps; YUY2 (uncompressed) full-res @ 1 fps; MJPEG 2320×1744 @ 30 fps |
 | **Exposure / WB** | Auto (AEC / AWB); manual control via UVC not yet verified |
-| **Mounting** | On the rotating platform, on a 200 mm cheese plate, ~150–180 mm apart (6–7 in, from memory — measure). Pointing direction 🔲 to confirm |
+| **Mounting** | On the rotating platform, on a 200 mm cheese plate, ~150–180 mm apart (6–7 in, from memory; stereo calibration will recover the exact baseline). Both point the same direction as a stereo pair |
 | **Status** | ✅ Owned |
 
 **Open questions:**
-- Measured centre-to-centre spacing and pointing direction of the two ELPs
-  (same direction, or splayed/tilted).
+- Whether to fit narrower M12 lenses (~6 mm) for target detection and stereo range.
 
 **Integration notes (not yet reflected in code):**
 - `src/rover/camera.py` uses `picamera2` (CSI only). UVC cameras need a V4L2/OpenCV
