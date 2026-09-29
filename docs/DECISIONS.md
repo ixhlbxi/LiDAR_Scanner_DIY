@@ -854,6 +854,11 @@ sane, and aligns naturally with step indices for post-processing.
 - Simpler synchronization (step index alignment)
 - Fisheye covers wide FOV per frame
 
+**Amendment 2026-09-29:** The HQ Camera and fisheye are retired. Two ELP 16MP USB
+cameras (~118° each) on the rotating platform replace them (`docs/HARDWARE.md` §4.3).
+Per-step triggering stands; capture from one camera at a time while the mast is at rest
+(shared USB 2.0 bandwidth, rolling shutter). The fisheye bullet above no longer applies.
+
 **Alternatives Considered:**
 - Continuous video (storage heavy, sync complex)
 - Manual trigger only (misses context)

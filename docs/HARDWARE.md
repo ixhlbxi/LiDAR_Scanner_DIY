@@ -1,7 +1,7 @@
 # Hardware Inventory
 
 **Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
-**Last Updated:** 2026-09-29 (imaging: 2× ELP 16MP USB cameras recorded, §4.3)
+**Last Updated:** 2026-09-29 (imaging: HQ Camera retired; 2× ELP 16MP USB cameras on the rotating platform, §4.3)
 
 > **Rover BOM is unchanged from v0.9.2** except: T-Deck moved out (now owned
 > by Base-Station, per DEC-033); ESP32 LoRa role expanded to dual-mode (LoRa
@@ -25,7 +25,7 @@
 | Compute | ✅ | — | Pi 4 ready |
 | LiDAR | ✅ | — | LD19 ready |
 | Motion | ✅ | — | NEMA17 + A4988 ready |
-| Camera | ✅ | — | HQ Camera + fisheye ready; 2× ELP 16MP USB (IMX298) owned — role and mounting TBD (§4.3) |
+| Camera | ✅ | — | 2× ELP 16MP USB (IMX298) on the rotating platform (§4.3). HQ Camera + fisheye retired 2026-09-29 |
 | IMU | ✅ | — | MPU-6050 and MPU-9250 available |
 | GNSS (interim) | ✅ | — | Beitian BK122 for testing |
 | GNSS (RTK) | — | 🔲 | ZED-F9P × 2 needed (one for the Base-Station Pi, one for this rover) |
@@ -51,8 +51,7 @@
 | **Status** | ✅ Owned |
 
 **Interfaces Used:**
-- USB × 3-4 (F9P, ESP32, LiDAR, storage)
-- CSI (Camera)
+- USB × 5-6 (F9P, ESP32, LiDAR, 2× ELP camera, storage)
 - I2C (IMU)
 - GPIO (Stepper control)
 - Power: 5V @ 3A via USB-C
@@ -60,7 +59,6 @@
 **Selection Rationale:**
 - Linux ecosystem enables rapid prototyping
 - Sufficient compute for sensor fusion and logging
-- Camera interface native
 - Large community support
 - Alternative (MCU-only) rejected due to data handling complexity
 
@@ -131,7 +129,11 @@
 
 ## 4. Imaging Subsystem
 
-### 4.1 Raspberry Pi HQ Camera
+### 4.1 Raspberry Pi HQ Camera — RETIRED 2026-09-29
+
+> Retired in favour of the two ELP USB cameras (§4.3). Kept here for history;
+> `src/rover/camera.py` and `tests/hardware/test_camera.py` still target this
+> camera until the UVC backend lands.
 
 | Attribute | Value |
 |-----------|-------|
@@ -140,7 +142,7 @@
 | **Resolution** | 12.3 MP (4056 × 3040) |
 | **Interface** | CSI (MIPI) |
 | **Lens Mount** | C/CS mount |
-| **Status** | ✅ Owned |
+| **Status** | ⛔ Retired |
 
 **Operating Resolution (v1.0):** 1920×1080 or 1640×1232 (TBD after testing)
 
@@ -149,7 +151,7 @@
 - Native Pi interface (no USB bandwidth competition)
 - Interchangeable lenses
 
-### 4.2 Arducam M12 Fisheye Lens
+### 4.2 Arducam M12 Fisheye Lens — RETIRED 2026-09-29 (with the HQ Camera)
 
 | Attribute | Value |
 |-----------|-------|
@@ -167,7 +169,7 @@
 
 | Attribute | Value |
 |-----------|-------|
-| **Role** | 🔲 TBD — candidates: target detection for scanner resection, point-cloud colorization, wider per-step coverage |
+| **Role** | Replaces the HQ Camera for context imagery. Candidate added roles: target detection for scanner resection, point-cloud colorization |
 | **Quantity** | 2 |
 | **Sensor** | Sony IMX298, 1/2.8", 1.12 µm pixels, rolling shutter |
 | **Resolution** | 4656 × 3496 (16 MP) |
@@ -175,12 +177,12 @@
 | **Interface** | USB 2.0, UVC (no vendor driver; V4L2 on Linux) |
 | **Formats** | MJPEG 4656×3496 @ 10 fps; YUY2 (uncompressed) full-res @ 1 fps; MJPEG 2320×1744 @ 30 fps |
 | **Exposure / WB** | Auto (AEC / AWB); manual control via UVC not yet verified |
-| **Mounting** | 🔲 TBD — on the rotating platform or fixed; facing opposite directions or one tilted up |
+| **Mounting** | On the rotating platform, on a 200 mm cheese plate, ~150–180 mm apart (6–7 in, from memory — measure). Pointing direction 🔲 to confirm |
 | **Status** | ✅ Owned |
 
 **Open questions:**
-- Whether the HQ Camera (§4.1) is kept, retired, or refitted with a narrow C-mount lens.
-- Mounting and pointing of the two ELPs.
+- Measured centre-to-centre spacing and pointing direction of the two ELPs
+  (same direction, or splayed/tilted).
 
 **Integration notes (not yet reflected in code):**
 - `src/rover/camera.py` uses `picamera2` (CSI only). UVC cameras need a V4L2/OpenCV
@@ -198,6 +200,8 @@
   ~0.011°/px. Any lens change or focus movement invalidates calibration, so lock
   the lens once focused.
 - Each camera needs its own intrinsic and camera-to-LiDAR calibration.
+- Two more USB cables cross the rotating stage; route them through the cable
+  loop with strain relief.
 
 ---
 
@@ -483,7 +487,7 @@ non-RTK 3D fix (~2–3 m accuracy).
 
 | Component | Mount Type | Status |
 |-----------|------------|--------|
-| LiDAR + Camera | Rotating platform on stepper shaft | 🔲 TBD |
+| LiDAR + Cameras | Rotating platform on stepper shaft; ELPs on a 200 mm cheese plate | 🔲 TBD (LiDAR) / ✅ mounted (cameras) |
 | IMU | Fixed to rotating platform | 🔲 TBD |
 | GNSS Antenna | Mast mount (clear sky view) | 🔲 TBD |
 | Pi + Electronics | Base enclosure | 🔲 TBD |

@@ -2,7 +2,7 @@
 
 RTK-enabled DIY LiDAR scanning platform built on Raspberry Pi 4B.
 
-Combines an LD19 LiDAR, MPU-9250 IMU, ZED-F9P RTK GNSS, and Pi HQ Camera on a
+Combines an LD19 LiDAR, MPU-9250 IMU, ZED-F9P RTK GNSS, and two ELP USB cameras on a
 rotating stepper mast to produce georeferenced 3D point clouds.
 
 ## How it fits the ARM Group workflow

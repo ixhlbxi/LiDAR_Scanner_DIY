@@ -27,7 +27,7 @@ This file is the operational core. Everything else lives in `docs/`:
 
 ## 1. What This Is
 
-Custom RTK LiDAR rover: LD19 LiDAR on a rotating mast (NEMA17 + A4988), Pi HQ Camera,
+Custom RTK LiDAR rover: LD19 LiDAR on a rotating mast (NEMA17 + A4988), 2× ELP 16MP USB cameras,
 MPU-9250 IMU (Madgwick fusion), ZED-F9P RTK GNSS, ESP32 LoRa+WiFi for RTK fallback /
 telemetry. RTK corrections from the external `arm-drone-lidar-workflow` Base-Station —
 this rover is a client, not a parallel base.
@@ -53,7 +53,7 @@ Both rovers can run at the same site against the same `ARM_BASE` caster.
 | What | Status |
 |---|---|
 | Planning | ✅ 35 decisions (DEC-001–DEC-035); DEC-030–DEC-034 cover v0.10 integration, DEC-035 covers the 2026-05-30 deep-alignment overhaul |
-| Hardware in hand | LD19, MPU-9250, A4988+NEMA17, Pi HQ Cam, 2× ELP 16MP USB cam, Pi 4B, ESP32 LoRa |
+| Hardware in hand | LD19, MPU-9250, A4988+NEMA17, 2× ELP 16MP USB cam (HQ Cam retired), Pi 4B, ESP32 LoRa |
 | Hardware NOT in hand | 2× ZED-F9P, 2× dual-band antennas, 3.3V regulator, batteries |
 | Codebase | ✅ Phase 3 landed (config/logger/lidar/imu/stepper/camera + tests). ⚠️ v0.10 overhaul in progress (telemetry, ntrip, gnss, esp32 firmware) |
 | Current phase | **v0.10 overhaul** — see Phase plan in `docs/ROADMAP.md` |
@@ -68,7 +68,8 @@ Both rovers can run at the same site against the same `ARM_BASE` caster.
   `LG_WD=/tmp` to suppress lgpio temp files.
 - **Config:** TOML via stdlib `tomllib` (read), `tomli-w` only if writing.
 - **Data:** JSONL.
-- **Deps:** `rpi-lgpio`, `picamera2`, `smbus2`, `pyserial`.
+- **Deps:** `rpi-lgpio`, `picamera2`, `smbus2`, `pyserial`. (`picamera2` stays until the
+  camera module moves to a UVC backend for the ELP cameras — HQ Camera retired 2026-09-29.)
 
 ## 4. Repository Structure
 
