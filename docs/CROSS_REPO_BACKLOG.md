@@ -125,6 +125,33 @@ NTRIP v1 client of `ARM_BASE`.
 
 ---
 
+### CR-006 — Shared GCP targets: pattern description and scanner reuse
+
+**What:** Sibling docs describe the Sky High Bull's-Eye GCP targets as a
+bull's-eye pattern. Examples: `SOP/ARM_Drone_LiDAR_SOP.md` §1.2, "the deployed targets
+are bull's-eye, not the checkerboard squares", and
+`docs/reference/hardware_inventory.md`, "bull's-eye pattern". The vendor drawing
+(owner-supplied, 2026-09-29) shows a 24 in 2×2 black/white checker with 12 in
+quadrants, a centre eyelet at the saddle point, and a number 0–9. "Bull's-Eye" is
+the brand name. Under DEC-036 the rover reuses these targets mounted vertically on
+rods for camera-based station resection.
+
+**Why we need it:**
+- The sibling pattern description should match the hardware. Its Keystone
+  checkerboard spec and the "deployed targets differ" note may be reconcilable.
+- Target numbers and surveyed nail coordinates should mean the same thing in
+  both workflows, so one GCP export feeds both TBC and `scripts/georef.py`.
+- A target cannot be flat for the drone and vertical for the scanner at once.
+  The sibling SOP needs a note on sequencing (fly first, then remount on rods) or
+  a second set reserved for the scanner.
+
+**Status:** ⏳ Pending sibling doc correction and SOP note.
+
+**Rover-side ready:** partly. DEC-036 and `docs/HARDWARE.md` §4.4 record the
+target geometry. Detection and resection code are v1.1.
+
+---
+
 ## Rover-side deferred (from the 2026-09-22 super-audit)
 
 Items dispositioned `defer` or `track` in `docs/AUDIT_super_20260922_1810.md`, plus the

@@ -1,7 +1,7 @@
 # Technical Specifications
 
 **Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
-**Last Updated:** 2026-05-30
+**Last Updated:** 2026-09-29 (camera references updated for DEC-036)
 
 Rover-internal specifications. Cross-repo / on-wire contracts live in
 [BASE_STATION_INTEGRATION.md](BASE_STATION_INTEGRATION.md); this file is
@@ -86,6 +86,8 @@ coding_rate = "4/5"               # "4/5", "4/6", "4/7", "4/8"
 telemetry_interval_sec = 1.0      # Status packet rate
 
 [camera]
+# Current schema is single-camera (HQ Camera, retired). DEC-036 moves this to
+# two ELP devices; the new schema lands with the V4L2 backend plan.
 enabled = true
 resolution = [1920, 1080]         # Width × Height
 capture_cadence = 1               # Capture every N steps (1 = every step)
@@ -216,7 +218,7 @@ critical_battery_mv = 10000       # Shutdown threshold
 | `imu.py` | MPU-9250 polling, Madgwick fusion | I2C |
 | `gnss.py` | ZED-F9P parsing (NMEA/UBX) | USB |
 | `stepper.py` | Motor control, step timing | GPIO |
-| `camera.py` | HQ Camera capture | picamera2 |
+| `camera.py` | Camera capture. Still HQ Camera code; moving to 2× ELP via V4L2 per DEC-036 | picamera2 (to be replaced by V4L2) |
 | `telemetry.py` | Status packet generation | Serial to ESP32 |
 | `logger.py` | JSONL file writing | Filesystem |
 | `config.py` | TOML parsing | Filesystem |

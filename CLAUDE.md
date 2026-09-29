@@ -14,7 +14,7 @@ This file is the operational core. Everything else lives in `docs/`:
 |---|---|
 | Full TOML config schema, JSONL records, metadata.json | `docs/SPECIFICATIONS.md` |
 | LoRa frame v2 (STATUS/LINK/RTCM_CHUNK), wire formats | `docs/BASE_STATION_INTEGRATION.md` §4 |
-| All decisions DEC-001–DEC-035 with rationale + alternatives | `docs/DECISIONS.md` |
+| All decisions DEC-001–DEC-036 with rationale + alternatives | `docs/DECISIONS.md` |
 | System architecture, data/telemetry flow diagrams | `docs/ARCHITECTURE.md` |
 | Wiring, power, BOM, GPIO pinout details | `docs/HARDWARE.md` |
 | Phase plan, build order, success criteria | `docs/ROADMAP.md` |
@@ -52,7 +52,7 @@ Both rovers can run at the same site against the same `ARM_BASE` caster.
 
 | What | Status |
 |---|---|
-| Planning | ✅ 35 decisions (DEC-001–DEC-035); DEC-030–DEC-034 cover v0.10 integration, DEC-035 covers the 2026-05-30 deep-alignment overhaul |
+| Planning | ✅ 36 decisions (DEC-001–DEC-036); DEC-030–DEC-034 cover v0.10 integration, DEC-035 covers the 2026-05-30 deep-alignment overhaul, DEC-036 (2026-09-29) makes the ELP stereo pair a measurement instrument |
 | Hardware in hand | LD19, MPU-9250, A4988+NEMA17, 2× ELP 16MP USB cam (HQ Cam retired), Pi 4B, ESP32 LoRa |
 | Hardware NOT in hand | 2× ZED-F9P, 2× dual-band antennas, 3.3V regulator, batteries |
 | Codebase | ✅ Phase 3 landed (config/logger/lidar/imu/stepper/camera + tests). ⚠️ v0.10 overhaul in progress (telemetry, ntrip, gnss, esp32 firmware) |
@@ -131,6 +131,7 @@ LiDAR_Scanner_DIY/
 | DEC-021 | JSONL logging |
 | DEC-022 | Post-processed georeferencing (offline in Phase 5) |
 | DEC-023 | SLAM deferred to v1.1+ |
+| DEC-026 | ~~Camera as visual reference~~ — superseded by **DEC-036** |
 | DEC-028 | TOML config |
 | DEC-029 | `rpi-lgpio` over `RPi.GPIO` (Bookworm breakage) |
 | DEC-030 | Dual-mode profile (`personal` / `arm_group`) |
@@ -138,6 +139,7 @@ LiDAR_Scanner_DIY/
 | DEC-032 | NTRIP client location: Pi or ESP32 per `[ntrip].client_location` |
 | DEC-033 | Triple-channel telemetry: `status.json` + loopback HTTP + LoRa STATUS/LINK |
 | DEC-034 | Log SI/WGS84, convert CRS at export via `scripts/georef.py` |
+| DEC-036 | ELP stereo pair = post-processed measurement instrument: target bearings for resection, per-point colorization, stereo cross-check (v1.1); V4L2 capture backend (v1.0) |
 
 ## 7. GPIO Pinout & Serial Ports (quick reference for code)
 
@@ -178,7 +180,8 @@ without it is ±5–10 cm; calibration procedure is v1.1.
 - T-Deck firmware (Base-Station owns it)
 - Point cloud processing / 3D reconstruction (Phase 5: `scripts/georef.py`)
 - Real-time SLAM / georef (DEC-022, DEC-023)
-- Camera texture mapping (v1.2+)
+- Camera colorization and target resection (v1.1, DEC-036); texture-mapped meshes /
+  full photogrammetry remain out of scope
 - Extrinsic calibration procedure (v1.1)
 - Rover→Base-Station bidirectional commands (rover publishes STATUS only)
 

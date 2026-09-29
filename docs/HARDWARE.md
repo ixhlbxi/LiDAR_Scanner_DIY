@@ -169,7 +169,7 @@
 
 | Attribute | Value |
 |-----------|-------|
-| **Role** | Replaces the HQ Camera for context imagery. Candidate added roles: target detection for scanner resection, point-cloud colorization |
+| **Role** | Per DEC-036: target bearings for station resection, per-point colorization, stereo range cross-check, and context imagery. Processing is offline |
 | **Model** | Probably ELP-USB16MP01-BH120 (box housing; bare board is -H120). Confirm from the housing label or `lsusb -v` |
 | **Quantity** | 2 |
 | **Sensor** | Sony IMX298, 1/2.8", 1.12 µm pixels, rolling shutter |
@@ -181,8 +181,9 @@
 | **Mounting** | On the rotating platform, on a 200 mm cheese plate, ~150–180 mm apart (6–7 in, from memory; stereo calibration will recover the exact baseline). Both point the same direction as a stereo pair |
 | **Status** | ✅ Owned |
 
-**Open questions:**
-- Whether to fit narrower M12 lenses (~6 mm) for target detection and stereo range.
+**Lens decision (DEC-036):** keep the stock lenses. The 24 in Sky High targets (§4.4)
+are large enough at 15 m. Revisit 6 mm M12 lenses only if calibration shows
+otherwise.
 
 **Integration notes (not yet reflected in code):**
 - `src/rover/camera.py` uses `picamera2` (CSI only). UVC cameras need a V4L2/OpenCV
@@ -202,6 +203,31 @@
 - Each camera needs its own intrinsic and camera-to-LiDAR calibration.
 - Two more USB cables cross the rotating stage; route them through the cable
   loop with strain relief.
+
+### 4.4 Survey Targets (shared with the drone GCP kit)
+
+| Attribute | Value |
+|-----------|-------|
+| **Product** | Sky High Bull's-Eye drone GCP targets, 10-pack (ARM's existing drone GCP kit, owned sibling-side) |
+| **Pattern** | 2×2 black/white checker ("X"). "Bull's-Eye" is the brand name, not the pattern |
+| **Size** | 24 × 24 in (60.96 cm), 12 in (30.48 cm) quadrants |
+| **Centre** | Eyelet at the saddle point; the surveyed point when laid flat |
+| **ID** | Printed number 0–9, underlined, in one white quadrant |
+| **Corner holes** | Four grommets for staking or mounting |
+| **Scanner use (DEC-036)** | Mounted vertically on a plumb rod over a surveyed nail. Target centre is a known height above the nail |
+| **Status** | ✅ Owned (ARM kit) |
+
+**Needed for scanner use:**
+- 3–4 plumb rods or fixed-height mounts with a bracket that holds a 24 in target
+  vertical, facing the scanner.
+- Rigid backing so the target stays flat when vertical.
+
+**Constraints:**
+- Material rigidity and surface finish are unknown. Matte is preferred to avoid
+  specular hot spots.
+- A target is flat for the drone or vertical for the scanner, not both at once.
+- Apparent size at 15 m is about 57–71 px wide with the stock ELP lenses,
+  depending on the true focal length.
 
 ---
 
@@ -488,6 +514,7 @@ non-RTK 3D fix (~2–3 m accuracy).
 | Component | Mount Type | Status |
 |-----------|------------|--------|
 | LiDAR + Cameras | Rotating platform on stepper shaft; ELPs on a 200 mm cheese plate | 🔲 TBD (LiDAR) / ✅ mounted (cameras) |
+| Survey targets | 24 in Sky High targets on plumb rods, vertical, with rigid backing (§4.4) | 🔲 TBD |
 | IMU | Fixed to rotating platform | 🔲 TBD |
 | GNSS Antenna | Mast mount (clear sky view) | 🔲 TBD |
 | Pi + Electronics | Base enclosure | 🔲 TBD |
@@ -513,6 +540,8 @@ non-RTK 3D fix (~2–3 m accuracy).
 | USB-serial adapters (if needed) | 2-3 | $5-10 ea | Medium |
 | Connectors, cables, mounting hardware | — | $30-50 | Medium |
 | 3D printed enclosure/mounts | — | $20-50 | Low |
+| Plumb rods / fixed-height mounts + 24 in vertical target brackets and rigid backing (DEC-036) | 3-4 | TBD | Medium |
+| Powered USB hub (two ELP cameras exceed the Pi 4's 1.2 A USB budget with F9P, ESP32, SSD) | 1 | $20-40 | Medium |
 
 **Estimated Total:** $600-900 for remaining components
 

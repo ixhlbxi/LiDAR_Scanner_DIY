@@ -809,7 +809,7 @@ truth when accessible; CloudCompare catches gross errors visually.
 
 ### DEC-026: Camera as Visual Reference (Not Photogrammetry)
 
-**Status:** Accepted — proposed for supersession by DEC-036 (draft 2026-09-29)
+**Status:** Superseded by DEC-036 (2026-09-29)
 **Date:** 2026-03-22
 **Decided by:** Brian
 **Rationale:** Context imagery is high-value for QA; full photogrammetry
@@ -1234,9 +1234,9 @@ redeploy.sh) and the gap between repos was widening every week.
 
 ### DEC-036: ELP Stereo Pair as a Post-Processed Measurement Instrument (supersedes DEC-026)
 
-**Status:** Proposed — draft 2026-09-29, awaiting Brian's acceptance
+**Status:** Accepted
 **Date:** 2026-09-29
-**Decided by:** Brian (pending)
+**Decided by:** Brian
 **Rationale:** The retired HQ Camera was a context camera. The two ELP 16MP
 cameras replacing it, mounted as a same-direction stereo pair on the rotating
 platform, can measure target bearings to about 0.01° once calibrated. That is
@@ -1247,8 +1247,9 @@ per-point colorization. Both run offline, so DEC-022 still holds.
 **Decision:** The ELP stereo pair is a measurement instrument whose images are
 processed offline in `scripts/georef.py`. Its roles, in priority order:
 
-1. **Target bearings for station resection.** Detect vertical checker "X" targets
-   on rods over surveyed points and solve station position and heading.
+1. **Target bearings for station resection.** Detect ARM's existing Sky High GCP
+   targets, a 2×2 checker "X", mounted vertically on rods over surveyed points,
+   and solve station position and heading.
    - Targets within ~10 m: camera bearing plus LD19 plane-fit range; 2 targets
      suffice with the scanner leveled, 3 give a check.
    - Targets beyond ~10 m, where the LD19's 12 m spec runs out: bearings-only
@@ -1272,8 +1273,11 @@ offline. Capture rules:
   kernel timestamp, mast angle, gyro RMS, and control values read back.
 - Calibration sessions use lossless luma captures, not MJPEG.
 
-**Target version:** v1.1, alongside the extrinsic calibration it depends on.
-v1.0 keeps DEC-027 capture and stores images in a form v1.1 can use.
+**Target version:** Split across two releases.
+- v1.0: the V4L2 capture backend. Retiring the HQ Camera broke context capture, so
+  it can't wait.
+- v1.1: target resection, colorization and stereo, alongside the extrinsic
+  calibration they depend on.
 
 **Gates before implementation** (tests in
 `reports/ELP stereo cameras for LiDAR scanner.md`):
@@ -1298,8 +1302,11 @@ v1.0 keeps DEC-027 capture and stores images in a form v1.1 can use.
 **Rationale:**
 - Bearing precision from calibrated checker corners, about 2 mm lateral at
   15 m, exceeds anything the LD19 gets from sphere fitting at the same range.
-- Vertical X targets 45–60 cm across give 45–70 px at 15 m with the stock lenses,
-  so larger targets replace a lens swap and keep the wide view colorization needs.
+- ARM's existing Sky High GCP targets are already the right design: a 24 in
+  (61 cm) 2×2 black/white checker with 12 in quadrants. The eyelet is at the
+  saddle point and a number 0–9 gives each target an ID. Mounted vertically,
+  one spans about 57–71 px at 15 m with the stock lenses, so the stock lenses
+  stay. That keeps the wide view colorization needs, and no new targets are needed.
 - One calibration serves both resection and colorization.
 - Offline processing keeps the Pi's job to capture and matches DEC-022.
 
@@ -1323,12 +1330,22 @@ v1.0 keeps DEC-027 capture and stores images in a form v1.1 can use.
 - Camera intrinsics, stereo extrinsics and camera-to-LiDAR extrinsics join the
   v1.1 calibration procedure.
 - `scripts/georef.py` gains target detection, resection and colorization.
-- Field kit gains 3–4 plumb rods with 45–60 cm matte X targets and an ArUco
-  marker for ID.
-- **Conflicts to resolve on acceptance:**
-  - `CLAUDE.md` §9 and `docs/ROADMAP.md` list "Camera texture mapping" as v1.2+;
-    colorization moves to v1.1.
-  - `CLAUDE.md` decision count and key-decision table need DEC-036.
+- **Targets:** the field kit reuses the Sky High GCP targets, mounted vertically
+  on 3–4 plumb rods over surveyed nails. The printed number is the target ID, so
+  no ArUco marker is needed.
+  - **Rigid backing.** Each target needs rigid backing so it stays flat when vertical.
+  - **Survey point.** It is the eyelet centre, a known height above the nail on a
+    plumb rod.
+  - **Detection around the eyelet.** The eyelet sits on the saddle point, so
+    detection fits the four quadrant edges rather than trusting the centre pixel.
+  - **One role at a time.** A target is flat for the drone or vertical for the
+    scanner, never both. Fly first, then remount on rods over the same nails, or
+    keep a second set for the scanner. See `docs/CROSS_REPO_BACKLOG.md` CR-006.
+- **Conflicts resolved on acceptance (2026-09-29):**
+  - `CLAUDE.md` §9 and `docs/ROADMAP.md` now place colorization and target
+    resection at v1.1. Full texture-mapped meshes and photogrammetry remain
+    out of scope.
+  - `CLAUDE.md` decision count and key-decision table include DEC-036.
 - **Not decided here:**
   - Scanner GCP/SCAN operating modes.
   - Whether to upgrade the LD19.
@@ -1366,7 +1383,7 @@ v1.0 keeps DEC-027 capture and stores images in a form v1.1 can use.
 | DEC-023 | SLAM Deferred | Software |
 | DEC-024 | Accuracy Target | Accuracy |
 | DEC-025 | Validation Method | Accuracy |
-| DEC-026 | Camera as Reference | Camera — **proposed for supersession by DEC-036** |
+| DEC-026 | Camera as Reference | Camera — **superseded by DEC-036** |
 | DEC-027 | Triggered Capture | Camera |
 | DEC-028 | TOML Config | Config |
 | DEC-029 | GPIO Library (rpi-lgpio) | Upstream Compat |
@@ -1376,4 +1393,4 @@ v1.0 keeps DEC-027 capture and stores images in a form v1.1 can use.
 | DEC-033 | Triple-Channel Telemetry | Base-Station Integration |
 | DEC-034 | Coords: log SI/WGS84, convert at export | Base-Station Integration |
 | DEC-035 | Deep Alignment with arm-drone-lidar-workflow | Deep-Alignment Overhaul |
-| DEC-036 | ELP Stereo Pair as Measurement Instrument (proposed) | Camera Measurement |
+| DEC-036 | ELP Stereo Pair as Measurement Instrument | Camera Measurement |

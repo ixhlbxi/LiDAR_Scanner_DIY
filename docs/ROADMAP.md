@@ -1,7 +1,7 @@
 # Roadmap & Next Steps
 
 **Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
-**Last Updated:** 2026-05-30
+**Last Updated:** 2026-09-29 (DEC-036 camera plan)
 
 ---
 
@@ -31,7 +31,8 @@ v1.0 is complete when the following capabilities are demonstrated:
 |---------|-----------|----------------|
 | Real-time SLAM | Significant complexity | v1.1+ |
 | Real-time georeferencing | Post-processing sufficient | v1.1+ |
-| Camera texture mapping | Context imagery sufficient | v1.2+ |
+| Camera colorization + target resection (DEC-036) | Needs camera and camera-to-LiDAR calibration | v1.1 |
+| Texture-mapped meshes / photogrammetry | Colorized points sufficient | v2.0 |
 | Remote command/control | Receive-only monitoring first | v1.1 |
 | OTA firmware updates | Flash-and-forget acceptable | v1.1 |
 | Slip ring continuous rotation | Cable loop sufficient | v1.2+ |
@@ -86,6 +87,8 @@ scan session, against the live Base-Station `ARM_BASE` caster.
 |---|---|
 | Hardware acquisition | Order 2× ZED-F9P + antennas + 3.3V regulator + batteries (see [HARDWARE.md §1.1](HARDWARE.md#11-acquisition-status)) |
 | Wiring + bench rig | Assemble per HARDWARE.md pinout; verify each sensor with `tests/hardware/test_*` diagnostic scripts |
+| Camera bench tests (DEC-036 gates) | Tests 1–5 and 9 from the table in `reports/ELP stereo cameras for LiDAR scanner.md`: `lsusb -v` transfer type, `v4l2-ctl` formats and controls, dual-stream, LD19/F9P serial gaps while a camera streams, full-res YUY2 timing, power. Results set the capture design |
+| Camera capture backend (DEC-036) | Plan first, then replace Picamera2 in `camera.py` with V4L2. Two cameras, one streams at a time at rest, locked controls, raw MJPEG, `[camera]` for two devices, udev by port path, `tests/hardware/test_camera.py` rewritten |
 | Integrated bench scan | `python -m rover.main` end-to-end with all sensors + NTRIP + Base-Station status.json reachable |
 | Field shakedown | Outdoor RTK FIX achieved within ~60 s; runtime ≥4 h; LoRa fallback verified |
 | Accuracy validation | Repeatability (<5 cm) and control-point comparison if accessible |
@@ -102,6 +105,17 @@ field validation proceeds independently.
 calibration of the LiDAR → IMU → GNSS transform chain.
 
 - Define calibration procedure (T_lidar_imu, T_body_gnss).
+- Camera calibration (DEC-036): ChArUco intrinsics per ELP (rational vs fisheye model),
+  stereo extrinsics, camera-to-LiDAR extrinsics, and a repeatability test
+  (power cycle, warm-up, transport).
+- LD19 target-plate test: the Sky High target at 3, 6, 9 and 12 m, for real range
+  and plane-fit σ.
+- Open-sky resection proof: resect a station from 3 vertical targets where RTK has
+  a solid fix, and compare. This validates target resection before relying on it
+  under canopy.
+- `scripts/georef.py`: target detection, resection (range+bearing ≤10 m,
+  bearings-only beyond), per-camera colorization with occlusion handling.
+- LiDAR upgrade decision (S2/S3 class) after the plate test and a midday sun test.
 - Closed-loop motor control via encoder or limit switch.
 - ICP-based scan-to-scan registration in post-processing for indoor scans.
 - Configuration validation improvements based on v1.0 field experience.
