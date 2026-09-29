@@ -1,7 +1,7 @@
 # Hardware Inventory
 
 **Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
-**Last Updated:** 2026-05-30
+**Last Updated:** 2026-09-29 (imaging: 2× ELP 16MP USB cameras recorded, §4.3)
 
 > **Rover BOM is unchanged from v0.9.2** except: T-Deck moved out (now owned
 > by Base-Station, per DEC-033); ESP32 LoRa role expanded to dual-mode (LoRa
@@ -25,7 +25,7 @@
 | Compute | ✅ | — | Pi 4 ready |
 | LiDAR | ✅ | — | LD19 ready |
 | Motion | ✅ | — | NEMA17 + A4988 ready |
-| Camera | ✅ | — | HQ Camera + fisheye ready |
+| Camera | ✅ | — | HQ Camera + fisheye ready; 2× ELP 16MP USB (IMX298) owned — role and mounting TBD (§4.3) |
 | IMU | ✅ | — | MPU-6050 and MPU-9250 available |
 | GNSS (interim) | ✅ | — | Beitian BK122 for testing |
 | GNSS (RTK) | — | 🔲 | ZED-F9P × 2 needed (one for the Base-Station Pi, one for this rover) |
@@ -162,6 +162,42 @@
 - Captures maximum context per frame
 - Reduces number of images needed per scan
 - Distortion acceptable for reference imagery (not photogrammetry)
+
+### 4.3 ELP 16MP Wide-Angle USB Camera (×2)
+
+| Attribute | Value |
+|-----------|-------|
+| **Role** | 🔲 TBD — candidates: target detection for scanner resection, point-cloud colorization, wider per-step coverage |
+| **Quantity** | 2 |
+| **Sensor** | Sony IMX298, 1/2.8", 1.12 µm pixels, rolling shutter |
+| **Resolution** | 4656 × 3496 (16 MP) |
+| **Lens** | Wide angle, ~118–120° "low distortion", fixed focus, f/1.8, M12 mount (listing's focal-length fields are garbled; true focal length unconfirmed) |
+| **Interface** | USB 2.0, UVC (no vendor driver; V4L2 on Linux) |
+| **Formats** | MJPEG 4656×3496 @ 10 fps; YUY2 (uncompressed) full-res @ 1 fps; MJPEG 2320×1744 @ 30 fps |
+| **Exposure / WB** | Auto (AEC / AWB); manual control via UVC not yet verified |
+| **Mounting** | 🔲 TBD — on the rotating platform or fixed; facing opposite directions or one tilted up |
+| **Status** | ✅ Owned |
+
+**Open questions:**
+- Whether the HQ Camera (§4.1) is kept, retired, or refitted with a narrow C-mount lens.
+- Mounting and pointing of the two ELPs.
+
+**Integration notes (not yet reflected in code):**
+- `src/rover/camera.py` uses `picamera2` (CSI only). UVC cameras need a V4L2/OpenCV
+  backend, and `[camera]` config needs two devices.
+- Two identical units may report the same USB serial; stable names under
+  `deploy/udev/` must key on the physical USB port path, not the serial.
+- All Pi 4 USB ports share one controller with the LiDAR, F9P, and ESP32.
+  A full-res YUY2 frame is ~32 MB, so capture stills from one camera at a time,
+  not both simultaneously.
+- Rolling shutter is harmless only while the mast is stopped; capture at rest.
+- For target detection, prefer uncompressed YUY2 stills over MJPEG (compression
+  artifacts shift sub-pixel corner estimates).
+- Resolution at the image centre is roughly 0.03–0.04°/px with the stock lens,
+  about the same as the fisheye (§4.2). A narrower M12 lens (~6 mm) gives
+  ~0.011°/px. Any lens change or focus movement invalidates calibration, so lock
+  the lens once focused.
+- Each camera needs its own intrinsic and camera-to-LiDAR calibration.
 
 ---
 

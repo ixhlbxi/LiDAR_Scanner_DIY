@@ -53,7 +53,7 @@ Both rovers can run at the same site against the same `ARM_BASE` caster.
 | What | Status |
 |---|---|
 | Planning | ✅ 35 decisions (DEC-001–DEC-035); DEC-030–DEC-034 cover v0.10 integration, DEC-035 covers the 2026-05-30 deep-alignment overhaul |
-| Hardware in hand | LD19, MPU-9250, A4988+NEMA17, Pi HQ Cam, Pi 4B, ESP32 LoRa |
+| Hardware in hand | LD19, MPU-9250, A4988+NEMA17, Pi HQ Cam, 2× ELP 16MP USB cam, Pi 4B, ESP32 LoRa |
 | Hardware NOT in hand | 2× ZED-F9P, 2× dual-band antennas, 3.3V regulator, batteries |
 | Codebase | ✅ Phase 3 landed (config/logger/lidar/imu/stepper/camera + tests). ⚠️ v0.10 overhaul in progress (telemetry, ntrip, gnss, esp32 firmware) |
 | Current phase | **v0.10 overhaul** — see Phase plan in `docs/ROADMAP.md` |
