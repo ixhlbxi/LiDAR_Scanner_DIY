@@ -1248,8 +1248,9 @@ per-point colorization. Both run offline, so DEC-022 still holds.
 processed offline in `scripts/georef.py`. Its roles, in priority order:
 
 1. **Target bearings for station resection.** Detect ARM's existing Sky High GCP
-   targets, a 2×2 checker "X", mounted vertically on rods over surveyed points,
-   and solve station position and heading.
+   targets, a 2×2 checker "X", over surveyed points, and solve station position
+   and heading. Targets lie flat by default and go on rods only where geometry
+   requires it (amendment below).
    - Targets within ~10 m: camera bearing plus LD19 plane-fit range; 2 targets
      suffice with the scanner leveled, 3 give a check.
    - Targets beyond ~10 m, where the LD19's 12 m spec runs out: bearings-only
@@ -1304,9 +1305,9 @@ offline. Capture rules:
   15 m, exceeds anything the LD19 gets from sphere fitting at the same range.
 - ARM's existing Sky High GCP targets are already the right design: a 24 in
   (61 cm) 2×2 black/white checker with 12 in quadrants. The eyelet is at the
-  saddle point and a number 0–9 gives each target an ID. Mounted vertically,
-  one spans about 57–71 px at 15 m with the stock lenses, so the stock lenses
-  stay. That keeps the wide view colorization needs, and no new targets are needed.
+  saddle point and a number 0–9 gives each target an ID. At 15 m, one spans
+  about 57–71 px across with the stock lenses, so the stock lenses stay. That keeps
+  the wide view colorization needs, and no new targets are needed.
 - One calibration serves both resection and colorization.
 - Offline processing keeps the Pi's job to capture and matches DEC-022.
 
@@ -1330,17 +1331,11 @@ offline. Capture rules:
 - Camera intrinsics, stereo extrinsics and camera-to-LiDAR extrinsics join the
   v1.1 calibration procedure.
 - `scripts/georef.py` gains target detection, resection and colorization.
-- **Targets:** the field kit reuses the Sky High GCP targets, mounted vertically
-  on 3–4 plumb rods over surveyed nails. The printed number is the target ID, so
-  no ArUco marker is needed.
-  - **Rigid backing.** Each target needs rigid backing so it stays flat when vertical.
-  - **Survey point.** It is the eyelet centre, a known height above the nail on a
-    plumb rod.
-  - **Detection around the eyelet.** The eyelet sits on the saddle point, so
-    detection fits the four quadrant edges rather than trusting the centre pixel.
-  - **One role at a time.** A target is flat for the drone or vertical for the
-    scanner, never both. Fly first, then remount on rods over the same nails, or
-    keep a second set for the scanner. See `docs/CROSS_REPO_BACKLOG.md` CR-006.
+- **Targets:** the field kit reuses the Sky High GCP targets over surveyed nails,
+  flat by default and on rods only where needed (amendment below). The printed
+  number is the target ID, so no ArUco marker is needed. Detection fits the four
+  quadrant edges rather than trusting the centre pixel, because the eyelet sits
+  on the saddle point.
 - **Conflicts resolved on acceptance (2026-09-29):**
   - `CLAUDE.md` §9 and `docs/ROADMAP.md` now place colorization and target
     resection at v1.1. Full texture-mapped meshes and photogrammetry remain
@@ -1351,6 +1346,37 @@ offline. Capture rules:
   - Whether to upgrade the LD19.
   - The target field procedure.
   Each needs its own decision.
+
+**Amendment 2026-09-29 — flat-by-default targets:**
+
+- **Flat is the default.** Targets lie flat over their nails, the same as for the
+  drone, whenever the viewing angle is at least ~12°. The viewing angle is the
+  sight line's angle to the target surface: mast-height angle plus any ground
+  tilt toward the scanner, or plus the drop when the scanner stands higher.
+- **Why flat works.** A 24 in target needs ~20 px of foreshortened height, about
+  10 px per quadrant, for reliable detection. From a 1.5 m mast on level ground
+  that holds to ~7 m. It holds farther where ground tilts toward the scanner or
+  the scanner stands higher, as on banks, swales and stream beds. Example: 10 m
+  with 10° of tilt toward the scanner gives ~27–34 px.
+- **Why flat is preferred:**
+  - Drone and scanner share targets in the same session, with no remounting.
+  - The survey point is the nail itself. A rod 1° off plumb moves a 1.5 m-high
+    centre ~2.6 cm.
+  - The same targets tie scanner data to the drone cloud.
+  - Surveyed 3D coordinates plus camera azimuth and elevation allow camera-only
+    resection from 3 targets beyond the LD19's range.
+- **Rods are the exception.** Use them only for targets that must be far away on
+  level or falling ground. On a rod:
+  - The target is vertical, facing the scanner, with rigid backing.
+  - The survey point is the eyelet centre, a known height above the nail.
+  - A rod-mounted target cannot serve the drone at the same time. Fly first,
+    then remount, or keep spare targets for the scanner. See
+    `docs/CROSS_REPO_BACKLOG.md` CR-006.
+- **Field risks for flat targets:**
+  - Grass and leaf litter hide them at low angles. Clear a strip toward the
+    scanner.
+  - Sheen washes out the black quadrants near grazing.
+  - Elevation angle is less precise than azimuth on a flat target.
 
 ---
 

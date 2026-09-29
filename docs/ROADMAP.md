@@ -110,8 +110,8 @@ calibration of the LiDAR → IMU → GNSS transform chain.
   (power cycle, warm-up, transport).
 - LD19 target-plate test: the Sky High target at 3, 6, 9 and 12 m, for real range
   and plane-fit σ.
-- Open-sky resection proof: resect a station from 3 vertical targets where RTK has
-  a solid fix, and compare. This validates target resection before relying on it
+- Open-sky resection proof: resect a station from 3 targets, flat and rod-mounted,
+  where RTK has a solid fix, and compare. This validates target resection before relying on it
   under canopy.
 - `scripts/georef.py`: target detection, resection (range+bearing ≤10 m,
   bearings-only beyond), per-camera colorization with occlusion handling.

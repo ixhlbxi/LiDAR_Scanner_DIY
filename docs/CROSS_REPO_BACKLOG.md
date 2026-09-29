@@ -133,17 +133,20 @@ are bull's-eye, not the checkerboard squares", and
 `docs/reference/hardware_inventory.md`, "bull's-eye pattern". The vendor drawing
 (owner-supplied, 2026-09-29) shows a 24 in 2×2 black/white checker with 12 in
 quadrants, a centre eyelet at the saddle point, and a number 0–9. "Bull's-Eye" is
-the brand name. Under DEC-036 the rover reuses these targets mounted vertically on
-rods for camera-based station resection.
+the brand name. Under DEC-036 the rover reuses these targets for camera-based
+station resection: flat over the same nails by default, and vertical on rods
+only for far targets on level ground.
 
 **Why we need it:**
 - The sibling pattern description should match the hardware. Its Keystone
   checkerboard spec and the "deployed targets differ" note may be reconcilable.
 - Target numbers and surveyed nail coordinates should mean the same thing in
   both workflows, so one GCP export feeds both TBC and `scripts/georef.py`.
-- A target cannot be flat for the drone and vertical for the scanner at once.
-  The sibling SOP needs a note on sequencing (fly first, then remount on rods) or
-  a second set reserved for the scanner.
+- Flat targets serve drone and scanner in the same session. A rod-mounted target
+  cannot. The sibling SOP needs a note on sequencing for those few: fly first,
+  then remount on rods, or reserve spare targets from the 10-pack for the scanner.
+- Scanner use favours clearing grass or litter in front of targets. The drone
+  workflow may want that noted in GCP placement guidance.
 
 **Status:** ⏳ Pending sibling doc correction and SOP note.
 

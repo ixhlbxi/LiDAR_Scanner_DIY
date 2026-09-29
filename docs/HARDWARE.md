@@ -214,20 +214,24 @@ otherwise.
 | **Centre** | Eyelet at the saddle point; the surveyed point when laid flat |
 | **ID** | Printed number 0–9, underlined, in one white quadrant |
 | **Corner holes** | Four grommets for staking or mounting |
-| **Scanner use (DEC-036)** | Mounted vertically on a plumb rod over a surveyed nail. Target centre is a known height above the nail |
+| **Scanner use (DEC-036)** | Flat over its nail by default, shared with the drone, when the viewing angle is ≥ ~12°. Vertical on a plumb rod only for far targets on level or falling ground. On a rod, the target centre is a known height above the nail |
 | **Status** | ✅ Owned (ARM kit) |
 
 **Needed for scanner use:**
-- 3–4 plumb rods or fixed-height mounts with a bracket that holds a 24 in target
-  vertical, facing the scanner.
-- Rigid backing so the target stays flat when vertical.
+- Flat use: nothing new. Clear grass or litter in a strip toward the scanner.
+- Rod use, the exception: 1–2 plumb rods or fixed-height mounts with a bracket
+  that holds a 24 in target vertical and facing the scanner, plus rigid backing.
 
 **Constraints:**
 - Material rigidity and surface finish are unknown. Matte is preferred to avoid
   specular hot spots.
-- A target is flat for the drone or vertical for the scanner, not both at once.
+- A rod-mounted target cannot serve the drone at the same time.
 - Apparent size at 15 m is about 57–71 px wide with the stock ELP lenses,
   depending on the true focal length.
+- Viewed flat, the apparent height is the width times sin(viewing angle). From a
+  1.5 m mast on level ground that is ~49–61 px at 5 m, ~13–16 px at 10 m, and
+  ~6–7 px at 15 m. The detection floor is ~20 px.
+- Sheen near grazing angles washes out the black quadrants.
 
 ---
 
@@ -514,7 +518,7 @@ non-RTK 3D fix (~2–3 m accuracy).
 | Component | Mount Type | Status |
 |-----------|------------|--------|
 | LiDAR + Cameras | Rotating platform on stepper shaft; ELPs on a 200 mm cheese plate | 🔲 TBD (LiDAR) / ✅ mounted (cameras) |
-| Survey targets | 24 in Sky High targets on plumb rods, vertical, with rigid backing (§4.4) | 🔲 TBD |
+| Survey targets | 24 in Sky High targets, flat over nails by default; vertical on plumb rods with rigid backing for far targets (§4.4) | 🔲 TBD (rod bracket) |
 | IMU | Fixed to rotating platform | 🔲 TBD |
 | GNSS Antenna | Mast mount (clear sky view) | 🔲 TBD |
 | Pi + Electronics | Base enclosure | 🔲 TBD |
@@ -540,7 +544,7 @@ non-RTK 3D fix (~2–3 m accuracy).
 | USB-serial adapters (if needed) | 2-3 | $5-10 ea | Medium |
 | Connectors, cables, mounting hardware | — | $30-50 | Medium |
 | 3D printed enclosure/mounts | — | $20-50 | Low |
-| Plumb rods / fixed-height mounts + 24 in vertical target brackets and rigid backing (DEC-036) | 3-4 | TBD | Medium |
+| Plumb rods / fixed-height mounts + 24 in vertical target brackets and rigid backing, for far targets only (DEC-036) | 1-2 | TBD | Low |
 | Powered USB hub (two ELP cameras exceed the Pi 4's 1.2 A USB budget with F9P, ESP32, SSD) | 1 | $20-40 | Medium |
 
 **Estimated Total:** $600-900 for remaining components
