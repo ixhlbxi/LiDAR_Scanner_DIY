@@ -809,7 +809,7 @@ truth when accessible; CloudCompare catches gross errors visually.
 
 ### DEC-026: Camera as Visual Reference (Not Photogrammetry)
 
-**Status:** Accepted
+**Status:** Accepted — proposed for supersession by DEC-036 (draft 2026-09-29)
 **Date:** 2026-03-22
 **Decided by:** Brian
 **Rationale:** Context imagery is high-value for QA; full photogrammetry
@@ -1230,6 +1230,111 @@ redeploy.sh) and the gap between repos was widening every week.
 - `docs/BASE_STATION_INTEGRATION.md` §4 carries a clear callout that sibling's
   Heltec firmware is still on LoRa frame v1 (Stage E).
 
+## 13. Camera Measurement Decisions
+
+### DEC-036: ELP Stereo Pair as a Post-Processed Measurement Instrument (supersedes DEC-026)
+
+**Status:** Proposed — draft 2026-09-29, awaiting Brian's acceptance
+**Date:** 2026-09-29
+**Decided by:** Brian (pending)
+**Rationale:** The retired HQ Camera was a context camera. The two ELP 16MP
+cameras replacing it, mounted as a same-direction stereo pair on the rotating
+platform, can measure target bearings to about 0.01° once calibrated. That is
+the missing piece for locating the scanner where RTK fails: under canopy,
+against facades, down stream banks. The same calibration also enables
+per-point colorization. Both run offline, so DEC-022 still holds.
+
+**Decision:** The ELP stereo pair is a measurement instrument whose images are
+processed offline in `scripts/georef.py`. Its roles, in priority order:
+
+1. **Target bearings for station resection.** Detect vertical checker "X" targets
+   on rods over surveyed points and solve station position and heading.
+   - Targets within ~10 m: camera bearing plus LD19 plane-fit range; 2 targets
+     suffice with the scanner leveled, 3 give a check.
+   - Targets beyond ~10 m, where the LD19's 12 m spec runs out: bearings-only
+     resection from 3 targets, 4 for a check, or GNSS/PPK position with the
+     targets supplying heading only.
+2. **Per-point colorization.** Project each LiDAR point into each calibrated
+   camera at its capture mast angle, with occlusion (z-buffer) handling and a
+   best-image choice per point. A panorama sampled from the scan origin is
+   rejected; the cameras sit ~80–90 mm off the rotation axis.
+3. **Stereo range as a cross-check only.** Stereo flags bad LiDAR range on a target.
+   It is never the primary range: at 15 m its error is decimetres with the stock
+   lenses.
+4. **Context imagery,** as under DEC-026, continues unchanged.
+
+On the rover, cameras only capture. Processing, detection and decoding happen
+offline. Capture rules:
+- One camera streams at a time, only with the mast stopped and the gyro quiet.
+- Exposure, gain and white balance are locked, re-applied on every open, and
+  read back.
+- Raw MJPEG bytes are saved undecoded with a JSONL record: camera ID, USB path,
+  kernel timestamp, mast angle, gyro RMS, and control values read back.
+- Calibration sessions use lossless luma captures, not MJPEG.
+
+**Target version:** v1.1, alongside the extrinsic calibration it depends on.
+v1.0 keeps DEC-027 capture and stores images in a form v1.1 can use.
+
+**Gates before implementation** (tests in
+`reports/ELP stereo cameras for LiDAR scanner.md`):
+- `lsusb -v` transfer type and `v4l2-ctl` formats/controls confirm the capture design.
+- Dual-stream and serial-gap tests confirm camera capture does not starve the
+  LD19 or F9P.
+- ChArUco intrinsics settle the real focal length and lens model.
+- Repeatability tests show the pair holds its relative yaw well enough to use.
+
+**Context:** 2026-09-29 deep dive (report above). Key facts:
+- Likely model: ELP-USB16MP01-BH120.
+- Focal length unpublished, ~1,400–2,500 px; "no distortion" is marketing.
+- All Pi 4 USB 2.0 traffic shares one 480 Mbit/s hub.
+- uvcvideo reserves isochronous bandwidth at stream start, so two full-res
+  streams cannot run at once.
+- No hardware sync between units.
+- Identical units report the same serial.
+- LD19 specified to 12 m.
+- No DIY rotating-LiDAR build found using stereo cameras; PiLiDAR colorizes from
+  an origin panorama without camera-offset correction.
+
+**Rationale:**
+- Bearing precision from calibrated checker corners, about 2 mm lateral at
+  15 m, exceeds anything the LD19 gets from sphere fitting at the same range.
+- Vertical X targets 45–60 cm across give 45–70 px at 15 m with the stock lenses,
+  so larger targets replace a lens swap and keep the wide view colorization needs.
+- One calibration serves both resection and colorization.
+- Offline processing keeps the Pi's job to capture and matches DEC-022.
+
+**Alternatives Considered:**
+- Keep DEC-026: cameras stay context-only. Leaves canopy stations with no
+  positioning path beyond GNSS and cloud-to-cloud registration.
+- LiDAR sphere targets instead of camera targets: the LD19 gets only 2–3 points
+  per scan line on a 200 mm sphere at 5 m, far too few to fit it reliably.
+- Stereo as the primary range source: decimetre error at 15 m, and sensitive to
+  0.008° of relative yaw drift.
+- Structure-from-motion from the rotating cameras: a camera rotating in place has
+  no baseline, so it recovers no depth.
+- 6 mm M12 lenses now: better per-pixel resolution, but a 47° view that hurts
+  colorization coverage. Deferred until calibration shows larger targets are not
+  enough.
+
+**Implications:**
+- `src/rover/camera.py` moves from Picamera2 to a V4L2 backend. `[camera]` config
+  covers two devices, and `deploy/udev/` names cameras by USB port path.
+  `picamera2` leaves the dependency list.
+- Camera intrinsics, stereo extrinsics and camera-to-LiDAR extrinsics join the
+  v1.1 calibration procedure.
+- `scripts/georef.py` gains target detection, resection and colorization.
+- Field kit gains 3–4 plumb rods with 45–60 cm matte X targets and an ArUco
+  marker for ID.
+- **Conflicts to resolve on acceptance:**
+  - `CLAUDE.md` §9 and `docs/ROADMAP.md` list "Camera texture mapping" as v1.2+;
+    colorization moves to v1.1.
+  - `CLAUDE.md` decision count and key-decision table need DEC-036.
+- **Not decided here:**
+  - Scanner GCP/SCAN operating modes.
+  - Whether to upgrade the LD19.
+  - The target field procedure.
+  Each needs its own decision.
+
 ---
 
 ## Decision Index
@@ -1261,7 +1366,7 @@ redeploy.sh) and the gap between repos was widening every week.
 | DEC-023 | SLAM Deferred | Software |
 | DEC-024 | Accuracy Target | Accuracy |
 | DEC-025 | Validation Method | Accuracy |
-| DEC-026 | Camera as Reference | Camera |
+| DEC-026 | Camera as Reference | Camera — **proposed for supersession by DEC-036** |
 | DEC-027 | Triggered Capture | Camera |
 | DEC-028 | TOML Config | Config |
 | DEC-029 | GPIO Library (rpi-lgpio) | Upstream Compat |
@@ -1271,3 +1376,4 @@ redeploy.sh) and the gap between repos was widening every week.
 | DEC-033 | Triple-Channel Telemetry | Base-Station Integration |
 | DEC-034 | Coords: log SI/WGS84, convert at export | Base-Station Integration |
 | DEC-035 | Deep Alignment with arm-drone-lidar-workflow | Deep-Alignment Overhaul |
+| DEC-036 | ELP Stereo Pair as Measurement Instrument (proposed) | Camera Measurement |
