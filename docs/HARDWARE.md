@@ -170,12 +170,13 @@
 | Attribute | Value |
 |-----------|-------|
 | **Role** | Replaces the HQ Camera for context imagery. Candidate added roles: target detection for scanner resection, point-cloud colorization |
+| **Model** | Probably ELP-USB16MP01-BH120 (box housing; bare board is -H120). Confirm from the housing label or `lsusb -v` |
 | **Quantity** | 2 |
 | **Sensor** | Sony IMX298, 1/2.8", 1.12 µm pixels, rolling shutter |
 | **Resolution** | 4656 × 3496 (16 MP) |
-| **Lens** | Wide angle, ~118–120° "low distortion", fixed focus, f/1.8, M12 mount (listing's focal-length fields are garbled; true focal length unconfirmed) |
+| **Lens** | Wide angle, ~118–120° "low distortion" (axis unspecified; expect real barrel distortion), fixed focus, M12 mount with IR-cut filter in the lens. f/1.8 appears on no ELP page. Centre focal length unknown, ~1,400–2,500 px at full res; calibration settles it |
 | **Interface** | USB 2.0, UVC (no vendor driver; V4L2 on Linux) |
-| **Formats** | MJPEG 4656×3496 @ 10 fps; YUY2 (uncompressed) full-res @ 1 fps; MJPEG 2320×1744 @ 30 fps |
+| **Formats** | Vendor claims: MJPEG 4656×3496 @ 10 fps; YUY2 full-res @ 1 fps; MJPEG 2320×1744 @ 30 fps. ⚠️ Full-res YUY2 @ 1 fps is unverified: a 32.55 MB frame exceeds one USB 2.0 isochronous endpoint (~24.6 MB/s), so it only works with bulk transfer. Check `lsusb -v` |
 | **Exposure / WB** | Auto (AEC / AWB); manual control via UVC not yet verified |
 | **Mounting** | On the rotating platform, on a 200 mm cheese plate, ~150–180 mm apart (6–7 in, from memory; stereo calibration will recover the exact baseline). Both point the same direction as a stereo pair |
 | **Status** | ✅ Owned |
