@@ -1,7 +1,7 @@
 # Hardware Inventory
 
 **Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
-**Last Updated:** 2026-09-29 (imaging: HQ Camera retired; 2× ELP 16MP USB cameras on the rotating platform, §4.3)
+**Last Updated:** 2026-09-30 (target placement: flat-target range and test pointer, §4.3)
 
 > **Rover BOM is unchanged from v0.9.2** except: T-Deck moved out (now owned
 > by Base-Station, per DEC-033); ESP32 LoRa role expanded to dual-mode (LoRa
@@ -230,7 +230,9 @@ otherwise.
   depending on the true focal length.
 - Viewed flat, the apparent height is the width times sin(viewing angle). From a
   1.5 m mast on level ground that is ~49–61 px at 5 m, ~13–16 px at 10 m, and
-  ~6–7 px at 15 m. The detection floor is ~20 px.
+  ~6–7 px at 15 m. The detection floor is assumed to be ~20 px, so flat targets
+  work to ~7 m on level ground; bench test 11 measures the real floor. Placement
+  geometry and tests: `docs/research/elp-stereo/notes/target_placement_geometry.md`.
 - Sheen near grazing angles washes out the black quadrants.
 
 ---

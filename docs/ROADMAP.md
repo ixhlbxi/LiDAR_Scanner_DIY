@@ -1,7 +1,7 @@
 # Roadmap & Next Steps
 
 **Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
-**Last Updated:** 2026-09-29 (DEC-036 camera plan)
+**Last Updated:** 2026-09-30 (DEC-036 target placement tests)
 
 ---
 
@@ -87,7 +87,7 @@ scan session, against the live Base-Station `ARM_BASE` caster.
 |---|---|
 | Hardware acquisition | Order 2× ZED-F9P + antennas + 3.3V regulator + batteries (see [HARDWARE.md §1.1](HARDWARE.md#11-acquisition-status)) |
 | Wiring + bench rig | Assemble per HARDWARE.md pinout; verify each sensor with `tests/hardware/test_*` diagnostic scripts |
-| Camera bench tests (DEC-036 gates) | Tests 1–5 and 9 from the table in `reports/ELP stereo cameras for LiDAR scanner.md`: `lsusb -v` transfer type, `v4l2-ctl` formats and controls, dual-stream, LD19/F9P serial gaps while a camera streams, full-res YUY2 timing, power. Results set the capture design |
+| Camera bench tests (DEC-036 gates) | Tests 1–5 and 9 from the table in `docs/research/elp-stereo/REPORT.md`: `lsusb -v` transfer type, `v4l2-ctl` formats and controls, dual-stream, LD19/F9P serial gaps while a camera streams, full-res YUY2 timing, power. Results set the capture design |
 | Camera capture backend (DEC-036) | Plan first, then replace Picamera2 in `camera.py` with V4L2. Two cameras, one streams at a time at rest, locked controls, raw MJPEG, `[camera]` for two devices, udev by port path, `tests/hardware/test_camera.py` rewritten |
 | Integrated bench scan | `python -m rover.main` end-to-end with all sensors + NTRIP + Base-Station status.json reachable |
 | Field shakedown | Outdoor RTK FIX achieved within ~60 s; runtime ≥4 h; LoRa fallback verified |
@@ -110,11 +110,19 @@ calibration of the LiDAR → IMU → GNSS transform chain.
   (power cycle, warm-up, transport).
 - LD19 target-plate test: the Sky High target at 3, 6, 9 and 12 m, for real range
   and plane-fit σ.
-- Open-sky resection proof: resect a station from 3 targets, flat and rod-mounted,
-  where RTK has a solid fix, and compare. This validates target resection before relying on it
-  under canopy.
-- `scripts/georef.py`: target detection, resection (range+bearing ≤10 m,
-  bearings-only beyond), per-camera colorization with occlusion handling.
+- Target placement tests 11–13 (DEC-036 amendment 2026-09-30,
+  `docs/research/elp-stereo/notes/target_placement_geometry.md`): flat-target
+  detection floor at 3–9 m, mast bearing repeatability per microstep, and
+  ray-to-ground-plane range at 5–9 m.
+- Open-sky resection proof (test 14): resect a station from 3 targets, flat and
+  rod-mounted, where RTK has a solid fix, and compare. Include the recommended
+  layout (4–6 m, ~120° apart, scanner inside the triangle), a near-danger-circle
+  layout and a two-targets-per-frame layout. This validates target resection
+  before relying on it under canopy.
+- Target field procedure decision, from tests 11–14.
+- `scripts/georef.py`: target detection, resection (range+bearing ≤5 m on flat
+  targets and ≤10 m on rods, azimuth-only beyond), per-camera colorization with
+  occlusion handling.
 - LiDAR upgrade decision (S2/S3 class) after the plate test and a midday sun test.
 - Closed-loop motor control via encoder or limit switch.
 - ICP-based scan-to-scan registration in post-processing for indoor scans.

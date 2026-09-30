@@ -1,7 +1,7 @@
 # Design Decisions Log
 
 **Document Status:** v0.10 — deep alignment with arm-drone-lidar-workflow
-**Last Updated:** 2026-05-30
+**Last Updated:** 2026-09-30 (DEC-036 amendment: target placement geometry)
 
 This document records all significant architectural and engineering decisions,
 including rationale, alternatives considered, and implications.
@@ -1252,7 +1252,8 @@ processed offline in `scripts/georef.py`. Its roles, in priority order:
    and heading. Targets lie flat by default and go on rods only where geometry
    requires it (amendment below).
    - Targets within ~10 m: camera bearing plus LD19 plane-fit range; 2 targets
-     suffice with the scanner leveled, 3 give a check.
+     suffice with the scanner leveled, 3 give a check. *(Flat targets: ~5 m, not
+     ~10 m. See the 2026-09-30 amendment below.)*
    - Targets beyond ~10 m, where the LD19's 12 m spec runs out: bearings-only
      resection from 3 targets, 4 for a check, or GNSS/PPK position with the
      targets supplying heading only.
@@ -1281,12 +1282,15 @@ offline. Capture rules:
   calibration they depend on.
 
 **Gates before implementation** (tests in
-`reports/ELP stereo cameras for LiDAR scanner.md`):
+`docs/research/elp-stereo/REPORT.md`):
 - `lsusb -v` transfer type and `v4l2-ctl` formats/controls confirm the capture design.
 - Dual-stream and serial-gap tests confirm camera capture does not starve the
   LD19 or F9P.
 - ChArUco intrinsics settle the real focal length and lens model.
 - Repeatability tests show the pair holds its relative yaw well enough to use.
+- For v1.1 resection (not the v1.0 capture backend): tests 11–14 in
+  `docs/research/elp-stereo/notes/target_placement_geometry.md` set the target
+  field procedure (2026-09-30 amendment).
 
 **Context:** 2026-09-29 deep dive (report above). Key facts:
 - Likely model: ELP-USB16MP01-BH120.
@@ -1377,6 +1381,38 @@ offline. Capture rules:
     scanner.
   - Sheen washes out the black quadrants near grazing.
   - Elevation angle is less precise than azimuth on a flat target.
+
+**Amendment 2026-09-30: target placement geometry (hypothesis, pending tests 11–14):**
+
+Worked numbers are in `docs/research/elp-stereo/notes/target_placement_geometry.md`.
+They correct one part of this decision and flag one risk. Neither changes the
+decision itself.
+
+- **Correction: range plus bearing is a ~5 m method for flat targets, not ~10 m.**
+  A flat 24 in target collects ~11 LD19 points at 5 m, ~4 at 7 m and ~1 at 10 m,
+  so a plane fit on the target fails past ~5 m. Fitting the surrounding ground
+  and intersecting the camera ray with it does not rescue longer ranges: range
+  error is height error ÷ sin(viewing angle), about 7× at 10 m from a 1.5 m mast.
+  - Flat targets within ~5 m: bearing plus LD19 range, as above.
+  - Flat targets from 5 m to the ~7 m detection limit: azimuth-only resection,
+    3 targets, 4 for a check.
+  - The ~10 m range-plus-bearing case survives for vertical rod targets only,
+    pending test 10.
+- **Risk: mast angle, not the camera, likely sets the bearing error.** Each target is
+  imaged at a different mast angle from the open-loop stepper (DEC-016/017).
+  Microstep positions are not evenly spaced, and a 0.05–0.1° mast error is
+  ~9–17 mm at 5–10 m against ~2 mm from the camera. That still fits the ±5–10 cm
+  budget. Until test 12 measures it, quote system bearing precision as the mast
+  figure, not 0.01°.
+- **Elevation angles are secondary observations.** They carry the IMU's levelling
+  error. Resect on azimuth; take station height from GNSS or the LD19 ground.
+- **Provisional placement:** 3 flat targets at 4–6 m, similar distances, ~120°
+  apart, scanner inside their triangle to stay off the danger circle. Beyond ~7 m
+  on level ground, use rods. For heading only with a GNSS fix, use one target
+  as far away as can be detected.
+- **Still not decided:** the target field procedure. Tests 11–14 (detection
+  floor, mast repeatability, ground-plane range, resection geometry) feed that
+  decision.
 
 ---
 
