@@ -155,6 +155,73 @@ target geometry. Detection and resection code are v1.1.
 
 ---
 
+### CR-007 — Backsight beacon on the base pole
+
+**What:** A blinking LED (or IR LED) on the Base-Station pole at a measured height above
+the ARP, with a unique blink code. Filed sibling-side as BACKLOG **SS-1**
+(§Scanner-Support Upgrades) on 2026-10-02.
+
+**Why we need it:**
+- Gives every scanner station an automatic, known backsight: the cameras find the beacon
+  by its blink pattern, so no target matching is needed for that point.
+- RTCM 1005 already broadcasts the base ARP, so the rover learns the beacon position from
+  the correction stream plus one configured height.
+
+**Status:** ⏳ Pending sibling enhancement SS-1.
+
+**Rover-side ready:** no. Needs blink-code detection in the camera pipeline (BS-R4 below).
+
+---
+
+### CR-008 — Retroreflective band on the base pole
+
+**What:** A taped band at a measured height above the base ARP, so the base pole is also a
+LiDAR target. Filed sibling-side as BACKLOG **SS-3** on 2026-10-02.
+
+**Why we need it:**
+- Backup to CR-007 when the beacon is out of camera view or washed out by sun.
+
+**Status:** ⏳ Pending sibling SS-3 (trivial; a field task, not code).
+
+**Rover-side ready:** partly. Intensity-band detection is the same code path as the PVC
+pipe targets.
+
+---
+
+### CR-009 — Mission tag from the base `/status`
+
+**What:** The Base-Station `/status` JSON already carries `mission`. The rover should stamp
+it into every station's metadata so base RINEX and scanner sessions pair automatically.
+
+**Why we need it:**
+- Removes a manual pairing step during processing.
+
+**Status:** ✅ Base side exists. Caveat: the base HTTP API binds to loopback by default; the
+rover can only reach it over the field AP after `rtk-base field-mode on` (sibling FA-5).
+No sibling work is owed.
+
+**Rover-side ready:** no. See BS-R3 below.
+
+---
+
+### Rover-side — reuse of Base-Station work (filed 2026-10-02)
+
+Rover tasks that reuse code or formats the sibling repo already ships, instead of building
+parallel versions. From the 2026-10-02 review against the static-station scanner redesign.
+
+| ID | What | Why |
+|---|---|---|
+| BS-R1 | Use the same 4.3" Freenove DSI touchscreen as the base, and port `display_touch.py` (accidental-touch filters, `evaluate_tap`) and `display_hold.py` (3 s destructive hold) | Those modules are pure and already tuned on that exact panel, which reports no contact size, so contact count plus a refractory window is the only palm defence |
+| BS-R2 | In rover-GCP mode, write the sibling DEC-029 occupation-event JSONL format | Lets the sibling `slice_ubx_by_occupations.py` and `ubx_to_rinex.py` process scanner GCP occupations unchanged |
+| BS-R3 | Read `mission` from the base `/status` on connect and stamp it into station metadata | Closes CR-009 rover-side |
+| BS-R4 | Detect the base beacon (CR-007) by blink code and the pole band (CR-008) by intensity, and use the base ARP from RTCM 1005 as a known point in station resection | Gives the resection a known point that needs no target setup |
+
+Already tracked elsewhere, not re-filed: the scanner sharing `ARM_BASE` is CR-005 (sibling
+NC-1); the ANN-MB-00 phase-centre offset is the sibling DEC-021 back-calc, gated on F-8a
+and AUD-9, and one result applies to both units since they use the same antenna model.
+
+---
+
 ## Rover-side deferred (from the 2026-09-22 super-audit)
 
 Items dispositioned `defer` or `track` in `docs/AUDIT_super_20260922_1810.md`, plus the
