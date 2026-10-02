@@ -163,6 +163,19 @@ These items require decisions during implementation:
 | Enclosure design | 3D printed vs project box | After bench integration |
 | Mounting bracket design | Custom vs adapted | After sensor layout finalized |
 | Cable routing | Internal vs external | After enclosure decision |
+| LD19 mount: offset from axis, plane radial vs tangential (DEC-037) | Radial (no zenith blind zone) vs tangential (blind cylinder usable for an axis mast) | Case redesign |
+| HoI laser placement (DEC-044) | Arm length to clear the tribrach and tripod head | Case redesign |
+
+### 3.4 Static-station redesign TBDs (DEC-037–DEC-045)
+
+| Item | Options | Decision Point |
+|------|---------|----------------|
+| Camera resection target (DEC-038 conflict with DEC-036) | Flat checkers vs PVC cylinders vs both | After DEC-036 tests 11–14 are re-scoped to include cylinders |
+| Stereo role at 75 cm (DEC-042) | Cross-check only vs secondary range | After stereo calibration measures real error |
+| Exact geared NEMA17 part (DEC-040) | ~27:1 planetary models | Before ordering |
+| HoI sensor (DEC-044) | Owned Bosch (if hackable) vs SEN0366 vs JRT M88B | After checking for a Bosch "C" model |
+| LiDAR upgrade (DEC-037) | Keep LD19 vs Unitree L2 vs Livox Mid-360 vs used Mid-40 | After a field test shows the LD19's range limit in practice |
+| Dual-antenna heading (DEC-039) | Not needed vs UM982 | After field use of target matching |
 
 ---
 
@@ -301,6 +314,7 @@ Documents to create during implementation:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| v0.10 | 2026-10-02 | Static-station redesign recorded as DEC-037–DEC-045; open items in §3.4 |
 | v0.9.2 | 2026-02-22 | Audit update: fix upstream repo URL, add DEC-029 (GPIO library), note upstream changes |
 | v0.9.1 | 2025-12-26 | Architecture freeze; complete gap analysis |
 | v0.9.0 | 2025-12-26 | Initial project documentation |

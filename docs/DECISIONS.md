@@ -1,7 +1,7 @@
 # Design Decisions Log
 
 **Document Status:** v0.10 — deep alignment with arm-drone-lidar-workflow
-**Last Updated:** 2026-09-30 (DEC-036 amendment: target placement geometry)
+**Last Updated:** 2026-10-02 (DEC-037–DEC-045: static-station scanner redesign)
 
 This document records all significant architectural and engineering decisions,
 including rationale, alternatives considered, and implications.
@@ -354,7 +354,7 @@ triple-channel telemetry described in DEC-033. See DEC-033.
 
 ### DEC-011: MPU-9250 as Primary IMU
 
-**Status:** Accepted
+**Status:** Superseded by DEC-041
 **Date:** 2026-03-22
 **Decided by:** Brian
 **Rationale:** 9-axis gives indoor heading when GNSS is unavailable;
@@ -475,7 +475,7 @@ smooth O(1) per-scan orientation without gimbal-lock or hardware sync.
 
 ### DEC-015: Direct Drive Rotation (No Slip Ring)
 
-**Status:** Accepted
+**Status:** Accepted (no slip ring) · Amended by DEC-040 (drive is now geared)
 **Date:** 2026-03-22
 **Decided by:** Brian
 **Rationale:** Slip ring adds cost and failure modes; ±180° with a
@@ -503,7 +503,7 @@ flexible cable loop is sufficient for v1.0 use cases.
 
 ### DEC-016: Open-Loop Stepper Indexing
 
-**Status:** Accepted
+**Status:** Superseded by DEC-040
 **Date:** 2026-03-22
 **Decided by:** Brian
 **Rationale:** Steppers rarely miss steps at low speed; closed-loop adds
@@ -533,7 +533,7 @@ hardware for marginal benefit at v1.0 scale.
 
 ### DEC-017: 1/16 Microstepping
 
-**Status:** Accepted
+**Status:** Superseded by DEC-040
 **Date:** 2026-03-22
 **Decided by:** Brian
 **Rationale:** Smoothest motion + finest position resolution the A4988
@@ -1234,7 +1234,7 @@ redeploy.sh) and the gap between repos was widening every week.
 
 ### DEC-036: ELP Stereo Pair as a Post-Processed Measurement Instrument (supersedes DEC-026)
 
-**Status:** Accepted
+**Status:** Accepted · Amended by DEC-038 (targets) and DEC-042 (camera rig); both flag open conflicts
 **Date:** 2026-09-29
 **Decided by:** Brian
 **Rationale:** The retired HQ Camera was a context camera. The two ELP 16MP
@@ -1416,6 +1416,424 @@ decision itself.
 
 ---
 
+## 14. Static-Station Scanner Redesign (2026-10-01 / 2026-10-02)
+
+Recorded 2026-10-02 from a two-day design session with Brian. The session started from a
+concrete use case: scanning the facades and roof soffits of a two-story school with clear
+sky, then registering the result to a drone LiDAR flight in Trimble TBC with a base logging
+RINEX. Working that case through turned the rover into a **static, station-based terrestrial
+scanner**. DEC-037 sets that workflow; DEC-038 to DEC-045 are the hardware and software
+choices that follow from it.
+
+**Conflicts with earlier decisions are flagged in each entry, not resolved silently.** The
+largest is the target method: DEC-036 makes flat checker targets the default for camera
+resection, and DEC-038 adds tripod-hung PVC cylinders as the primary scanner target. See
+DEC-038.
+
+---
+
+### DEC-037: Static Station-Based Scanning Workflow
+
+**Status:** Accepted
+**Date:** 2026-10-02
+**Decided by:** Brian
+**Rationale:** At facade and soffit ranges, absolute accuracy is set by station position and
+heading, not by the LiDAR. A leveled, stationary scanner located from surveyed targets meets
+±5–10 cm where a moving rover with consumer GNSS and a MEMS IMU cannot, especially where the
+building blocks half the sky.
+
+**Decision:** The scanner works as a terrestrial laser scanner: set up on a tripod at a series
+of stations, scan with the head stepping and settling, and locate each station from surveyed
+targets. The field sequence is:
+
+1. Base station on a nail, logging static data for the whole session (submit to OPUS later to
+   put the nail on NAD83(2011)).
+2. Survey the GCP nails with the scanner's F9P in GCP mode: two occupations of 2–3 min each,
+   at least 30–60 min apart. Hold 1–2 back as checkpoints.
+3. Set a registration target over each nail (DEC-038).
+4. Lay out stations so each sees 3 targets spread more than 30° apart in bearing, and
+   neighbouring stations share at least 2.
+5. At each station: GNSS fix if available, LiDAR scan, a 0° camera registration frame, then
+   the tilted camera frames (DEC-042).
+6. Log station ID, visible target IDs, target heights, timestamps and mode.
+
+The scan loop is **step-and-scan**: step, settle (~0.5 s), confirm stillness on the gyro,
+capture one or two full LD19 revolutions, read the encoder (DEC-040), repeat. Nothing moves
+during a capture.
+
+**Context:** For a two-story building (eave ~8.5 m, an estimate from Street View), the
+workable LD19 standoff is ~8–10 m, where the facade blocks sky down to ~36–42° elevation over
+nearly 180° of azimuth. GNSS degrades exactly where the scanner must stand. At 10 m, 0.3° of
+heading error is ~5 cm.
+
+**Rationale:**
+- Targets give position *and* heading, so the station no longer depends on GNSS or a compass.
+- Step-and-scan removes the timing problem: with nothing moving during a capture,
+  LiDAR-to-IMU timestamp interpolation (DEC-014) stops mattering for point accuracy.
+- It is the workflow TBC already registers natively (cloud-to-cloud and target-based).
+
+**Alternatives Considered:**
+- Mobile scanning with direct georeferencing (RTK + IMU): fails under eaves and next to tall
+  walls; the MPU-9250 drifts within seconds without GNSS.
+- Photogrammetry alone: textureless soffits and white trim do not match; needs more control,
+  not less.
+
+**Implications:**
+- The LD19 stays for v1.0. Its ~12 m rated range (less on dark surfaces) caps standoff, which
+  is the main argument for an upgrade. The upgrade fork stays open: Unitree L2 (~$400, 15 m at
+  10% reflectivity), Livox Mid-360 (~$900–1,000, 40 m at 10%), used Livox Mid-40 (~$460–690,
+  90 m at 10%, 38.4° cone, no IMU).
+- The LD19's mounting offset from the rotation axis and its plane orientation (radial or
+  tangential) are set in the case redesign and measured in the LiDAR-to-axis calibration.
+  A tangential plane leaves a blind cylinder above the axis; a radial one does not.
+- Insta360-style 360° cameras are rejected: proprietary stitching, poor calibratability,
+  awkward Pi control, and no clean mount.
+- `src/rover/main.py` orchestration becomes station-oriented (see DEC-043 modes).
+
+---
+
+### DEC-038: Registration Targets — Tripod-Hung Retroreflective PVC Cylinders (amends DEC-036)
+
+**Status:** Accepted
+**Date:** 2026-10-02
+**Decided by:** Brian
+**Rationale:** From a 1.3–1.5 m scanner height, a flat 24 in checker on the ground is a ~7°
+grazing target at 10 m: ~11 px tall on camera and about zero LD19 points. A vertical cylinder
+hung on a plumb line is self-plumbing, looks the same from every station, and gives the LD19
+enough points to fit an axis.
+
+**Decision:**
+- **Target:** 4 in PVC pipe (Schedule 40 or thin-wall DWV), 60 cm long, wrapped in two or three
+  bands of DOT-style retroreflective tape at measured heights, with plain stretches between.
+- **Suspension:** hung from a small tripod by an eye bolt through a centred hole in the top end
+  cap, on braided mason's line (not stretchy cord), with an 8–16 oz brass plumb bob below,
+  tip just above the nail eyelet. Gravity plumbs the axis over the nail.
+- **Quantity:** 10, matching the numbered 0–9 checker kit one-to-one. Around a rectangular
+  building: one off each corner (diagonally), one at the midpoint of each side 10–15 m out in
+  open sky, plus 2 checkpoints. Add one per extra corner for wings or an L-shape.
+- **Per-target record (once):** eyelet-to-bottom-of-pipe height, band heights, and the pipe's
+  GCP number painted on it.
+- **Detection:** RANSAC cylinder fit on the LiDAR points, with the reflective bands as
+  known-height intensity markers. The fitted axis gives the nail position.
+- **Checker targets stay flat for the drone.** Same nails. Fly first, then hang the pipes.
+
+**Conflict with DEC-036 (flagged, not resolved):** DEC-036 and its 2026-09-29 amendment make
+flat checkers the scanner default, with rods as the exception. DEC-038 makes the PVC cylinder
+the default **LiDAR** target. The two can coexist: the cylinder gives range and a LiDAR-fit
+position; the flat checker still serves camera bearings within ~5–7 m and ties to the drone.
+**Not yet decided:** whether camera resection (DEC-036 role 1) keeps targeting the flat checkers
+or moves to detecting the cylinders. DEC-036 tests 11–14 should be re-scoped to include the
+cylinders before that decision.
+
+**Context:** Options considered in order during the session: flat 60 cm checkers, the same
+checkers stood vertically on rods, 36 in traffic cones, tripods with a hanging chain, and
+tripods with a hanging PVC cylinder.
+
+**Alternatives Considered:**
+- **Vertical checker on a rod:** good camera target (~84 × 84 px at 10 m) but faces one way,
+  needs rotating per station, and leans unless plumbed.
+- **36 in traffic cone over the nail:** symmetric, self-standing, reflective collars; but
+  centring is manual and a 2° lean moves the top ~3 cm. Strong runner-up.
+- **Hanging chain as the plumb line:** too thin for the LD19 at 10 m (mixed-pixel edge points
+  corrupt the centreline) and sways in wind.
+
+**Implications:**
+- Field kit: 10 small tripods, 10 pipes, line, bobs, tape. Tripod legs appear in scans and can
+  block sight lines.
+- In wind, damp the bob in a bucket of water.
+- Calibrate each hang indoors once: the bob tip should land within a few mm of a mark directly
+  below the eye bolt.
+- Software: cylinder detection joins `scripts/georef.py` alongside DEC-036's checker detection.
+
+---
+
+### DEC-039: Station Heading — Target Resection Primary, Magnetometer as Coarse Hint Only
+
+**Status:** Accepted
+**Date:** 2026-10-02
+**Decided by:** Brian
+**Rationale:** At 12 m range every 1° of heading error moves points ~21 cm; the budget needs
+~0.1–0.2°. Only targets meet that with hardware already owned.
+
+**Decision:**
+- **Primary:** heading comes from resection on the DEC-038 targets. Matching is automatic:
+  predicted ranges from the approximate station (pole GNSS or station fix) to every GCP are
+  compared with detected cylinder ranges, or target-to-target triangle shapes are matched to
+  the surveyed layout. A 2D best-fit rotation (Kabsch/Helmert) gives heading plus residuals.
+- **Magnetometer:** coarse heading hint (±5° is enough) to seed target identification, and a
+  "magnetically dirty station" flag from comparing measured field strength and dip to WMM
+  values. Never a heading source.
+- **Optional, cheap:** a backsight beacon on the base pole (sibling SS-1; this repo CR-007)
+  and a retroreflective band on the base pole (sibling SS-3; CR-008).
+- **Deferred to Phase 2:** dual-antenna GNSS heading (Unicore UM982, 0.1–0.2° per 1 m
+  baseline), only if target matching proves unreliable in the field.
+
+**Context:** Magnetometer weaknesses were verified for this use on 2026-10-02:
+- Steel, rebar and chain-link deflect readings by degrees to tens of degrees. ArduPilot keeps
+  drone compasses 5 m from steel-and-concrete buildings for degree-level tolerance.
+- A stepper's residual field changes the offset after every step.
+- At ~66° dip, 1° of tilt error costs 2–5° of heading.
+- The WMM2025 declination model is good to ~0.4°; local anomalies of 3–4° are common.
+- Best case in an open field with perfect calibration is ~0.5–0.6°, 3–5× worse than needed.
+
+**Alternatives Considered:**
+- Dual F9P moving base: ~0.4°, and both antennas must ride the rig, which conflicts with the
+  offset pole (DEC-043).
+- Sun compass from a sky-facing camera: viable secondary (the retired HQ Camera + fisheye is a
+  candidate), weather-dependent; not built for v1.0.
+- North-finding gyro: needs ~0.02°/h bias stability, thousands of dollars.
+- Sighting scope zeroed on a backsight: accurate but one manual step per station.
+
+**Implications:**
+- Resolves the heading half of open item S3-R1 (`CROSS_REPO_BACKLOG.md`): absolute azimuth
+  comes from targets, so Madgwick's magnetic-north frame no longer sets cloud orientation.
+  The NWU→ENU frame fix is still owed for any magnetometer-derived output.
+- `DEC-013` (magnetometer disabled during motor) still applies to the hint.
+
+---
+
+### DEC-040: Rotation Drive — Geared Stepper, Turntable Bearing, Absolute Encoder (supersedes DEC-016 and DEC-017; amends DEC-015)
+
+**Status:** Accepted (encoder, bearing, driver) · Provisional (exact gearmotor)
+**Date:** 2026-10-02
+**Decided by:** Brian
+**Rationale:** A 75 cm camera bar on the head (DEC-042) puts ~7,700:1 load-to-rotor inertia on a
+direct-drive NEMA17, so it overshoots, rings and skips. Gearing cuts that to ~10:1. An encoder
+on the output shaft reads the true angle, which DEC-036's 2026-09-30 amendment identified as
+the likely limit on bearing accuracy.
+
+**Decision:**
+- **Motor:** NEMA17 with an integrated ~27:1 planetary gearbox (~$30–50). Provisional on the
+  exact part.
+- **Driver:** TMC2209 (quiet, microstepping, runs cool), replacing the A4988.
+- **Bearing:** turntable ("lazy susan") bearing carries the head; the motor only supplies
+  rotation.
+- **Encoder:** AS5600 12-bit magnetic encoder on the **output** shaft, diametrically magnetized
+  magnet, 0.5–3 mm air gap, DIR tied to GND, I2C 0x36. It is also the home reference.
+  A bench correction table (stepper counts vs encoder over a full turn) removes off-centre error.
+- **Balance:** centre the camera bar on the axis and use the LiDAR as counterweight.
+- **Motion rules:** approach each position from the same direction (planetary backlash ~1°),
+  settle ~0.5 s, and capture only when the gyro reports still.
+- **Cables:** rotate and unwind, no slip ring (DEC-015's cable approach stands).
+
+**Context:** Rough figures: 75 cm 2020 bar plus two ~100 g cameras ≈ 0.046 kg·m²; NEMA17 rotor
+≈ 60 g·cm². A 5:1 belt still leaves ~300:1.
+
+**Rationale:**
+- Encoder closes the loop that DEC-016 left open, so missed steps or backlash cannot silently
+  rotate a scan.
+- Gearing gives fine angular steps without relying on uneven microstep positions (the DEC-017
+  concern raised in DEC-036's amendment).
+
+**Alternatives Considered:**
+- Keep direct drive (DEC-015/016/017): inadequate for the camera bar.
+- 5:1 belt reduction: not enough inertia reduction.
+- Worm drive: self-locking and wind-resistant, but slower and fussier; revisit only if wind is a
+  problem.
+- Fixed (non-rotating) camera bar on the tripod: stiffer, but loses automated panoramas.
+
+**Implications:**
+- `src/rover/stepper.py` moves from A4988 step/dir timing to TMC2209 and reads the AS5600.
+  GPIO pin assignments in `CLAUDE.md` §7 need revisiting when the driver changes.
+- DEC-016 and DEC-017 are superseded. DEC-015 stands for "no slip ring" but not for "direct drive".
+
+---
+
+### DEC-041: Attitude Sensing — HWT906 on the Base, Two MPU-9250s on the Camera Bar (supersedes DEC-011)
+
+**Status:** Accepted
+**Date:** 2026-10-02
+**Decided by:** Brian
+**Rationale:** A static scanner needs a quiet, stable tilt reference and a bump detector, not a
+fusion IMU. The single MPU-9250 next to the motor was the wrong sensor in the wrong place.
+
+**Decision:**
+- **WitMotion HWT906-TTL** on the **fixed base**, squared to the base edges. Jobs: leveling
+  display, logged residual tilt per station, and gyro stillness/twist detection (catches a
+  tripod nudged around the vertical axis, which no tilt sensor and no head encoder can see).
+  TTL UART. Its magnetometer is used only for DEC-039's coarse hint.
+- **Two MPU-9250s at the ends of the camera bar** (~15 in / ~38 cm from the motor), at I2C 0x68
+  and 0x69 (AD0 high). Jobs: camera tilt angle (accelerometer, 0.5 s averaging, 180° flip zero
+  calibration), bar twist and sag detection from end-to-end disagreement, and a two-point
+  magnetic gradiometer as a better dirty-station detector. Both raw readings are logged every
+  capture, not only their average.
+- **Verify genuine parts:** WHO_AM_I must read 0x71 (MPU-9250); 0x70 is an MPU-6500 with no
+  magnetometer. Buy both new boards from one listing; keep the owned unit as a bench spare.
+
+**Context:** Options compared 2026-10-01: BNO055 (Pi I2C clock-stretching problems, silent
+auto-calibration moves its zero), Murata SCL3300 inclinometer (best static tilt, hard to buy
+outside distributors), WitMotion WT901 / HWT905 (single MPU-9250 inside), HWT901B-RS232 (RS232
+levels would damage the Pi), HWT906 (four-chip array with temperature compensation).
+
+**Rationale:**
+- HWT906 averages four sensors and compensates temperature, which matters for a zero that must
+  hold between sessions. Its "0.05°" claim is unverified; run a 180° reversal test on arrival.
+- Moving the MPU-9250s away from the motor and pairing them turns a liability into a QC check.
+
+**Alternatives Considered:** listed under Context. An AS5600 on the tilt hinge was the first
+choice for camera tilt and was replaced by the bar MPU-9250s, which need no magnet alignment and
+also read bar roll.
+
+**Implications:**
+- I2C bus: AS5600 (0x36), MPU-9250 (0x68), MPU-9250 (0x69). One bus, no mux. Run it at 100 kHz
+  with twisted SDA/SCL pairs; the runs to the bar ends are ~40 cm plus the unwind bundle.
+- UART devices: LD19, HWT906 and the HoI laser (DEC-044). The F9P moves to USB to free a UART.
+- `src/rover/imu.py` and Madgwick (DEC-012) become secondary for static scanning.
+- DEC-011 is superseded.
+
+---
+
+### DEC-042: Camera Rig — 75 cm Stereo Bar on a Manual Tilt Platform (amends DEC-036)
+
+**Status:** Accepted
+**Date:** 2026-10-02
+**Decided by:** Brian
+**Rationale:** Stereo depth error scales with range squared over baseline. At the ~12 m soffit
+range a 10 cm baseline gives ~26 cm; 75 cm gives ~3.5 cm. Manual tilt points the cameras at
+the soffits instead of the lawn.
+
+**Decision:**
+- **Baseline:** 75 cm (~30 in), on one stiff length of 2040 aluminium extrusion.
+- **Mount:** the bar sits on a laser-level tilt platform on the rotating head, balanced on the
+  hinge, with a second screw or stiff plate so the bar cannot twist about the single mount screw.
+- **Tilt:** set by hand (e.g. 0°, 30°, 60°). The angle is **measured** by the bar-end MPU-9250s
+  (DEC-041), not read from the platform's dial (±0.5–1° repeatability is ~10 cm at 12 m).
+- **Calibration:** one stereo calibration (the cameras share the rigid bar), one bar-to-scanner
+  calibration at 0°, plus the hinge axis. Each capture applies the measured tilt.
+- **Camera settings:** lock focus, exposure and white balance before calibrating.
+- **Registration frame:** every station shoots a 0° frame before tilting, so ground targets are
+  in view.
+
+**Conflict with DEC-036 (flagged):** DEC-036 places the cameras ~150–180 mm apart on a 200 mm
+plate, ~80–90 mm off the rotation axis, and limits stereo to a cross-check because of
+decimetre-level error at 15 m. At 75 cm the stereo error at 8–12 m is ~1.6–3.5 cm (assuming
+~1,370 px focal length and 0.25 px matching), which may justify a larger stereo role. **Role
+ordering in DEC-036 is unchanged until calibration measures the real error.** Colorization must
+also account for cameras now ~37 cm off the axis.
+
+**Alternatives Considered:**
+- Commercial stereo cameras (ZED, OAK-D class): ~12 cm baselines, ~1.9 m error at 30 m.
+- Baselines above ~1/10 of range: the views diverge too far to match.
+- Motorized tilt axis: adds a motor, axis non-orthogonality and another boresight for no gain
+  over a measured manual tilt. A vertically mounted LD19 already reaches the zenith.
+
+**Implications:**
+- Head inertia and balance drive DEC-040.
+- `[camera]` config gains tilt angle and the hinge-axis calibration.
+- Plain white soffits still won't match in stereo; LiDAR covers them.
+
+---
+
+### DEC-043: GNSS Antenna on an Offset Pole; Two Operating Modes
+
+**Status:** Accepted
+**Date:** 2026-10-02
+**Decided by:** Brian
+**Rationale:** Moving only the antenna into open sky keeps one Pi logging everything while
+getting the fix away from the wall.
+
+**Decision:**
+- **Hardware:** the F9P and Pi stay in the scanner box. The ANN-MB-00 antenna (on its metal
+  ground plate, same as the base) mounts on a survey pole, connected by its 5 m cable. Mount
+  the F9P on the fixed base so the cable never winds. Clamp the cable at the box for strain relief.
+- **Reach:** ~3 m horizontal after pole height and slack. A few metres of low-loss extension
+  (RG316 or LMR-200, not RG174) should work given the antenna's built-in amplifier; check C/N0
+  in u-center before and after.
+- **Pole as a target:** wrap it in retroreflective tape so the LiDAR locates it each station.
+- **Two top-level modes:**
+  1. **GCP mode:** pole on a nail, average the fix, log the point ID. Writes the sibling DEC-029
+     occupation-event format (BS-R2).
+  2. **Scan mode,** with an antenna setting:
+     - **On tripod:** antenna on a short side arm off the fixed base (not above the head, which
+       is in the LD19's zenith sweep; mask the arm in software). Fixed calibrated offset to the
+       scanner origin. Default for open-sky stations.
+     - **Offset pole:** LiDAR finds the taped pole; measured offset. For close-in stations.
+     - **None:** targets only. The scan still runs where no fix is available.
+  Log the antenna setting and offset in every station's metadata.
+
+**Context:** A distance from the pole alone places the scanner on a circle; a direction is also
+needed. Seeing two known points (the live pole plus a target, or two targets) fixes both.
+
+**Alternatives Considered:**
+- Three separate modes (GCP, scan-on-tripod, scan-offset): the scan path is identical, so three
+  modes would mean three code paths drifting apart.
+- Splitting GNSS into a separate rover unit: unnecessary once the antenna, not the receiver, moves.
+
+**Implications:**
+- Dual-antenna heading (DEC-039 Phase 2) would require both antennas on the rig, which this
+  mode does not provide.
+- `src/rover/gnss.py` connects over USB.
+
+---
+
+### DEC-044: Height of Instrument — Phase-Shift Laser Module and Height Plate
+
+**Status:** Provisional (part choice); Accepted (method)
+**Date:** 2026-10-02
+**Decided by:** Brian
+**Rationale:** Station height from resection with 3+ 3D targets is already solved; a
+millimetre-class measurement of height above the mark is the independent check, and the same
+sensor detects tripod settling.
+
+**Decision:**
+- **Method:** a downward laser module on a short arm off the fixed base, clearing the tribrach
+  and tripod head (~15–17 cm across), aimed at a light matte height plate (~25–30 cm across, with
+  a centre hole or three short legs) set flush over the nail.
+- **Height chain:** antenna height above mark = laser reading + (scanner bottom → antenna
+  reference point) − plate thickness. Tilt correction is negligible (0.3° over 1.5 m ≈ 0.02 mm);
+  log tilt anyway. Measure every height to one antenna reference point (e.g. the bottom of the
+  ANN-MB-00 plate), the same point used for the base and for OPUS.
+- **Part:** DFRobot SEN0366 (±1 mm SD, visible ~6 mm spot at 10 m, 3.3–5 V TTL UART, Python
+  library `serial-laser-ranger`), unless an owned Bosch laser measure proves hackable first
+  (C models over Bluetooth; non-C models via the battery-compartment serial port).
+- **Checks:** tape the slant height each station as a blunder check; a resection-vs-taped
+  disagreement over ~2 cm flags a misidentified target, an unrecorded target height or a moved
+  tripod.
+
+**Context:** Rejected after review on 2026-10-01: TOF10120, VL53L7CX 8×8, drone altimeter
+(±2–3 cm), Benewake TFmini Plus (±5 cm), Parallax LaserPING (55° FOV) and PING ultrasonic,
+Waveshare TOF (C) (±3 cm), DFRobot SEN0590 (19° cone). All are wide-beam or centimetre-class.
+JRT M88B (±1 mm, but 0–40 °C and 2.0–3.3 V only) and Meskernel LDL-T are alternates.
+
+**Alternatives Considered:** listed under Context. A short-range ultrasonic was kept as an idea
+for a proximity guard (pause a capture when someone walks within ~2 m), not for height.
+
+**Implications:**
+- One more UART device (DEC-041 implications).
+- Bench-test the SEN0366 at the actual mount height: one forum report gave out-of-range errors
+  below 300 mm and up to 3 m, contradicting the 0.05 m spec.
+
+---
+
+### DEC-045: Operator Display — DSI Touchscreen on the Fixed Base
+
+**Status:** Accepted
+**Date:** 2026-10-02
+**Decided by:** Brian
+**Rationale:** The operator stands at the tripod; a screen on the scanner replaces a handheld,
+and the sibling base station already runs and has tuned the same panel class.
+
+**Decision:**
+- A 4–5" capacitive DSI touchscreen on the fixed base, with a printed sun hood. Prefer the
+  sibling's 4.3" Freenove panel so its `display_touch.py` and `display_hold.py` port directly
+  (BS-R1).
+- One screen carries the level display (bullseye plus X/Y bars, colour bands at ≤0.1° and
+  ≤0.5°, 0.5 s smoothing), GNSS status, encoder and camera-tilt angles, a "STILL" flag and the
+  scan controls.
+- No T-Deck on the scanner. A phone can view the same UI if the Pi serves it as a web page.
+- Optional: a 12–16 LED WS2812 ring as a sunlight-readable level.
+
+**Context:** The T-Deck was already owned by the Base-Station under DEC-033. A 1.54" ST7789
+SPI display was considered first and dropped when the touchscreen took over its role.
+
+**Alternatives Considered:** 1.54" SPI TFT; T-Deck mirror over LoRa.
+
+**Implications:**
+- DSI frees SPI and GPIO.
+- The ESP32 LoRa boards stay for the RTCM fallback (DEC-031); they are unaffected.
+
+---
+
 ## Decision Index
 
 | ID | Topic | Section |
@@ -1430,13 +1848,13 @@ decision itself.
 | DEC-008 | LoRa Parameters | Comms |
 | DEC-009 | Packet Loss Handling | Comms |
 | DEC-010 | T-Deck Receive-Only | Comms — **superseded by DEC-033** |
-| DEC-011 | MPU-9250 Primary | Sensor |
+| DEC-011 | MPU-9250 Primary | Sensor — **superseded by DEC-041** |
 | DEC-012 | Madgwick Filter | Sensor |
 | DEC-013 | Mag Disabled w/ Motor | Sensor |
 | DEC-014 | Timestamp Slerp | Sensor |
-| DEC-015 | Direct Drive | Mechanical |
-| DEC-016 | Open-Loop Indexing | Mechanical |
-| DEC-017 | 1/16 Microstepping | Mechanical |
+| DEC-015 | Direct Drive | Mechanical — **amended by DEC-040** |
+| DEC-016 | Open-Loop Indexing | Mechanical — **superseded by DEC-040** |
+| DEC-017 | 1/16 Microstepping | Mechanical — **superseded by DEC-040** |
 | DEC-018 | Split Power Domains | Power |
 | DEC-019 | Dedicated 3.3V Reg | Power |
 | DEC-020 | Python + Pi OS Lite | Software |
@@ -1455,4 +1873,13 @@ decision itself.
 | DEC-033 | Triple-Channel Telemetry | Base-Station Integration |
 | DEC-034 | Coords: log SI/WGS84, convert at export | Base-Station Integration |
 | DEC-035 | Deep Alignment with arm-drone-lidar-workflow | Deep-Alignment Overhaul |
-| DEC-036 | ELP Stereo Pair as Measurement Instrument | Camera Measurement |
+| DEC-036 | ELP Stereo Pair as Measurement Instrument | Camera Measurement — **amended by DEC-038, DEC-042** |
+| DEC-037 | Static Station-Based Scanning Workflow | Static-Station Redesign |
+| DEC-038 | Tripod-Hung PVC Cylinder Targets | Static-Station Redesign |
+| DEC-039 | Heading: Target Resection, Mag as Hint | Static-Station Redesign |
+| DEC-040 | Geared Stepper + Turntable + AS5600 | Static-Station Redesign |
+| DEC-041 | HWT906 Base + Two Bar MPU-9250s | Static-Station Redesign |
+| DEC-042 | 75 cm Stereo Bar on Manual Tilt | Static-Station Redesign |
+| DEC-043 | Offset-Pole Antenna; GCP / Scan Modes | Static-Station Redesign |
+| DEC-044 | Height of Instrument: Laser + Plate | Static-Station Redesign |
+| DEC-045 | DSI Touchscreen on Fixed Base | Static-Station Redesign |

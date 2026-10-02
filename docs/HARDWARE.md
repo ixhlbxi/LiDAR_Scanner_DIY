@@ -1,7 +1,7 @@
 # Hardware Inventory
 
 **Document Status:** v0.10 — current (deep-alignment overhaul applied 2026-05-30)
-**Last Updated:** 2026-09-30 (target placement: flat-target range and test pointer, §4.3)
+**Last Updated:** 2026-10-02 (static-station redesign, DEC-037–DEC-045: callout below and §10.1)
 
 > **Rover BOM is unchanged from v0.9.2** except: T-Deck moved out (now owned
 > by Base-Station, per DEC-033); ESP32 LoRa role expanded to dual-mode (LoRa
@@ -15,6 +15,19 @@
 >   [`deploy/udev/`](../deploy/udev/) (`/dev/rover-f9p`, `/dev/rover-lidar`, `/dev/rover-esp32`)
 
 ---
+
+> **2026-10-02 — static-station redesign (DEC-037–DEC-045).** Several sections below
+> describe hardware that the redesign replaces or re-roles. Until each section is rewritten:
+> - §3.2 / §3.3 NEMA17 + A4988: replaced by a ~27:1 planetary-geared NEMA17, TMC2209 driver,
+>   turntable bearing and an AS5600 output-shaft encoder (DEC-040).
+> - §4.3 camera mounting: cameras move to a 75 cm 2040 bar on a manual tilt platform (DEC-042).
+> - §4.4 targets: flat checkers stay for the drone; the scanner's primary LiDAR target is a
+>   tripod-hung retroreflective PVC cylinder over each nail (DEC-038).
+> - §5.1 MPU-9250: no longer the primary IMU. A WitMotion HWT906 on the fixed base does
+>   leveling and stillness; two MPU-9250s at the bar ends measure camera tilt (DEC-041).
+> - §6.3 antenna: the scanner's ANN-MB-00 rides an offset pole on its 5 m cable (DEC-043).
+> - §9.2 mounting: tripod + tribrach with optical plummet + fixed carrier adapter (DEC-037).
+> New items are listed in §10.1.
 
 ## 1. Hardware Summary
 
@@ -550,6 +563,34 @@ non-RTK 3D fix (~2–3 m accuracy).
 | Powered USB hub (two ELP cameras exceed the Pi 4's 1.2 A USB budget with F9P, ESP32, SSD) | 1 | $20-40 | Medium |
 
 **Estimated Total:** $600-900 for remaining components
+
+### 10.1 Additions from the static-station redesign (2026-10-02)
+
+| Item | Qty | Est. Cost | Decision | Status |
+|------|-----|-----------|----------|--------|
+| NEMA17 with ~27:1 planetary gearbox | 1 | $30-50 | DEC-040 | Buy (part provisional) |
+| TMC2209 stepper driver | 1 | $5-10 | DEC-040 | Buy |
+| Turntable ("lazy susan") bearing | 1 | $10-20 | DEC-040 | Buy |
+| AS5600 magnetic encoder (2-pack; one spare) | 1 pack | ~$5 | DEC-040 | Buy |
+| WitMotion HWT906-TTL inclinometer/IMU | 1 | TBD | DEC-041 | Buy; run a 180° reversal test on arrival |
+| MPU-9250 boards from one listing (verify WHO_AM_I = 0x71) | 2 | $10-20 ea | DEC-041 | Buy; owned unit becomes bench spare |
+| 2040 aluminium extrusion, ~75 cm, plus a stiffening plate | 1 | $15-25 | DEC-042 | Buy |
+| Laser-level tilt platform (1/4-20 mount) | 1 | $20-40 | DEC-042 | Buy |
+| Tribrach with optical plummet + fixed carrier adapter | 1 | $60-150 | DEC-037 | Buy |
+| 60 mm round bubble level for the scanner top plate | 1 | ~$10 | DEC-037 | Buy |
+| Survey tripod | 1 | — | DEC-037 | Confirm owned |
+| DFRobot SEN0366 laser distance module (or a hacked Bosch) | 1 | $70 | DEC-044 | Buy after checking for an owned Bosch "C" model |
+| Height plate (light matte disc, ~25-30 cm, centre hole) | 1 | — | DEC-044 | Make |
+| 4.3" DSI capacitive touchscreen (match the base: Freenove) + printed hood | 1 | $40-60 | DEC-045 | Buy |
+| 4 in PVC pipe, 60 cm, end cap + centred eye bolt | 10 | ~$5 ea | DEC-038 | Buy / make |
+| DOT-style retroreflective tape | 1 roll | $15-25 | DEC-038, DEC-043 | Buy |
+| Small tripods with centre hook, braided mason's line, 8-16 oz brass plumb bobs | 10 sets | TBD | DEC-038 | Buy |
+| Survey pole + ANN-MB-00 ground plate (as on the base) | 1 | — | DEC-043 | Confirm owned |
+| Optional: WS2812 12-16 LED ring | 1 | ~$5 | DEC-045 | Optional |
+| Phase 2 option: Unicore UM982 + second multi-band antenna | 1 | $200-300 | DEC-039 | Deferred |
+
+**Retired by the redesign:** A4988 driver (DEC-040); the single MPU-9250 as primary IMU
+(DEC-041, re-roled to the camera bar).
 
 ---
 

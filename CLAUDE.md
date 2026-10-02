@@ -27,6 +27,11 @@ This file is the operational core. Everything else lives in `docs/`:
 
 ## 1. What This Is
 
+> **2026-10-02:** DEC-037–DEC-045 redesign this as a static, tripod-mounted station
+> scanner (geared drive, AS5600 encoder, HWT906, 75 cm camera bar, offset-pole antenna,
+> PVC-cylinder targets). The hardware line below predates that; see `docs/DECISIONS.md` §14
+> and `docs/HARDWARE.md` §10.1. Code has not been updated for it yet.
+
 Custom RTK LiDAR rover: LD19 LiDAR on a rotating mast (NEMA17 + A4988), 2× ELP 16MP USB cameras,
 MPU-9250 IMU (Madgwick fusion), ZED-F9P RTK GNSS, ESP32 LoRa+WiFi for RTK fallback /
 telemetry. RTK corrections from the external `arm-drone-lidar-workflow` Base-Station —
@@ -52,7 +57,7 @@ Both rovers can run at the same site against the same `ARM_BASE` caster.
 
 | What | Status |
 |---|---|
-| Planning | ✅ 36 decisions (DEC-001–DEC-036); DEC-030–DEC-034 cover v0.10 integration, DEC-035 covers the 2026-05-30 deep-alignment overhaul, DEC-036 (2026-09-29) makes the ELP stereo pair a measurement instrument |
+| Planning | ✅ 45 decisions (DEC-001–DEC-045); DEC-030–DEC-034 cover v0.10 integration, DEC-035 covers the 2026-05-30 deep-alignment overhaul, DEC-036 (2026-09-29) makes the ELP stereo pair a measurement instrument, DEC-037–DEC-045 (2026-10-02) redesign the rover as a static station-based scanner |
 | Hardware in hand | LD19, MPU-9250, A4988+NEMA17, 2× ELP 16MP USB cam (HQ Cam retired), Pi 4B, ESP32 LoRa |
 | Hardware NOT in hand | 2× ZED-F9P, 2× dual-band antennas, 3.3V regulator, batteries |
 | Codebase | ✅ Phase 3 landed (config/logger/lidar/imu/stepper/camera + tests). ⚠️ v0.10 overhaul in progress (telemetry, ntrip, gnss, esp32 firmware) |
@@ -140,6 +145,15 @@ LiDAR_Scanner_DIY/
 | DEC-033 | Triple-channel telemetry: `status.json` + loopback HTTP + LoRa STATUS/LINK |
 | DEC-034 | Log SI/WGS84, convert CRS at export via `scripts/georef.py` |
 | DEC-036 | ELP stereo pair = post-processed measurement instrument: target bearings for resection, per-point colorization, stereo cross-check (v1.1); V4L2 capture backend (v1.0) |
+| DEC-037 | Static station-based scanning: tripod + tribrach, step-and-scan, stations located from surveyed targets |
+| DEC-038 | Scanner targets: tripod-hung retroreflective PVC cylinders plumbed over the GCP nails (flags a conflict with DEC-036) |
+| DEC-039 | Heading from target resection; magnetometer is a coarse hint and dirty-station flag only; UM982 deferred |
+| DEC-040 | ~27:1 geared NEMA17 + TMC2209 + turntable bearing + AS5600 output encoder (supersedes DEC-016/017) |
+| DEC-041 | HWT906 on the fixed base for tilt/stillness; two MPU-9250s at the camera-bar ends (supersedes DEC-011) |
+| DEC-042 | 75 cm stereo bar on a manual tilt platform; tilt measured by the bar IMUs (amends DEC-036) |
+| DEC-043 | ANN-MB-00 on an offset pole (5 m cable); modes: GCP, and Scan with antenna on-tripod / offset-pole / none |
+| DEC-044 | Height of instrument from a phase-shift laser (SEN0366 class) onto a plate over the nail; tape as blunder check |
+| DEC-045 | DSI touchscreen on the fixed base; no T-Deck on the scanner |
 
 ## 7. GPIO Pinout & Serial Ports (quick reference for code)
 
