@@ -36,7 +36,9 @@ This file is the operational core. Everything else lives in `docs/`:
 > **2026-10-02:** DEC-037–DEC-045 redesign this as a static, tripod-mounted station
 > scanner (geared drive, AS5600 encoder, HWT906, 75 cm camera bar, offset-pole antenna,
 > PVC-cylinder targets). The hardware line below predates that; see `docs/DECISIONS.md` §14
-> and `docs/HARDWARE.md` §10.1. Code has not been updated for it yet.
+> and `docs/HARDWARE.md` §10.1. Code has not been updated for it, by ruling: **MR-4 (2026-10-11, Brian)**
+> freezes v0.11.0 as the mobile-rover baseline and builds the static scanner as a separate v2 line
+> (`docs/CROSS_REPO_BACKLOG.md`). No DEC-037+ code lands on this `main`.
 
 Custom RTK LiDAR rover: LD19 LiDAR on a rotating mast (NEMA17 + A4988), 2× ELP 16MP USB
 cameras (HQ Camera retired 2026-09-29, DEC-036), MPU-9250 IMU (Madgwick fusion), ZED-F9P
