@@ -1,7 +1,7 @@
 # Hardware Inventory
 
 **Document Status:** v0.11 — reconciled with code (2026-09-23, stage 6 docs refresh)
-**Last Updated:** 2026-09-23
+**Last Updated:** 2026-10-11 (merged the 2026-10-02 static-station redesign, DEC-037–DEC-045: callout below, §4.3–§4.4 and §10.1)
 
 > **Rover BOM is unchanged from v0.9.2** except: T-Deck moved out (now owned
 > by Base-Station, per DEC-033); ESP32 LoRa role dual-mode (LoRa RTCM relay OR
@@ -24,6 +24,19 @@
 
 ---
 
+> **2026-10-02 — static-station redesign (DEC-037–DEC-045).** Several sections below
+> describe hardware that the redesign replaces or re-roles. Until each section is rewritten:
+> - §3.2 / §3.3 NEMA17 + A4988: replaced by a ~27:1 planetary-geared NEMA17, TMC2209 driver,
+>   turntable bearing and an AS5600 output-shaft encoder (DEC-040).
+> - §4.3 camera mounting: cameras move to a 75 cm 2040 bar on a manual tilt platform (DEC-042).
+> - §4.4 targets: flat checkers stay for the drone; the scanner's primary LiDAR target is a
+>   tripod-hung retroreflective PVC cylinder over each nail (DEC-038).
+> - §5.1 MPU-9250: no longer the primary IMU. A WitMotion HWT906 on the fixed base does
+>   leveling and stillness; two MPU-9250s at the bar ends measure camera tilt (DEC-041).
+> - §6.3 antenna: the scanner's ANN-MB-00 rides an offset pole on its 5 m cable (DEC-043).
+> - §9.2 mounting: tripod + tribrach with optical plummet + fixed carrier adapter (DEC-037).
+> New items are listed in §10.1.
+
 ## 1. Hardware Summary
 
 ### 1.1 Acquisition Status
@@ -33,7 +46,7 @@
 | Compute | ✅ | — | Pi 4 ready |
 | LiDAR | ✅ | — | LD19 ready |
 | Motion | ✅ | — | NEMA17 + A4988 ready |
-| Camera | ✅ | — | HQ Camera + fisheye ready |
+| Camera | ✅ | — | 2× ELP 16MP USB (IMX298) on the rotating platform (§4.3). HQ Camera + fisheye retired 2026-09-29 |
 | IMU | ✅ | — | MPU-6050 and MPU-9250 available |
 | GNSS (interim) | ✅ | — | Beitian BK122 for testing |
 | GNSS (RTK) | — | 🔲 | ZED-F9P × 1 needed, rover-side only (D-005) — SparkFun GPS-RTK-SMA, same board as the Base-Station |
@@ -59,8 +72,7 @@
 | **Status** | ✅ Owned |
 
 **Interfaces Used:**
-- USB × 3-4 (F9P, ESP32, LiDAR, storage)
-- CSI (Camera)
+- USB × 5-6 (F9P, ESP32, LiDAR, 2× ELP camera, storage)
 - I2C (IMU)
 - GPIO (Stepper control)
 - Power: 5V @ 3A via USB-C
@@ -68,7 +80,6 @@
 **Selection Rationale:**
 - Linux ecosystem enables rapid prototyping
 - Sufficient compute for sensor fusion and logging
-- Camera interface native
 - Large community support
 - Alternative (MCU-only) rejected due to data handling complexity
 
@@ -139,7 +150,11 @@
 
 ## 4. Imaging Subsystem
 
-### 4.1 Raspberry Pi HQ Camera
+### 4.1 Raspberry Pi HQ Camera — RETIRED 2026-09-29
+
+> Retired in favour of the two ELP USB cameras (§4.3). Kept here for history;
+> `src/rover/camera.py` and `tests/hardware/test_camera.py` still target this
+> camera until the UVC backend lands.
 
 | Attribute | Value |
 |-----------|-------|
@@ -148,7 +163,7 @@
 | **Resolution** | 12.3 MP (4056 × 3040) |
 | **Interface** | CSI (MIPI) |
 | **Lens Mount** | C/CS mount |
-| **Status** | ✅ Owned |
+| **Status** | ⛔ Retired |
 
 **Operating Resolution (v1.0):** 1920×1080 or 1640×1232 (TBD after testing)
 
@@ -157,7 +172,7 @@
 - Native Pi interface (no USB bandwidth competition)
 - Interchangeable lenses
 
-### 4.2 Arducam M12 Fisheye Lens
+### 4.2 Arducam M12 Fisheye Lens — RETIRED 2026-09-29 (with the HQ Camera)
 
 | Attribute | Value |
 |-----------|-------|
@@ -170,6 +185,76 @@
 - Captures maximum context per frame
 - Reduces number of images needed per scan
 - Distortion acceptable for reference imagery (not photogrammetry)
+
+### 4.3 ELP 16MP Wide-Angle USB Camera (×2)
+
+| Attribute | Value |
+|-----------|-------|
+| **Role** | Per DEC-036: target bearings for station resection, per-point colorization, stereo range cross-check, and context imagery. Processing is offline |
+| **Model** | Probably ELP-USB16MP01-BH120 (box housing; bare board is -H120). Confirm from the housing label or `lsusb -v` |
+| **Quantity** | 2 |
+| **Sensor** | Sony IMX298, 1/2.8", 1.12 µm pixels, rolling shutter |
+| **Resolution** | 4656 × 3496 (16 MP) |
+| **Lens** | Wide angle, ~118–120° "low distortion" (axis unspecified; expect real barrel distortion), fixed focus, M12 mount with IR-cut filter in the lens. f/1.8 appears on no ELP page. Centre focal length unknown, ~1,400–2,500 px at full res; calibration settles it |
+| **Interface** | USB 2.0, UVC (no vendor driver; V4L2 on Linux) |
+| **Formats** | Vendor claims: MJPEG 4656×3496 @ 10 fps; YUY2 full-res @ 1 fps; MJPEG 2320×1744 @ 30 fps. ⚠️ Full-res YUY2 @ 1 fps is unverified: a 32.55 MB frame exceeds one USB 2.0 isochronous endpoint (~24.6 MB/s), so it only works with bulk transfer. Check `lsusb -v` |
+| **Exposure / WB** | Auto (AEC / AWB); manual control via UVC not yet verified |
+| **Mounting** | On the rotating platform, on a 200 mm cheese plate, ~150–180 mm apart (6–7 in, from memory; stereo calibration will recover the exact baseline). Both point the same direction as a stereo pair |
+| **Status** | ✅ Owned |
+
+**Lens decision (DEC-036):** keep the stock lenses. The 24 in Sky High targets (§4.4)
+are large enough at 15 m. Revisit 6 mm M12 lenses only if calibration shows
+otherwise.
+
+**Integration notes (not yet reflected in code):**
+- `src/rover/camera.py` uses `picamera2` (CSI only). UVC cameras need a V4L2/OpenCV
+  backend, and `[camera]` config needs two devices.
+- Two identical units may report the same USB serial; stable names under
+  `deploy/udev/` must key on the physical USB port path, not the serial.
+- All Pi 4 USB ports share one controller with the LiDAR, F9P, and ESP32.
+  A full-res YUY2 frame is ~32 MB, so capture stills from one camera at a time,
+  not both simultaneously.
+- Rolling shutter is harmless only while the mast is stopped; capture at rest.
+- For target detection, prefer uncompressed YUY2 stills over MJPEG (compression
+  artifacts shift sub-pixel corner estimates).
+- Resolution at the image centre is roughly 0.03–0.04°/px with the stock lens,
+  about the same as the fisheye (§4.2). A narrower M12 lens (~6 mm) gives
+  ~0.011°/px. Any lens change or focus movement invalidates calibration, so lock
+  the lens once focused.
+- Each camera needs its own intrinsic and camera-to-LiDAR calibration.
+- Two more USB cables cross the rotating stage; route them through the cable
+  loop with strain relief.
+
+### 4.4 Survey Targets (shared with the drone GCP kit)
+
+| Attribute | Value |
+|-----------|-------|
+| **Product** | Sky High Bull's-Eye drone GCP targets, 10-pack (ARM's existing drone GCP kit, owned sibling-side) |
+| **Pattern** | 2×2 black/white checker ("X"). "Bull's-Eye" is the brand name, not the pattern |
+| **Size** | 24 × 24 in (60.96 cm), 12 in (30.48 cm) quadrants |
+| **Centre** | Eyelet at the saddle point; the surveyed point when laid flat |
+| **ID** | Printed number 0–9, underlined, in one white quadrant |
+| **Corner holes** | Four grommets for staking or mounting |
+| **Scanner use (DEC-036)** | Flat over its nail by default, shared with the drone, when the viewing angle is ≥ ~12°. Vertical on a plumb rod only for far targets on level or falling ground. On a rod, the target centre is a known height above the nail |
+| **Status** | ✅ Owned (ARM kit) |
+
+**Needed for scanner use:**
+- Flat use: nothing new. Clear grass or litter in a strip toward the scanner.
+- Rod use, the exception: 1–2 plumb rods or fixed-height mounts with a bracket
+  that holds a 24 in target vertical and facing the scanner, plus rigid backing.
+
+**Constraints:**
+- Material rigidity and surface finish are unknown. Matte is preferred to avoid
+  specular hot spots.
+- A rod-mounted target cannot serve the drone at the same time.
+- Apparent size at 15 m is about 57–71 px wide with the stock ELP lenses,
+  depending on the true focal length.
+- Viewed flat, the apparent height is the width times sin(viewing angle). From a
+  1.5 m mast on level ground that is ~49–61 px at 5 m, ~13–16 px at 10 m, and
+  ~6–7 px at 15 m. The detection floor is assumed to be ~20 px, so flat targets
+  work to ~7 m on level ground; bench test 11 measures the real floor. Placement
+  geometry and tests: `docs/research/elp-stereo/notes/target_placement_geometry.md`.
+- Sheen near grazing angles washes out the black quadrants.
 
 ---
 
@@ -470,10 +555,11 @@ battery, not just the LiDAR and camera.
 
 | Component | Mount Type | Status |
 |-----------|------------|--------|
-| LiDAR + Camera | Rotating case on stepper shaft | Rotates with the stepper |
+| LiDAR + Cameras | Rotating case on stepper shaft; the two ELPs on a 200 mm cheese plate (§4.3) | Rotates with the stepper; ✅ cameras mounted, LiDAR 🔲 TBD |
 | Pi + Electronics (compute, ESP32, battery) | Rotating case on stepper shaft | Rotates with the stepper; 🔲 TBD (mechanical enclosure) |
 | IMU | `[imu].mount`: `base` (default — fixed to the stepper body/tripod mount; its cable crosses the rotating joint) or `platform` (on the rotating case) | Bench decision (S3-R3); physical mount 🔲 TBD |
 | GNSS Antenna | Case-mounted on the rotation axis (mast centerline), preferred — zero lever arm and rotates with the case; otherwise fixed off-axis on the stepper body/tripod, with `[calibration].antenna_offset_m` measured (§6.3) | Decided at purchase |
+| Survey targets | 24 in Sky High targets, flat over nails by default; vertical on plumb rods with rigid backing for far targets (§4.4) | 🔲 TBD (rod bracket) |
 
 **Rotation:** the mast sweeps 360° forward, then rewinds at `rewind_rpm` in
 ≤45° chunks (DEC-015 amended 2026-09-23); no lidar/IMU records are logged
@@ -502,11 +588,41 @@ ring to allow continuous rotation.
 | USB-serial adapters (if needed) | 2-3 | $5-10 ea | Medium |
 | Connectors, cables, mounting hardware | — | $30-50 | Medium |
 | 3D printed enclosure/mounts | — | $20-50 | Low |
+| Plumb rods / fixed-height mounts + 24 in vertical target brackets and rigid backing, for far targets only (DEC-036) | 1-2 | TBD | Low |
+| Powered USB hub (two ELP cameras exceed the Pi 4's 1.2 A USB budget with F9P, ESP32, SSD) | 1 | $20-40 | Medium |
 
 **Estimated Total:** $385-640 for remaining components (D-005 halves the F9P
 and antenna lines from the v0.9.2 two-unit BOM to one each). Arithmetic —
 low end: 200 + 50 + 5 + 40 + 30 + 10 + 30 + 20 = **385**; high end:
 250 + 100 + 30 + 80 + 50 + 30 + 50 + 50 = **640**.
+
+### 10.1 Additions from the static-station redesign (2026-10-02)
+
+| Item | Qty | Est. Cost | Decision | Status |
+|------|-----|-----------|----------|--------|
+| NEMA17 with ~27:1 planetary gearbox | 1 | $30-50 | DEC-040 | Buy (part provisional) |
+| TMC2209 stepper driver | 1 | $5-10 | DEC-040 | Buy |
+| Turntable ("lazy susan") bearing | 1 | $10-20 | DEC-040 | Buy |
+| AS5600 magnetic encoder (2-pack; one spare) | 1 pack | ~$5 | DEC-040 | Buy |
+| WitMotion HWT906-TTL inclinometer/IMU | 1 | TBD | DEC-041 | Buy; run a 180° reversal test on arrival |
+| MPU-9250 boards from one listing (verify WHO_AM_I = 0x71) | 2 | $10-20 ea | DEC-041 | Buy; owned unit becomes bench spare |
+| 2040 aluminium extrusion, ~75 cm, plus a stiffening plate | 1 | $15-25 | DEC-042 | Buy |
+| Laser-level tilt platform (1/4-20 mount) | 1 | $20-40 | DEC-042 | Buy |
+| Tribrach with optical plummet + fixed carrier adapter | 1 | $60-150 | DEC-037 | Buy |
+| 60 mm round bubble level for the scanner top plate | 1 | ~$10 | DEC-037 | Buy |
+| Survey tripod | 1 | — | DEC-037 | Confirm owned |
+| DFRobot SEN0366 laser distance module (or a hacked Bosch) | 1 | $70 | DEC-044 | Buy after checking for an owned Bosch "C" model |
+| Height plate (light matte disc, ~25-30 cm, centre hole) | 1 | — | DEC-044 | Make |
+| 4.3" DSI capacitive touchscreen (match the base: Freenove) + printed hood | 1 | $40-60 | DEC-045 | Buy |
+| 4 in PVC pipe, 60 cm, end cap + centred eye bolt | 10 | ~$5 ea | DEC-038 | Buy / make |
+| DOT-style retroreflective tape | 1 roll | $15-25 | DEC-038, DEC-043 | Buy |
+| Small tripods with centre hook, braided mason's line, 8-16 oz brass plumb bobs | 10 sets | TBD | DEC-038 | Buy |
+| Survey pole + ANN-MB-00 ground plate (as on the base) | 1 | — | DEC-043 | Confirm owned |
+| Optional: WS2812 12-16 LED ring | 1 | ~$5 | DEC-045 | Optional |
+| Phase 2 option: Unicore UM982 + second multi-band antenna | 1 | $200-300 | DEC-039 | Deferred |
+
+**Retired by the redesign:** A4988 driver (DEC-040); the single MPU-9250 as primary IMU
+(DEC-041, re-roled to the camera bar).
 
 ---
 

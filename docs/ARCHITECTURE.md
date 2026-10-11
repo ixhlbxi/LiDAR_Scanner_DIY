@@ -1,7 +1,7 @@
 # System Architecture
 
 **Document Status:** v0.11 — reconciled with code (2026-09-23 audit remediation)
-**Last Updated:** 2026-09-23
+**Last Updated:** 2026-10-11 (merged the 2026-09-29 camera references for DEC-036)
 
 > **v0.11 — post-audit remediation (2026-09-23).** The rover is a consumer of the
 > production Base-Station built in `ixhlbxi/arm-drone-lidar-workflow`. RTK corrections
@@ -40,9 +40,9 @@ removed by DEC-033 — rover field visibility now comes from triple-channel tele
 │                            ROVER UNIT                                   │
 │                                                                         │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                 │
-│  │   LD19      │    │  HQ Camera  │    │  MPU-9250   │                 │
-│  │   LiDAR     │    │  + Fisheye  │    │    IMU      │                 │
-│  │  UART/USB   │    │    CSI      │    │    I2C      │                 │
+│  │   LD19      │    │  2x ELP cam │    │  MPU-9250   │                 │
+│  │   LiDAR     │    │ stereo pair │    │    IMU      │                 │
+│  │  UART/USB   │    │    USB      │    │    I2C      │                 │
 │  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘                 │
 │         │                  │                  │                         │
 │  ┌──────▼──────────────────▼──────────────────▼─────────────────────┐  │
@@ -88,7 +88,7 @@ runs per session. LoRa never carries RTCM — it is status-only (DEC-031 amended
 | **Compute** | Raspberry Pi 4 | Orchestration, sensor fusion, logging, control |
 | **Scanning** | LD19 LiDAR | 360° distance measurement, 2D slices |
 | **Rotation** | NEMA17 + A4988 | 360° forward sweep, then a fast rewind in ≤45° chunks (DEC-015 amended 2026-09-23) |
-| **Imaging** | HQ Camera + Fisheye | Visual context capture per scan step |
+| **Imaging** | 2× ELP 16MP USB (stereo pair) | Per-step capture for target bearings, colorization, stereo cross-check, and context (DEC-036) |
 | **Orientation** | MPU-9250 | Roll/pitch every scan (Madgwick); yaw from a per-sweep rest heading, never gyro or GNSS (DEC-013 amended 2026-09-23) |
 | **Positioning** | ZED-F9P | RTK GNSS with cm-level accuracy |
 | **RTK ingress (sole path)** | Pi NTRIP client OR ESP32 NTRIP-over-WiFi client | NTRIP/RTCM from `ARM_BASE` caster (DEC-031 amended 2026-09-23, DEC-032) |
@@ -236,6 +236,8 @@ operator is already carrying.
 - Camera triggered per rotation step
 - Each image timestamped and associated with step index
 - Nearest-neighbor association to LiDAR slice batch
+- v1.1 (DEC-036): each LiDAR point is projected into each calibrated camera at its
+  capture mast angle, with occlusion handling, offline in `scripts/georef.py`
 
 **PPS Signal:** Optional future enhancement; v1.0 uses software timestamps only.
 
@@ -276,7 +278,7 @@ the others.
 | USB | Pi ↔ ZED-F9P | UBX/NMEA | Position, time, status |
 | USB-Serial | Pi ↔ LD19 | Proprietary | Scan points |
 | USB | Pi ↔ ESP32 | Serial | Telemetry commands |
-| CSI | Pi ↔ HQ Camera | MIPI | Image frames |
+| USB 2.0 (UVC) | Pi ↔ 2× ELP camera | V4L2, MJPEG/YUY2 | Image frames, one camera streaming at a time |
 | I2C | Pi ↔ MPU-9250 | I2C | IMU samples |
 | GPIO | Pi ↔ A4988 | Step/Dir | Motor control |
 | UART | ESP32 ↔ ZED-F9P | RTCM3 | Corrections when the ESP32 is the NTRIP client (DEC-032) |

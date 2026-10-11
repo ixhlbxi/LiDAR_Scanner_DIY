@@ -1,7 +1,7 @@
 # Technical Specifications
 
 **Document Status:** v0.11 — reconciled with code (2026-09-23, stage 6 docs refresh)
-**Last Updated:** 2026-09-23
+**Last Updated:** 2026-10-11 (merged the 2026-09-29 camera references for DEC-036)
 
 Rover-internal specifications. Cross-repo / on-wire contracts live in
 [BASE_STATION_INTEGRATION.md](BASE_STATION_INTEGRATION.md); this file is
@@ -173,7 +173,7 @@ handheld firmware to recognize this rover's frames, pending on CR-001).
 | `ntrip.py` | Pi-side NTRIP client — caster connect, RTCM read, GGA upload (DEC-031, DEC-032) | TCP (NTRIP over HTTP); calls `gnss.write_rtcm` |
 | `stepper.py` | NEMA17/A4988 motor control, step timing | GPIO (`rpi-lgpio`) |
 | `sweep.py` | Sweep planner — rest/scan/rewind decision logic (DEC-015 amended) | Pure logic, no I/O |
-| `camera.py` | HQ Camera capture, cadence gating | `picamera2` |
+| `camera.py` | HQ Camera capture, cadence gating. Still HQ Camera code; moving to 2× ELP via V4L2 per DEC-036 | `picamera2` (to be replaced by V4L2) |
 | `telemetry.py` | Triple-channel status routing — status.json / loopback HTTP / LoRa STATUS (DEC-033) | Filesystem, loopback HTTP, serial to ESP32 |
 | `lora_protocol.py` | LoRa frame v2 codec — encode/decode, CRC16-CCITT | Pure logic, no I/O |
 | `logger.py` | JSONL session logging, rotation, metadata.json | Filesystem |

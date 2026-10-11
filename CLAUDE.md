@@ -19,7 +19,7 @@ This file is the operational core. Everything else lives in `docs/`:
 |---|---|
 | Full TOML config schema, JSONL records, metadata.json | `docs/SPECIFICATIONS.md` |
 | LoRa frame v2 (rover emits STATUS only; LINK defined, never sent; RTCM_CHUNK retired/reserved), wire formats | `docs/BASE_STATION_INTEGRATION.md` §4 |
-| All decisions DEC-001–DEC-035 with rationale + alternatives | `docs/DECISIONS.md` |
+| All decisions DEC-001–DEC-045 with rationale + alternatives | `docs/DECISIONS.md` |
 | System architecture, data/telemetry flow diagrams | `docs/ARCHITECTURE.md` |
 | Wiring, power, BOM, GPIO pinout details | `docs/HARDWARE.md` |
 | Phase plan, build order, success criteria | `docs/ROADMAP.md` |
@@ -33,12 +33,18 @@ This file is the operational core. Everything else lives in `docs/`:
 
 ## 1. What This Is
 
-Custom RTK LiDAR rover: LD19 LiDAR on a rotating mast (NEMA17 + A4988), Pi HQ Camera,
-MPU-9250 IMU (Madgwick fusion), ZED-F9P RTK GNSS, ESP32 LoRa (STATUS telemetry only,
-DEC-031 amended) + WiFi (optional NTRIP client, DEC-032). RTK corrections come over
-NTRIP from the external `arm-drone-lidar-workflow` Base-Station's caster — this rover
-is a client, not a parallel base. That caster serves one client at a time (sibling
-`NC-1`); interim rule (owner, 2026-09-23): the drone and this rover never share a base session (`CR-005`).
+> **2026-10-02:** DEC-037–DEC-045 redesign this as a static, tripod-mounted station
+> scanner (geared drive, AS5600 encoder, HWT906, 75 cm camera bar, offset-pole antenna,
+> PVC-cylinder targets). The hardware line below predates that; see `docs/DECISIONS.md` §14
+> and `docs/HARDWARE.md` §10.1. Code has not been updated for it yet.
+
+Custom RTK LiDAR rover: LD19 LiDAR on a rotating mast (NEMA17 + A4988), 2× ELP 16MP USB
+cameras (HQ Camera retired 2026-09-29, DEC-036), MPU-9250 IMU (Madgwick fusion), ZED-F9P
+RTK GNSS, ESP32 LoRa (STATUS telemetry only, DEC-031 amended) + WiFi (optional NTRIP
+client, DEC-032). RTK corrections come over NTRIP from the external
+`arm-drone-lidar-workflow` Base-Station's caster — this rover is a client, not a parallel
+base. That caster serves one client at a time (sibling `NC-1`); interim rule (owner,
+2026-09-23): the drone and this rover never share a base session (`CR-005`).
 
 **Position relative to the SparkFun RTK Facet** (DEC-035): the sibling
 `arm-drone-lidar-workflow` repo selected the SparkFun Facet as its production
@@ -60,9 +66,9 @@ Both rovers can run at the same site against the same `ARM_BASE` caster.
 
 | What | Status |
 |---|---|
-| Planning | ✅ 35 decisions (DEC-001–DEC-035); DEC-015 and DEC-031 amended 2026-09-23 |
-| Hardware in hand | LD19, MPU-9250, A4988+NEMA17, Pi HQ Cam, Pi 4B, ESP32 LoRa |
-| Hardware NOT in hand | one ZED-F9P, one antenna (SparkFun GPS-RTK-SMA + u-blox ANN-MB-00, D-005), 3.3V regulator, batteries |
+| Planning | ✅ 45 decisions (DEC-001–DEC-045); DEC-015 and DEC-031 amended 2026-09-23; DEC-036 (2026-09-29) makes the ELP stereo pair a measurement instrument; DEC-037–DEC-045 (2026-10-02) redesign the rover as a static station-based scanner — code not yet updated for either |
+| Hardware in hand | LD19, MPU-9250, A4988+NEMA17, 2× ELP 16MP USB cam (HQ Cam retired), Pi 4B, ESP32 LoRa |
+| Hardware NOT in hand | one ZED-F9P, one antenna (SparkFun GPS-RTK-SMA + u-blox ANN-MB-00, D-005), 3.3V regulator, batteries; the DEC-037–DEC-045 parts list is `docs/HARDWARE.md` §10.1 |
 | Codebase | ✅ every module in `src/rover/` implemented — see `python -m pytest -q` for the current suite count |
 | Current phase | **v1.0 field validation**, gated on `deploy/SMOKE_CHECKLIST.md` and the pre-field blockers `S3-R2` (LD19 angle direction) and `S5-R2` (rest-heading noise) |
 
@@ -79,6 +85,8 @@ Both rovers can run at the same site against the same `ARM_BASE` caster.
 - **Deps** (`pyproject.toml` optional-dependencies): `pi` — `rpi-lgpio`, `picamera2`,
   `smbus2`, `pyserial`, `pyubx2`. `dev` — `pytest`, `ruff`, `pyubx2`, `pygeomag`.
   `post` (CRS-aware export, DEC-034) — `laspy`, `pyproj`, `numpy`, `pygeomag`.
+  (`picamera2` stays until the camera module moves to a UVC backend for the ELP
+  cameras — HQ Camera retired 2026-09-29, DEC-036.)
 
 ## 4. Repository Structure
 
@@ -154,6 +162,7 @@ LiDAR_Scanner_DIY/
 | DEC-021 | JSONL logging |
 | DEC-022 | Post-processed georeferencing (offline in Phase 5) |
 | DEC-023 | SLAM deferred to v1.1+ (v2 concept: `docs/V2_SLAM_CONCEPT.md`) |
+| DEC-026 | ~~Camera as visual reference~~ — superseded by **DEC-036** |
 | DEC-028 | TOML config |
 | DEC-029 | `rpi-lgpio` over `RPi.GPIO` (Bookworm breakage) |
 | DEC-030 | Dual-mode profile (`personal` / `arm_group`) |
@@ -162,6 +171,16 @@ LiDAR_Scanner_DIY/
 | DEC-033 | Triple-channel telemetry: `status.json` + loopback HTTP + LoRa STATUS/LINK (rover emits STATUS only) |
 | DEC-034 | Log SI/WGS84, convert CRS at export via `scripts/georef.py` |
 | DEC-035 | Deep alignment with `arm-drone-lidar-workflow` — sibling conventions, `deploy/` kit, DEC-NNN decision-log format |
+| DEC-036 | ELP stereo pair = post-processed measurement instrument: target bearings for resection, per-point colorization, stereo cross-check (v1.1); V4L2 capture backend (v1.0) |
+| DEC-037 | Static station-based scanning: tripod + tribrach, step-and-scan, stations located from surveyed targets |
+| DEC-038 | Scanner targets: tripod-hung retroreflective PVC cylinders plumbed over the GCP nails (flags a conflict with DEC-036) |
+| DEC-039 | Heading from target resection; magnetometer is a coarse hint and dirty-station flag only; UM982 deferred |
+| DEC-040 | ~27:1 geared NEMA17 + TMC2209 + turntable bearing + AS5600 output encoder (supersedes DEC-016/017) |
+| DEC-041 | HWT906 on the fixed base for tilt/stillness; two MPU-9250s at the camera-bar ends (supersedes DEC-011) |
+| DEC-042 | 75 cm stereo bar on a manual tilt platform; tilt measured by the bar IMUs (amends DEC-036) |
+| DEC-043 | ANN-MB-00 on an offset pole (5 m cable); modes: GCP, and Scan with antenna on-tripod / offset-pole / none |
+| DEC-044 | Height of instrument from a phase-shift laser (SEN0366 class) onto a plate over the nail; tape as blunder check |
+| DEC-045 | DSI touchscreen on the fixed base; no T-Deck on the scanner |
 
 ## 7. GPIO Pinout & Serial Ports (quick reference for code)
 
@@ -221,7 +240,8 @@ calibration procedure is v1.1.
 - T-Deck firmware (Base-Station owns it)
 - Point cloud processing / 3D reconstruction (Phase 5: `scripts/georef.py`)
 - Real-time SLAM / georef (DEC-022, DEC-023)
-- Camera texture mapping (v1.2+)
+- Camera colorization and target resection (v1.1, DEC-036); texture-mapped meshes /
+  full photogrammetry remain out of scope
 - Extrinsic calibration procedure (v1.1)
 - Rover→Base-Station bidirectional commands (rover publishes STATUS only)
 

@@ -1,7 +1,7 @@
 # Roadmap & Next Steps
 
 **Document Status:** v0.11 — audit remediation complete (2026-09-23)
-**Last Updated:** 2026-09-23
+**Last Updated:** 2026-10-11 (merged the 2026-09-30 DEC-036 target placement tests and the 2026-10-02 DEC-037–DEC-045 redesign items)
 
 ---
 
@@ -31,7 +31,8 @@ v1.0 is complete when the following capabilities are demonstrated:
 |---------|-----------|----------------|
 | Real-time SLAM | Significant complexity | v1.1+ |
 | Real-time georeferencing | Post-processing sufficient | v1.1+ |
-| Camera texture mapping | Context imagery sufficient | v1.2+ |
+| Camera colorization + target resection (DEC-036) | Needs camera and camera-to-LiDAR calibration | v1.1 |
+| Texture-mapped meshes / photogrammetry | Colorized points sufficient | v2.0 |
 | Remote command/control | Receive-only monitoring first | v1.1 |
 | OTA firmware updates | Flash-and-forget acceptable | v1.1 |
 | Slip ring continuous rotation | Cable loop sufficient | v1.2+ |
@@ -103,6 +104,8 @@ scan session, against the live Base-Station `ARM_BASE` caster.
 |---|---|
 | Hardware acquisition | Order 1× ZED-F9P + ANN-MB-00 antenna + 3.3V regulator + batteries (see [HARDWARE.md §1.1](HARDWARE.md#11-acquisition-status)) |
 | Wiring + bench rig | Assemble per HARDWARE.md pinout; verify each sensor with `tests/hardware/test_*` diagnostic scripts |
+| Camera bench tests (DEC-036 gates) | Tests 1–5 and 9 from the table in `docs/research/elp-stereo/REPORT.md`: `lsusb -v` transfer type, `v4l2-ctl` formats and controls, dual-stream, LD19/F9P serial gaps while a camera streams, full-res YUY2 timing, power. Results set the capture design |
+| Camera capture backend (DEC-036) | Plan first, then replace Picamera2 in `camera.py` with V4L2. Two cameras, one streams at a time at rest, locked controls, raw MJPEG, `[camera]` for two devices, udev by port path, `tests/hardware/test_camera.py` rewritten |
 | Integrated bench scan | `python -m rover.main` end-to-end with all sensors + NTRIP + Base-Station status.json reachable |
 | Field shakedown | Outdoor RTK FIX achieved within ~60 s; runtime ≥4 h; NTRIP connectivity to `ARM_BASE` verified in the field |
 | Accuracy validation | Repeatability (<5 cm) and control-point comparison if accessible |
@@ -121,6 +124,25 @@ it independently of that sibling work.
 calibration of the LiDAR → IMU → GNSS transform chain.
 
 - Define calibration procedure (T_lidar_imu, T_body_gnss).
+- Camera calibration (DEC-036): ChArUco intrinsics per ELP (rational vs fisheye model),
+  stereo extrinsics, camera-to-LiDAR extrinsics, and a repeatability test
+  (power cycle, warm-up, transport).
+- LD19 target-plate test: the Sky High target at 3, 6, 9 and 12 m, for real range
+  and plane-fit σ.
+- Target placement tests 11–13 (DEC-036 amendment 2026-09-30,
+  `docs/research/elp-stereo/notes/target_placement_geometry.md`): flat-target
+  detection floor at 3–9 m, mast bearing repeatability per microstep, and
+  ray-to-ground-plane range at 5–9 m.
+- Open-sky resection proof (test 14): resect a station from 3 targets, flat and
+  rod-mounted, where RTK has a solid fix, and compare. Include the recommended
+  layout (4–6 m, ~120° apart, scanner inside the triangle), a near-danger-circle
+  layout and a two-targets-per-frame layout. This validates target resection
+  before relying on it under canopy.
+- Target field procedure decision, from tests 11–14.
+- `scripts/georef.py`: target detection, resection (range+bearing ≤5 m on flat
+  targets and ≤10 m on rods, azimuth-only beyond), per-camera colorization with
+  occlusion handling.
+- LiDAR upgrade decision (S2/S3 class) after the plate test and a midday sun test.
 - Closed-loop motor control via encoder or limit switch.
 - ICP-based scan-to-scan registration in post-processing for indoor scans.
 - Configuration validation improvements based on v1.0 field experience.
@@ -162,6 +184,19 @@ Two items formerly listed here are decided and closed: the step interval is
 | Enclosure design | 3D printed vs project box | After bench integration |
 | Mounting bracket design | Custom vs adapted | After sensor layout finalized |
 | Cable routing | Internal vs external | After enclosure decision |
+| LD19 mount: offset from axis, plane radial vs tangential (DEC-037) | Radial (no zenith blind zone) vs tangential (blind cylinder usable for an axis mast) | Case redesign |
+| HoI laser placement (DEC-044) | Arm length to clear the tribrach and tripod head | Case redesign |
+
+### 3.4 Static-station redesign TBDs (DEC-037–DEC-045)
+
+| Item | Options | Decision Point |
+|------|---------|----------------|
+| Camera resection target (DEC-038 conflict with DEC-036) | Flat checkers vs PVC cylinders vs both | After DEC-036 tests 11–14 are re-scoped to include cylinders |
+| Stereo role at 75 cm (DEC-042) | Cross-check only vs secondary range | After stereo calibration measures real error |
+| Exact geared NEMA17 part (DEC-040) | ~27:1 planetary models | Before ordering |
+| HoI sensor (DEC-044) | Owned Bosch (if hackable) vs SEN0366 vs JRT M88B | After checking for a Bosch "C" model |
+| LiDAR upgrade (DEC-037) | Keep LD19 vs Unitree L2 vs Livox Mid-360 vs used Mid-40 | After a field test shows the LD19's range limit in practice |
+| Dual-antenna heading (DEC-039) | Not needed vs UM982 | After field use of target matching |
 
 ---
 
@@ -315,6 +350,7 @@ session, not a fixed duration.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| v0.11 | 2026-10-02 | Static-station redesign recorded as DEC-037–DEC-045; open items in §3.4 *(written on the cloud branch against the v0.10 text; merged 2026-10-11)* |
 | v0.11 | 2026-09-23 | Post-audit remediation campaign (6 stages) closes 86 super-audit findings; DEC-015 and DEC-031 amended; `src/rover/__init__.py` bumped to 0.11.0 |
 | v0.10 | 2026-05-30 | Deep-alignment overhaul with the `arm-drone-lidar-workflow` Base-Station (DEC-035); stages A–E |
 | v0.9.2 | 2026-02-22 | Audit update: fix upstream repo URL, add DEC-029 (GPIO library), note upstream changes |
