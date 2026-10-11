@@ -291,6 +291,21 @@ These need the owner and a bench target before any session is georeferenced; non
 | S6-R1 | `src/rover/watchdog.py:117`, `deploy/systemd/rover.service:39` | A heartbeat timeout calls `os._exit(2)`, but stage 4 added exit 2 (config error) to `RestartPreventExitStatus=2 4`, so a hung rover is **not** restarted; `watchdog.py` docstrings and `config/default.toml:105` still say it restarts. `rover-telemetry.service` has no such line and does restart. | Give the watchdog its own exit code (not 2 or 4) and a test pinning it against the unit file; fix the stale comments |
 | S6-R2 | `deploy/SMOKE_CHECKLIST.md` upgrade item, `docs/SPECIFICATIONS.md` upgrade note, `tests/test_docs.py` | A Pi installed from `aa30447`/`e323f84` (2026-09-22) has `[stepper].step_interval_deg = 1.5`, now rejected (must be a multiple of 0.1125°; default 1.575) — the upgrade notes omit it. Guard looseness: paraphrases like "STATUS and LINK frames" escape; "never" is an allow-word; BASE_STATION_INTEGRATION is exempt from the RTCM-over-LoRa rule (anchor-locked heading). | Add the one clause to both notes; tighten the guard when next touched |
 
+### Merge residuals (origin/main merged into the v0.11.0 main on 2026-10-11, merge a659304)
+
+The 13 cloud-session commits of 2026-09-29 to 2026-10-02 (ELP stereo research, DEC-036, the
+DEC-037–DEC-045 static-station redesign) were written against the v0.10 text and never saw the
+v0.11 stage 5/6 work, which sat unpushed on the dev laptop until the merge. The merge kept both
+sides; these rows are where they disagree. Flagged, not resolved, per §14's own rule.
+`MR` = merge residual.
+
+| ID | Where | What | Decision needed |
+|---|---|---|---|
+| MR-1 | `docs/DECISIONS.md` DEC-045 Implications | Says the ESP32 LoRa boards "stay for the RTCM fallback (DEC-031)". DEC-031 was amended 2026-09-23: LoRa carries STATUS only and RTCM over LoRa is retired (S5-F1, CR-002). `tests/test_docs.py` let it through because "RTCM fallback" matches none of its FORBIDDEN patterns. | Amend DEC-045 to say the boards stay for STATUS telemetry (the Heltec's WiFi is the optional NTRIP client, DEC-032); add `RTCM fallback` to the guard with the usual allow-words |
+| MR-2 | `docs/DECISIONS.md` DEC-039 Implications | Says it "resolves the heading half of open item S3-R1". S3-R1 was closed 2026-09-23 (`dae5776`, this file): yaw comes from a per-sweep rest heading with WMM declination applied, not from Madgwick's magnetic frame. | Reword to "supersedes the v0.11 rest-heading method (S3-R1, closed) with target resection", and state that the rest heading stays the fallback until resection exists in `scripts/georef.py` |
+| MR-3 | `docs/DECISIONS.md` DEC-041 Implications | Says "the F9P moves to USB to free a UART". The v0.11 code already reads the F9P over USB: `config/default.toml` `[gnss].port = /dev/rover-f9p`, udev rule `deploy/udev/99-rover-f9p.rules`. Stale, not wrong. | Reword as "the F9P stays on USB (the case since v0.10), leaving the UARTs for the LD19, HWT906 and the HoI laser" |
+| MR-4 | `src/rover/stepper.py`, `sweep.py`, `imu.py`, `camera.py`, `main.py`, `config.py`; `scripts/georef.py`; `tests/`; `tests/hardware/test_camera.py`; `CLAUDE.md` §7 pinout | DEC-037–DEC-045 describe a different machine from the one v0.11.0 implements and tests: a static tripod scanner with a geared drive and AS5600 encoder, HWT906 on the base, two ELPs on a 75 cm tilt bar, step-and-scan, GCP/Scan modes — against v0.11's sweeping mast, A4988 direct drive, single MPU-9250 with Madgwick, picamera2. Measured 2026-10-11: about 4,100 code lines and 270 tests across the listed modules rest on the retired assumptions; `test_camera.py` still imports picamera2; DEC-040 itself flags the §7 pinout. Nothing is broken today because the redesign is documented, not implemented (CLAUDE.md §1 callout). | Rule before any DEC-037+ code lands: freeze v0.11.0 as the mobile-rover baseline and build the static scanner as a separate v2 line, or rewrite the listed modules in place under new stage plans. ROADMAP §3.4 and DEC-036 tests 11–14 gate the hardware side; this row gates the code side |
+
 ## How to use this file
 
 - **Adding an item:** when you find a "rover side codes for X, sibling side

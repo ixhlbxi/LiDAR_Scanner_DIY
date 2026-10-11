@@ -25,7 +25,7 @@ This file is the operational core. Everything else lives in `docs/`:
 | Phase plan, build order, success criteria | `docs/ROADMAP.md` |
 | Performance budgets, failure modes, storage estimates | `docs/SPECIFICATIONS.md` + `docs/ARCHITECTURE.md` |
 | Base-Station ↔ rover contract (endpoints, status.json) | `docs/BASE_STATION_INTEGRATION.md` |
-| Sibling-side work this rover is waiting on + open backlog rows (`S3-R2`, `S5-R2`, `S5-R3`, `S5-F1`, `NC-1`) | `docs/CROSS_REPO_BACKLOG.md` |
+| Sibling-side work this rover is waiting on + open backlog rows (`S3-R2`, `S5-R2`, `S5-R3`, `S5-F1`, `NC-1`, `S6-R1`, `S6-R2`; the 2026-10-11 merge residuals `MR-1`–`MR-4`, where DEC-037–DEC-045 contradict the v0.11 amendments or the code) | `docs/CROSS_REPO_BACKLOG.md` |
 | v2 SLAM-capable platform concept (deferred past v1.0, DEC-023) | `docs/V2_SLAM_CONCEPT.md` |
 | systemd units, udev rules, install.sh | `deploy/` |
 
