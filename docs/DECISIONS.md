@@ -1618,9 +1618,12 @@ tripods with a hanging PVC cylinder.
 - Sighting scope zeroed on a backsight: accurate but one manual step per station.
 
 **Implications:**
-- Resolves the heading half of open item S3-R1 (`CROSS_REPO_BACKLOG.md`): absolute azimuth
-  comes from targets, so Madgwick's magnetic-north frame no longer sets cloud orientation.
-  The NWU→ENU frame fix is still owed for any magnetometer-derived output.
+- Supersedes the v0.11 heading method for cloud orientation. S3-R1 (`CROSS_REPO_BACKLOG.md`)
+  was closed 2026-09-23 (`dae5776`): yaw comes from a per-sweep rest heading with WMM
+  declination applied, so Madgwick's magnetic-north frame already no longer sets orientation.
+  Under this decision absolute azimuth comes from target resection instead; the rest heading
+  stays the fallback until resection exists in `scripts/georef.py`. *(Corrected 2026-10-11,
+  MR-2: as filed on 2026-10-02 this line called S3-R1 open.)*
 - `DEC-013` (magnetometer disabled during motor) still applies to the hint.
 
 ---
@@ -1710,7 +1713,10 @@ also read bar roll.
 **Implications:**
 - I2C bus: AS5600 (0x36), MPU-9250 (0x68), MPU-9250 (0x69). One bus, no mux. Run it at 100 kHz
   with twisted SDA/SCL pairs; the runs to the bar ends are ~40 cm plus the unwind bundle.
-- UART devices: LD19, HWT906 and the HoI laser (DEC-044). The F9P moves to USB to free a UART.
+- UART devices: LD19, HWT906 and the HoI laser (DEC-044). The F9P stays on USB
+  (`/dev/rover-f9p` via `deploy/udev/99-rover-f9p.rules`, the case since v0.10), which leaves
+  the UARTs to those three. *(Corrected 2026-10-11, MR-3: as filed this line said the F9P
+  "moves to USB".)*
 - `src/rover/imu.py` and Madgwick (DEC-012) become secondary for static scanning.
 - DEC-011 is superseded.
 
@@ -1863,7 +1869,10 @@ SPI display was considered first and dropped when the touchscreen took over its 
 
 **Implications:**
 - DSI frees SPI and GPIO.
-- The ESP32 LoRa boards stay for the RTCM fallback (DEC-031); they are unaffected.
+- The ESP32 LoRa boards stay for STATUS telemetry (DEC-031 as amended 2026-09-23: RTCM over LoRa
+  is retired, so there is no RTCM fallback for them to carry); the Heltec's WiFi remains the
+  optional NTRIP client (DEC-032). They are unaffected by this decision. *(Corrected 2026-10-11,
+  MR-1: as filed on 2026-10-02 this line said they stayed for RTCM relay.)*
 
 ---
 

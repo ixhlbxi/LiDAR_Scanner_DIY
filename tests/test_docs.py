@@ -78,6 +78,13 @@ FORBIDDEN: list[tuple[str, str, str | None]] = [
         "RTCM over LoRa is retired (DEC-031 amended 2026-09-23)",
         r"(?i)retired|reserved|removal|not needed|amended|never|dead|S5-F1|CR-002",
     ),
+    (
+        # MR-1 (2026-10-11): DEC-045 as filed said the LoRa boards stay "for the RTCM
+        # fallback" and none of the patterns above matched that paraphrase.
+        r"(?i)\bRTCM fallback\b",
+        "there is no RTCM fallback over LoRa (DEC-031 amended 2026-09-23)",
+        r"(?i)retired|supersede|amended|never|no RTCM fallback",
+    ),
 ]
 
 FORBIDDEN_BY_FILE: dict[str, list[tuple[str, str]]] = {}
